@@ -103,7 +103,7 @@ struct MeetingWorkspaceWindowControllerTests {
     /// wait by well more than 10x when the main actor's serial executor is contended. Mirrors
     /// `MeetingWorkspaceViewModelTests.waitUntil(timeout:condition:)`'s same rationale.
     private func waitUntil(
-        timeout: Duration = .seconds(2),
+        timeout: Duration = .seconds(10),
         condition: () -> Bool
     ) async throws {
         let deadline = ContinuousClock.now + timeout
@@ -222,12 +222,19 @@ struct MeetingWorkspaceWindowControllerTests {
         controller.windowDidMove(Notification(name: NSWindow.didMoveNotification, object: window))
         try await waitUntil { appState.windowState(for: "session-move") != nil }
 
+        // The frame is read back and converted explicitly: `#expect` compares a `Double` against a
+        // `CGFloat` as *false* even when the two are bit-identical, so the conversion is load-bearing,
+        // not cosmetic. Compared against `window.frame` rather than the requested rect because the
+        // subject here is "the debounced save persists whatever frame the window has" -- the window
+        // server may have adjusted the request to fit the host screen
+        // (`.requiresUnconstrainedWindowGeometry`'s doc comment).
         let saved = try #require(appState.windowState(for: "session-move"))
+        let frame = window.frame
         #expect(saved.sessionId == "session-move")
-        #expect(saved.x == 42)
-        #expect(saved.y == 84)
-        #expect(saved.width == 640)
-        #expect(saved.height == 480)
+        #expect(saved.x == Double(frame.origin.x))
+        #expect(saved.y == Double(frame.origin.y))
+        #expect(saved.width == Double(frame.width))
+        #expect(saved.height == Double(frame.height))
         #expect(saved.visible == window.isVisible)
         #expect(saved.meetingPaneMode == .summary)
     }
@@ -269,8 +276,8 @@ struct MeetingWorkspaceWindowControllerTests {
         try await waitUntil { appState.windowState(for: "session-resize") != nil }
 
         let saved = try #require(appState.windowState(for: "session-resize"))
-        #expect(saved.width == 900)
-        #expect(saved.height == 700)
+        #expect(saved.width == Double(window.frame.width))
+        #expect(saved.height == Double(window.frame.height))
     }
 
     // MARK: - しまう: stow()/unstow() (`docs/design/18-recording-window-stow-and-compact.md` §3.2/§5.2/§7)
@@ -331,7 +338,7 @@ struct MeetingWorkspaceWindowControllerTests {
         #expect(appState.windowState(for: "session-stow-debounce") == nil)
     }
 
-    @Test("stow() while compact expands back to normal (applyWindowMode(.normal)) before ordering out (§3.2 step 0)")
+    @Test("stow() while compact expands back to normal (applyWindowMode(.normal)) before ordering out (§3.2 step 0)", .requiresUnconstrainedWindowGeometry)
     func stowWhileCompactExpandsToNormalFirst() async throws {
         let appState = AppState(directory: makeTempDirectory(prefix: "MeetingWorkspaceWindowControllerTests-state"))
         let controller = makeController(sessionId: "session-stow-while-compact", appState: appState)
@@ -468,7 +475,7 @@ struct MeetingWorkspaceWindowControllerTests {
 
     // MARK: - コンパクトモード: applyWindowMode (`docs/design/18-recording-window-stow-and-compact.md` §5.2/§7)
 
-    @Test("setting viewModel.windowMode = .compact then back to .normal restores the pre-compact frame")
+    @Test("setting viewModel.windowMode = .compact then back to .normal restores the pre-compact frame", .requiresUnconstrainedWindowGeometry)
     func compactThenNormalRestoresExpandedFrame() async throws {
         let appState = AppState(directory: makeTempDirectory(prefix: "MeetingWorkspaceWindowControllerTests-state"))
         let controller = makeController(sessionId: "session-compact-roundtrip", appState: appState)
