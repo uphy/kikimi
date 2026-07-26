@@ -41,6 +41,16 @@ struct ResolvedSpeakerLabel: Equatable {
     /// rather than the slot-derived pipeline. The rename popover uses this to route "割り当て解除" to
     /// the override (restoring the slot-derived label) instead of clearing the whole slot's name.
     var isSegmentOverride: Bool = false
+    /// The raw `spk_N` slot id(s) `SegmentAttribution.attribute(...)` resolved this segment to --
+    /// `[primary]` for `.single`, `[primary, secondary]` for `.mixed`, empty for `.unattributed`/
+    /// `.systemFallback`/an override with nothing underneath. `label` deliberately only carries
+    /// already-resolved display strings (never a raw slot id, see its own doc comment), but the
+    /// rename popover (`MeetingWorkspaceView`'s `TranscriptTabView` wiring) needs the id to submit a
+    /// rename against. Populated here so callers reuse `resolve(...)`'s own
+    /// `SegmentAttribution.attribute(...)` call instead of recomputing it a second time per row per
+    /// render -- a former CPU-pinning/UI-freeze source (`docs/design/13-speaker-diarization.md`
+    /// section 5).
+    var attributedSlots: [String] = []
 
     /// `.systemFallback` with no overlap marker -- the label every segment starts at before
     /// diarization has anything to say about it.
@@ -101,16 +111,21 @@ enum SpeakerLabelResolver {
         // stays orthogonal (design section 5.3) -- an override names the speaker, it does not assert
         // that no simultaneous speech occurred.
         if let override {
-            let hasOverlapMarker = withinActiveRange
-                ? SegmentAttribution.attribute(startMs: startMs, endMs: endMs, turns: turns).hasOverlapMarker
-                : false
+            // Computed once (not `nil` only when `withinActiveRange`, matching `hasOverlapMarker`'s
+            // existing gate) and reused for both `hasOverlapMarker` and `attributedSlots` below --
+            // `ResolvedSpeakerLabel.attributedSlots`'s doc comment explains why the caller needs this
+            // instead of recomputing `SegmentAttribution.attribute(...)` a second time per row.
+            let attribution = withinActiveRange
+                ? SegmentAttribution.attribute(startMs: startMs, endMs: endMs, turns: turns)
+                : nil
             let name = resolvedName(
                 displayName: override.displayName, globalSpeakerId: override.globalSpeakerId, speakerNames: speakerNames
             ) ?? override.displayName
             return ResolvedSpeakerLabel(
                 label: .named(name),
-                hasOverlapMarker: hasOverlapMarker,
-                isSegmentOverride: true
+                hasOverlapMarker: attribution?.hasOverlapMarker ?? false,
+                isSegmentOverride: true,
+                attributedSlots: attribution.map { attributedSlots(from: $0.label) } ?? []
             )
         }
 
@@ -132,7 +147,24 @@ enum SpeakerLabelResolver {
                 secondary: displayString(forSlot: secondary, assignments: assignments, speakerNames: speakerNames)
             )
         }
-        return ResolvedSpeakerLabel(label: label, hasOverlapMarker: attribution.hasOverlapMarker)
+        return ResolvedSpeakerLabel(
+            label: label,
+            hasOverlapMarker: attribution.hasOverlapMarker,
+            attributedSlots: attributedSlots(from: attribution.label)
+        )
+    }
+
+    /// The raw slot id(s) behind one `SegmentSpeakerLabel` (`ResolvedSpeakerLabel.attributedSlots`'s
+    /// doc comment), in the same primary-then-secondary order `label`'s own `.mixed` case uses.
+    private static func attributedSlots(from label: SegmentSpeakerLabel) -> [String] {
+        switch label {
+        case .unattributed:
+            return []
+        case .single(let slot):
+            return [slot]
+        case .mixed(let primary, let secondary):
+            return [primary, secondary]
+        }
     }
 
     /// `true` iff `[startMs, endMs)` overlaps at least one range in `activeRanges`. An open range

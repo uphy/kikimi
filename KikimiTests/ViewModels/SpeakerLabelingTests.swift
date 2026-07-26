@@ -357,6 +357,80 @@ struct SpeakerLabelResolverResolveTests {
         )
         #expect(result.label == .anonymous(slotNumber: 1))
     }
+
+    // MARK: - attributedSlots (rename-popover slot targets, `MeetingWorkspaceView`'s `renameTargets`)
+
+    @Test("attributedSlots is empty when nothing overlaps (.unattributed)")
+    func attributedSlotsEmptyWhenUnattributed() {
+        let result = SpeakerLabelResolver.resolve(
+            startMs: 0, endMs: 1_000,
+            turns: [],
+            activeRanges: fullRange,
+            assignments: SpeakerAssignments(),
+            confirmedAt: epoch,
+            now: epoch
+        )
+        #expect(result.attributedSlots == [])
+    }
+
+    @Test("attributedSlots carries the single dominant slot id, not just its display label")
+    func attributedSlotsCarriesSingleSlot() {
+        let result = SpeakerLabelResolver.resolve(
+            startMs: 0, endMs: 1_000,
+            turns: [DiarizationTurn(slot: "spk_2", startMs: 0, endMs: 1_000)],
+            activeRanges: fullRange,
+            assignments: SpeakerAssignments(),
+            confirmedAt: epoch,
+            now: epoch
+        )
+        #expect(result.attributedSlots == ["spk_2"])
+    }
+
+    @Test("attributedSlots carries both slot ids, primary first, for a .mixed segment")
+    func attributedSlotsCarriesMixedSlotsInOrder() {
+        let result = SpeakerLabelResolver.resolve(
+            startMs: 0, endMs: 1_000,
+            turns: [
+                DiarizationTurn(slot: "spk_1", startMs: 0, endMs: 1_000),
+                DiarizationTurn(slot: "spk_2", startMs: 0, endMs: 550)
+            ],
+            activeRanges: fullRange,
+            assignments: SpeakerAssignments(assignments: ["spk_1": SlotAssignment(displayName: "田中さん")]),
+            confirmedAt: epoch,
+            now: epoch
+        )
+        #expect(result.attributedSlots == ["spk_1", "spk_2"])
+    }
+
+    @Test("a per-segment override still carries the underlying slot-derived attributedSlots (rename popover can retarget the slot itself)")
+    func attributedSlotsSurvivesSegmentOverride() {
+        let result = SpeakerLabelResolver.resolve(
+            startMs: 0, endMs: 1_000,
+            turns: [DiarizationTurn(slot: "spk_1", startMs: 0, endMs: 1_000)],
+            activeRanges: fullRange,
+            assignments: SpeakerAssignments(),
+            override: SegmentSpeakerOverride(displayName: "佐藤さん"),
+            confirmedAt: epoch,
+            now: epoch
+        )
+        #expect(result.label == .named("佐藤さん"))
+        #expect(result.attributedSlots == ["spk_1"])
+    }
+
+    @Test("attributedSlots is empty for a per-segment override outside every active range")
+    func attributedSlotsEmptyForOverrideOutsideActiveRange() {
+        let result = SpeakerLabelResolver.resolve(
+            startMs: 0, endMs: 1_000,
+            turns: [DiarizationTurn(slot: "spk_1", startMs: 0, endMs: 1_000)],
+            activeRanges: [],
+            assignments: SpeakerAssignments(),
+            override: SegmentSpeakerOverride(displayName: "佐藤さん"),
+            confirmedAt: epoch,
+            now: epoch
+        )
+        #expect(result.label == .named("佐藤さん"))
+        #expect(result.attributedSlots == [])
+    }
 }
 
 @Suite("SpeakerLabelResolver.displayString/resolvedLabel")

@@ -3976,6 +3976,64 @@ struct MeetingWorkspaceViewModelTests {
         await viewModel.endMeeting()
     }
 
+    /// Regression test for the review finding that a `joins_next=true` merge widening the leader
+    /// row's `endMs` never re-ran `recomputeSpeakerLabels()`, leaving `speakerLabels[leaderId]
+    /// ?.attributedSlots` (the rename popup's target list, `MeetingWorkspaceView.swift`'s
+    /// `renameTargets`) stuck reflecting the narrower pre-merge range until some unrelated
+    /// diarization trigger (a new turn, a rename, the grace-period ticker) happened to fire next.
+    /// Here nothing else ever fires one: both rows are already resolved (`.mixed`, not
+    /// `.recognizing`), so `startDiarizationLabelTicker()`'s per-second tick is a no-op the whole
+    /// time. Without `applyRefinedUnit(_:)` recomputing labels itself, `attributedSlots` would stay
+    /// `["spk_1"]` forever after the merge instead of widening to also cover `spk_2`.
+    @Test("a joins_next=true merge on system rows immediately widens the leader's attributedSlots to cover the merged range, with no other diarization trigger")
+    func batchCompletedMergeImmediatelyWidensAttributedSlots() async throws {
+        let root = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = makeStore(root: root)
+        let created = try await store.createDraftSession()
+        let handle = try await store.openSession(created.id)
+
+        let capture = FakeAudioCapture()
+        let pipeline = FakeTranscriptPipeline()
+        let fakeLLM = FakeRefinementLLM()
+        let coordinator = FakeDiarizationCoordinator()
+        let viewModel = makeViewModel(
+            handle: handle, store: store, capture: capture, pipeline: pipeline,
+            diarizationCoordinatorFactory: { _ in coordinator },
+            refinementLLM: fakeLLM
+        )
+
+        await viewModel.startRecording()
+        let first = try await handle.appendTranscriptSegment(source: .system, startMs: 0, endMs: 500, text: "そうですね次のスプリントで", confidence: 0.9)
+        let second = try await handle.appendTranscriptSegment(source: .system, startMs: 500, endMs: 1_000, text: "対応します", confidence: 0.9)
+        pipeline.yield(first)
+        pipeline.yield(second)
+        try await waitUntil { await viewModel.transcriptRows.first(where: { $0.id == second.id })?.state == .refining }
+
+        // Two evenly split slots, one per pre-merge segment -- `secondSpeakerMixedThreshold` (0.3)
+        // makes a 50/50 split resolve to `.mixed`, so `attributedSlots` carries both ids once the
+        // leader's range widens to cover both turns.
+        await coordinator.emitTurn(DiarizationTurn(slot: "spk_1", startMs: 0, endMs: 500))
+        await coordinator.emitTurn(DiarizationTurn(slot: "spk_2", startMs: 500, endMs: 1_000))
+        try await waitUntil { await viewModel.speakerLabels[first.id]?.attributedSlots == ["spk_1"] }
+
+        await fakeLLM.setResponse(
+            """
+            {"segments":[
+              {"id":"\(first.id)","refined_text":"そうですね次のスプリントで","joins_next":true},
+              {"id":"\(second.id)","refined_text":"対応します。","joins_next":false}
+            ]}
+            """
+        )
+        await viewModel.refinementQueue?.flush()
+
+        try await waitUntil { await viewModel.transcriptRows.first(where: { $0.id == first.id })?.endMs == 1_000 }
+
+        try await waitUntil { await viewModel.speakerLabels[first.id]?.attributedSlots.sorted() == ["spk_1", "spk_2"] }
+
+        await viewModel.endMeeting()
+    }
+
     @Test("a refinement response missing the segment's id sets the matching row to .refinedFailed")
     func batchCompletedMissingIdSetsRefinedFailedState() async throws {
         let root = makeTemporaryDirectory()

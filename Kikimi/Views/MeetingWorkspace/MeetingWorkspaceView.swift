@@ -165,15 +165,16 @@ struct MeetingWorkspaceView: View {
     /// Wires the canonical `TranscriptTabView` (`Kikimi/Views/MeetingWorkspace/TranscriptTabView.swift`),
     /// which owns the bottom-anchor-based auto-follow scrolling and the empty-state placeholder.
     /// `speakerLabels`/`selfName`/`resolveSlot`/`onRenameSlot` wire `docs/design/13-speaker
-    /// -diarization.md` section 6.1's staged speaker label + rename popover: `resolveSlot` is
-    /// the one piece `ResolvedSpeakerLabel` deliberately doesn't carry (its `.named`/`.mixed`
-    /// cases hold only display strings, never the underlying `spk_N` id -- see
-    /// `SpeakerLabeling.swift`), so it's recomputed here from `viewModel.diarizationTurns`
-    /// (an `internal`, non-`@Published` property `MeetingWorkspaceViewModel` already exposes for
-    /// exactly this kind of read) via the same pure `SegmentAttribution.attribute` function
-    /// `MeetingWorkspaceViewModel+Diarization.swift`'s `SpeakerLabelResolver` itself delegates to,
-    /// so the resolved slot always matches what produced the label text on screen. Embedded by
-    /// `MeetingTabView` (`docs/design/17-session-window-redesign.md` §5.3), unchanged from the old standalone Transcript tab's wiring.
+    /// -diarization.md` section 6.1's staged speaker label + rename popover: `resolveSlot` reads
+    /// `viewModel.speakerLabels[row.id]?.attributedSlots` -- the raw `spk_N` id(s)
+    /// `SpeakerLabelResolver.resolve(...)` already derived while computing the label itself
+    /// (`ResolvedSpeakerLabel.attributedSlots`'s doc comment) -- rather than calling
+    /// `SegmentAttribution.attribute(...)` again here on every render. Doing that recomputation here
+    /// used to be part of a real CPU-pinning/UI-freeze bug: `viewModel.diarizationTurns` grows
+    /// unboundedly over a long recording, and this closure ran once per row on every SwiftUI body
+    /// re-evaluation (including scroll-triggered ones), not just when diarization data actually
+    /// changed. Embedded by `MeetingTabView` (`docs/design/17-session-window-redesign.md` §5.3),
+    /// unchanged from the old standalone Transcript tab's wiring.
     private var transcriptTabView: some View {
         TranscriptTabView(
             rows: viewModel.transcriptRows,
@@ -184,20 +185,7 @@ struct MeetingWorkspaceView: View {
             selfName: viewModel.appConfig.data.diarization.selfName,
             renameTargets: { row in
                 guard row.speaker == .system else { return [] }
-                let attribution = SegmentAttribution.attribute(
-                    startMs: row.startMs,
-                    endMs: row.endMs,
-                    turns: viewModel.diarizationTurns
-                )
-                let slots: [String]
-                switch attribution.label {
-                case .single(let slot):
-                    slots = [slot]
-                case .mixed(let primary, let secondary):
-                    slots = [primary, secondary]
-                case .unattributed:
-                    slots = []
-                }
+                let slots = viewModel.speakerLabels[row.id]?.attributedSlots ?? []
                 let assignments = viewModel.diarizationAssignments
                 return slots.map { slot in
                     let name = assignments.assignments[slot]?.displayName

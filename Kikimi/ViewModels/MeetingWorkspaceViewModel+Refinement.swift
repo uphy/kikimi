@@ -57,7 +57,7 @@ extension MeetingWorkspaceViewModel {
                 case .queued(let segmentIds):
                     self.applyRefiningState(toRowIds: segmentIds)
                 case .batchCompleted(let segments):
-                    self.applyRefinedResults(segments)
+                    await self.applyRefinedResults(segments)
                 case .disabled:
                     self.revertRefiningRowsToRaw()
                 }
@@ -71,9 +71,9 @@ extension MeetingWorkspaceViewModel {
         }
     }
 
-    private func applyRefinedResults(_ segments: [RefinedSegment]) {
+    private func applyRefinedResults(_ segments: [RefinedSegment]) async {
         for segment in segments {
-            applyRefinedUnit(segment)
+            await applyRefinedUnit(segment)
         }
     }
 
@@ -84,7 +84,16 @@ extension MeetingWorkspaceViewModel {
     /// (`docs/design/15-segment-playback.md`) plays back the whole merged span from a single
     /// recording index's WAV; every subsequent covered id becomes `.mergedInto(leaderId:)` and is
     /// otherwise left untouched (never independently rendered).
-    private func applyRefinedUnit(_ segment: RefinedSegment) {
+    ///
+    /// When a merge actually widens the leader row's `endMs` beyond what it was when
+    /// `speakerLabels[leaderId]` was last computed, that cached `ResolvedSpeakerLabel` (and its
+    /// `attributedSlots`, `MeetingWorkspaceView.swift`'s rename-popup source) still reflects the
+    /// narrower pre-merge range until some other diarization trigger (a new turn, a rename, the
+    /// grace-period ticker) happens to fire. Calling `recomputeSpeakerLabels()` here -- the same
+    /// pattern every other `endMs`/state-affecting trigger already follows (see that method's doc
+    /// comment) -- keeps the cache in sync with this widened range immediately instead of leaving it
+    /// stale in between.
+    private func applyRefinedUnit(_ segment: RefinedSegment) async {
         let leaderId = segment.sourceSegIds.first ?? segment.id
         let state: TranscriptRowState = segment.refinedText.map { .refined($0) } ?? .refinedFailed(segment.error ?? "")
         if let index = transcriptRows.firstIndex(where: { $0.id == leaderId }) {
@@ -94,6 +103,7 @@ extension MeetingWorkspaceViewModel {
         for coveredId in segment.sourceSegIds.dropFirst() {
             setTranscriptRowState(id: coveredId, state: .mergedInto(leaderId: leaderId))
         }
+        await recomputeSpeakerLabels()
     }
 
     private func revertRefiningRowsToRaw() {

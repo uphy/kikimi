@@ -93,17 +93,18 @@ enum SegmentAttribution {
     /// descending `overlapMs` (ties broken by `slot` for determinism); empty when nothing overlaps.
     static func computeOccupancies(startMs: Int, endMs: Int, turns: [DiarizationTurn]) -> [SlotOccupancy] {
         let trimmed = trimmedRange(startMs: startMs, endMs: endMs)
-        guard trimmed.end > trimmed.start else {
-            return []
-        }
+        let intervals = clippedIntervals(trimmedRange: trimmed, turns: turns)
+        return occupancies(from: intervals)
+    }
 
+    /// Shared by `computeOccupancies(startMs:endMs:turns:)` and `attribute(startMs:endMs:turns:)` --
+    /// both need the exact same per-slot sum, but `attribute` already has `clippedIntervals` computed
+    /// once for its other derivations and must not re-scan the (potentially large, ever-growing --
+    /// see `attribute`'s doc comment) `turns` array a second time just for this.
+    private static func occupancies(from intervals: [(slot: String, start: Int, end: Int)]) -> [SlotOccupancy] {
         var overlapBySlot: [String: Int] = [:]
-        for turn in turns {
-            let overlap = overlapMs(trimmed.start, trimmed.end, turn.startMs, turn.endMs)
-            guard overlap > 0 else {
-                continue
-            }
-            overlapBySlot[turn.slot, default: 0] += overlap
+        for interval in intervals {
+            overlapBySlot[interval.slot, default: 0] += interval.end - interval.start
         }
 
         return overlapBySlot
@@ -115,15 +116,23 @@ enum SegmentAttribution {
 
     /// Derives the full attribution for one segment (design section 5.3): the display label (rules
     /// 1-3, evaluated in order and mutually exclusive) plus the orthogonal `hasOverlapMarker`.
+    ///
+    /// Perf note (CPU-freeze fix, see `MeetingWorkspaceViewModel+Diarization.swift`'s
+    /// `recomputeSpeakerLabels()`): `turns` accumulates unboundedly for the whole recording and this
+    /// is called once per row on every new turn / grace-period tick, so this function computes
+    /// `clippedIntervals` (the only pass that actually scans the full `turns` array) exactly **once**
+    /// and reuses it for every derivation below, instead of the three independent full scans the
+    /// previous implementation did (one each for occupancies/union/overlap-marker).
     static func attribute(startMs: Int, endMs: Int, turns: [DiarizationTurn]) -> SegmentAttributionResult {
         let trimmed = trimmedRange(startMs: startMs, endMs: endMs)
-        let occupancies = computeOccupancies(startMs: startMs, endMs: endMs, turns: turns)
-        let hasOverlapMarker = computeHasOverlapMarker(trimmedRange: trimmed, turns: turns)
+        let intervals = clippedIntervals(trimmedRange: trimmed, turns: turns)
+        let occupancies = occupancies(from: intervals)
+        let hasOverlapMarker = computeHasOverlapMarker(rangeLength: trimmed.end - trimmed.start, intervals: intervals)
 
         // Denominator: total time within the trimmed range covered by *any* turn (a union, not a
         // sum -- summing would double-count time where multiple slots' turns overlap each other,
         // design section 5.2 "占有率の分母は「いずれかの turn と重複した時間の合計」").
-        let denominatorMs = unionOverlapMs(trimmedRange: trimmed, turns: turns)
+        let denominatorMs = unionOverlapMs(intervals: intervals)
 
         guard denominatorMs > 0, let primary = occupancies.first else {
             // Rule 1: nothing overlaps at all.
@@ -193,70 +202,105 @@ enum SegmentAttribution {
         }
     }
 
-    /// Total duration covered by the union of `clippedIntervals(...)`, ignoring which slot each
-    /// interval belongs to (i.e. overlapping turns from different slots are not double-counted).
-    private static func unionOverlapMs(trimmedRange: (start: Int, end: Int), turns: [DiarizationTurn]) -> Int {
-        let intervals = clippedIntervals(trimmedRange: trimmedRange, turns: turns).map { ($0.start, $0.end) }
+    /// Total duration covered by the union of `intervals` (already `clippedIntervals(...)`'s output),
+    /// ignoring which slot each interval belongs to (i.e. overlapping turns from different slots are
+    /// not double-counted). Takes the pre-clipped intervals rather than `turns` directly -- see
+    /// `attribute(startMs:endMs:turns:)`'s perf note.
+    private static func unionOverlapMs(intervals: [(slot: String, start: Int, end: Int)]) -> Int {
         guard !intervals.isEmpty else {
             return 0
         }
-        let sorted = intervals.sorted { $0.0 < $1.0 }
+        let sorted = intervals.sorted { $0.start < $1.start }
         var total = 0
-        var currentStart = sorted[0].0
-        var currentEnd = sorted[0].1
+        var currentStart = sorted[0].start
+        var currentEnd = sorted[0].end
         for interval in sorted.dropFirst() {
-            if interval.0 > currentEnd {
+            if interval.start > currentEnd {
                 total += currentEnd - currentStart
-                currentStart = interval.0
-                currentEnd = interval.1
+                currentStart = interval.start
+                currentEnd = interval.end
             } else {
-                currentEnd = max(currentEnd, interval.1)
+                currentEnd = max(currentEnd, interval.end)
             }
         }
         total += currentEnd - currentStart
         return total
     }
 
-    /// `true` once the fraction of the trimmed range covered by two-or-more *distinct* slots'
-    /// turns simultaneously reaches `AttributionTuning.overlapMarkerThreshold`. Uses a breakpoint
-    /// sweep (turn count per segment is tiny, so this stays simple rather than a proper interval
-    /// tree) so that a same-slot turn touching itself never counts as an overlap.
-    private static func computeHasOverlapMarker(trimmedRange: (start: Int, end: Int), turns: [DiarizationTurn]) -> Bool {
-        let rangeLength = trimmedRange.end - trimmedRange.start
-        guard rangeLength > 0 else {
-            return false
-        }
-        let intervals = clippedIntervals(trimmedRange: trimmedRange, turns: turns)
-        guard intervals.count >= 2 else {
+    /// One coordinate-sweep event: a slot's turn starting or ending at `position` (half-open
+    /// `[start, end)`, matching `overlapMs`'s "touching boundaries never count as overlap"
+    /// convention -- see `OverlapSweepEventKind`'s ordering below). File-scope (not nested inside
+    /// `SegmentAttribution`) solely to keep `OverlapSweepEventKind` from nesting two levels deep,
+    /// which SwiftLint's `nesting` rule flags.
+    private struct OverlapSweepEvent {
+        let position: Int
+        let kind: OverlapSweepEventKind
+        let slot: String
+    }
+
+    /// `.end` sorts before `.start` at the same `position` so a turn ending exactly where another
+    /// begins is never briefly counted as both active at once (the half-open boundary convention
+    /// every other helper in this file already assumes).
+    private enum OverlapSweepEventKind: Int {
+        case end = 0
+        case start = 1
+    }
+
+    /// `true` once the fraction of the trimmed range covered by two-or-more *distinct* slots' turns
+    /// simultaneously reaches `AttributionTuning.overlapMarkerThreshold`.
+    ///
+    /// A single coordinate-compression sweep over `intervals`' start/end events, `O(M log M)` for
+    /// `M = intervals.count`: previously this re-filtered the *entire* `intervals` list once per
+    /// breakpoint (`O(M^2)`), which -- combined with `turns` accumulating unboundedly for the whole
+    /// recording and this whole function being re-invoked every second by the diarization label
+    /// ticker (`MeetingWorkspaceViewModel+Diarization.swift`'s `startDiarizationLabelTicker()`) -- was
+    /// the dominant driver of a real CPU-pinning/UI-freeze bug in long meetings. Per-slot *turn
+    /// counts* (not just an active/inactive flag) are tracked so several overlapping turns from the
+    /// *same* slot never toggle `distinctActiveSlots` more than once.
+    private static func computeHasOverlapMarker(rangeLength: Int, intervals: [(slot: String, start: Int, end: Int)]) -> Bool {
+        guard rangeLength > 0, intervals.count >= 2 else {
             return false
         }
 
-        var boundaries = Set<Int>()
+        var events: [OverlapSweepEvent] = []
+        events.reserveCapacity(intervals.count * 2)
         for interval in intervals {
-            boundaries.insert(interval.start)
-            boundaries.insert(interval.end)
+            events.append(OverlapSweepEvent(position: interval.start, kind: .start, slot: interval.slot))
+            events.append(OverlapSweepEvent(position: interval.end, kind: .end, slot: interval.slot))
         }
-        let sortedBoundaries = boundaries.sorted()
-        guard sortedBoundaries.count >= 2 else {
-            return false
+        events.sort { lhs, rhs in
+            lhs.position != rhs.position ? lhs.position < rhs.position : lhs.kind.rawValue < rhs.kind.rawValue
         }
 
+        var activeTurnCountBySlot: [String: Int] = [:]
+        var distinctActiveSlots = 0
         var multiSlotMs = 0
-        for index in 0..<(sortedBoundaries.count - 1) {
-            let segmentStart = sortedBoundaries[index]
-            let segmentEnd = sortedBoundaries[index + 1]
-            guard segmentEnd > segmentStart else {
-                continue
+        var previousPosition = events[0].position
+        var index = 0
+        while index < events.count {
+            let position = events[index].position
+            if distinctActiveSlots >= 2, position > previousPosition {
+                multiSlotMs += position - previousPosition
             }
-            let midpoint = segmentStart + (segmentEnd - segmentStart) / 2
-            let activeSlots = Set(
-                intervals
-                    .filter { $0.start <= midpoint && midpoint < $0.end }
-                    .map(\.slot)
-            )
-            if activeSlots.count >= 2 {
-                multiSlotMs += segmentEnd - segmentStart
+            while index < events.count, events[index].position == position {
+                let event = events[index]
+                switch event.kind {
+                case .start:
+                    let updatedCount = (activeTurnCountBySlot[event.slot] ?? 0) + 1
+                    activeTurnCountBySlot[event.slot] = updatedCount
+                    if updatedCount == 1 {
+                        distinctActiveSlots += 1
+                    }
+                case .end:
+                    let updatedCount = (activeTurnCountBySlot[event.slot] ?? 0) - 1
+                    activeTurnCountBySlot[event.slot] = updatedCount
+                    if updatedCount == 0 {
+                        distinctActiveSlots -= 1
+                    }
+                }
+                index += 1
             }
+            previousPosition = position
         }
 
         return Double(multiSlotMs) / Double(rangeLength) >= AttributionTuning.overlapMarkerThreshold
