@@ -50,6 +50,16 @@ struct AudioCaptureIntegrationTests {
             .appendingPathComponent("AudioCaptureIntegrationTests-session-\(UUID().uuidString)", isDirectory: true)
     }
 
+    /// Polls until the delegate has observed `didStop`, which `AudioCapture` delivers on its own
+    /// `eventQueue` rather than synchronously from `stop()`. The timeout is a hang guard only.
+    private func waitUntilDelegateStopped(_ delegate: RecordingDelegate, timeout: Duration = .seconds(10)) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if delegate.didStopCallCount >= 1 { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
     /// Reads the 4-byte little-endian `data` chunk size (bytes 40..<44), independent of
     /// `WavHeader`/`WavFileWriter`, to verify what actually landed on disk.
     private func readDataChunkSize(at url: URL) throws -> UInt32 {
@@ -103,6 +113,10 @@ struct AudioCaptureIntegrationTests {
 
         #expect(delegate.capturedSources.contains(.mic))
         #expect(delegate.capturedSources.contains(.system))
+        // `didStop` is dispatched onto `AudioCapture`'s own `eventQueue`, so it is not necessarily
+        // delivered by the time `stop()` returns -- asserting it immediately raced that hop and lost
+        // whenever the machine was busy (observed both under heavy local load and on CI).
+        try await waitUntilDelegateStopped(delegate)
         #expect(delegate.didStopCallCount == 1)
         #expect(delegate.degradedSources.isEmpty)
 

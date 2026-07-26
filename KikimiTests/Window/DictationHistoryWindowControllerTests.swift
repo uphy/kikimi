@@ -38,9 +38,12 @@ struct DictationHistoryWindowControllerTests {
 
     /// Polls `condition` until it becomes `true` or `timeout` elapses, matching
     /// `MeetingWorkspaceWindowControllerTests.waitUntil`'s own rationale (a fixed sleep proved
-    /// flaky under contended CI/parallel-test load).
+    /// flaky under contended CI/parallel-test load). The timeout is only a hang guard, so it is
+    /// deliberately far longer than any debounce interval these tests configure: the debounced save
+    /// hops through the main queue, and on a loaded CI runner sharing few cores with 1,900 other
+    /// tests, that hop alone overran the previous 2s ceiling.
     private func waitUntil(
-        timeout: Duration = .seconds(2),
+        timeout: Duration = .seconds(10),
         condition: () -> Bool
     ) async throws {
         let deadline = ContinuousClock.now + timeout
@@ -53,7 +56,7 @@ struct DictationHistoryWindowControllerTests {
 
     // MARK: - init frame restoration (section 6.1)
 
-    @Test("init restores the saved frame from AppState as-is when it already meets the view's 640x420 minimum")
+    @Test("init restores the saved frame from AppState as-is when it already meets the view's 640x420 minimum", .requiresUnconstrainedWindowGeometry)
     func initRestoresSavedFrameAboveMinimum() throws {
         let appState = makeAppState()
         appState.updateDictationHistoryWindow { state in
@@ -73,7 +76,7 @@ struct DictationHistoryWindowControllerTests {
         #expect(window.frame.height == 600)
     }
 
-    @Test("init clamps width/height up to the 640x420 minimum when the saved state is smaller, leaving the saved origin untouched")
+    @Test("init clamps width/height up to the 640x420 minimum when the saved state is smaller, leaving the saved origin untouched", .requiresUnconstrainedWindowGeometry)
     func initClampsUndersizedSavedFrameToMinimum() throws {
         let appState = makeAppState()
         appState.updateDictationHistoryWindow { state in
@@ -92,7 +95,7 @@ struct DictationHistoryWindowControllerTests {
         #expect(window.frame.height == 420)
     }
 
-    @Test("init falls back to FloatingWindowState.default's origin, clamped to the 640x420 minimum, when there is no saved state")
+    @Test("init falls back to FloatingWindowState.default's origin, clamped to the 640x420 minimum, when there is no saved state", .requiresUnconstrainedWindowGeometry)
     func initFallsBackToDefaultClampedToMinimum() throws {
         let appState = makeAppState()
 
@@ -132,11 +135,18 @@ struct DictationHistoryWindowControllerTests {
         controller.windowDidMove(Notification(name: NSWindow.didMoveNotification, object: window))
         try await waitUntil { appState.data.dictationHistoryWindow.x == 42 }
 
+        // The frame is read back and converted explicitly: `#expect` compares a `Double` against a
+        // `CGFloat` as *false* even when the two are bit-identical, so the conversion is load-bearing,
+        // not cosmetic. Compared against `window.frame` rather than the requested rect because the
+        // subject here is "the debounced save persists whatever frame the window has" -- the window
+        // server may have adjusted the request to fit the host screen
+        // (`.requiresUnconstrainedWindowGeometry`'s doc comment).
         let saved = appState.data.dictationHistoryWindow
-        #expect(saved.x == 42)
-        #expect(saved.y == 84)
-        #expect(saved.width == 700)
-        #expect(saved.height == 500)
+        let frame = window.frame
+        #expect(saved.x == Double(frame.origin.x))
+        #expect(saved.y == Double(frame.origin.y))
+        #expect(saved.width == Double(frame.width))
+        #expect(saved.height == Double(frame.height))
     }
 
     @Test("windowDidResize persists the window frame the same way windowDidMove does")
@@ -152,8 +162,8 @@ struct DictationHistoryWindowControllerTests {
         try await waitUntil { appState.data.dictationHistoryWindow.width == 900 }
 
         let saved = appState.data.dictationHistoryWindow
-        #expect(saved.width == 900)
-        #expect(saved.height == 700)
+        #expect(saved.width == Double(window.frame.width))
+        #expect(saved.height == Double(window.frame.height))
     }
 
     @Test("rapid successive windowDidMove calls coalesce into a single AppState write, not one per event")

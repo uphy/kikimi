@@ -221,7 +221,10 @@ struct RefinementQueueTests {
             await queue.drain()
         }
 
-        #expect(elapsed < .milliseconds(1_000), "should not have waited anywhere near the 5s timeout")
+        // Bounded at half the configured 5s timeout, not at a tight 1s: the claim under test is
+        // "this did not wait out the timeout", and a busy machine can add most of a second of pure
+        // scheduling delay to the same non-waiting path (observed at 1.0-2.2s under load).
+        #expect(elapsed < .milliseconds(2_500), "should not have waited anywhere near the 5s timeout")
         let refined = try await handle.readRefinedSegments()
         #expect(refined.count == 3)
     }
@@ -261,7 +264,7 @@ struct RefinementQueueTests {
             await queue.drain()
         }
 
-        #expect(elapsed < .milliseconds(1_000), "flush() must not wait for the 5s timeout")
+        #expect(elapsed < .milliseconds(2_500), "flush() must not wait for the 5s timeout")
         let refined = try await handle.readRefinedSegments()
         #expect(refined.count == 2)
     }
