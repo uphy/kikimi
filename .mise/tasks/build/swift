@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 #MISE description="Swift ビルド"
-#MISE depends=["lint-fix"]
+#MISE depends=["lint"]
 #MISE sources=["Kikimi/**/*.swift", "Package.swift"]
+#MISE outputs=[".build/release/Kikimi"]
 set -euo pipefail
+
+# `lint` (read-only) instead of `lint-fix`: a build must never rewrite sources. `swiftlint --fix`
+# during the release build would silently mutate the checkout and hide violations that never get
+# committed. Run `mise run lint-fix` explicitly when you want the autocorrections applied.
 
 swift build -c release

@@ -68,6 +68,15 @@ Command Line Tools のみのため、**実際のビルド経路は `xcodebuild` 
 - `mise run lint` / `mise run lint-fix` — SwiftLint
 - `mise run verify-smoke` — `kikimi-verify` のスモークテスト
 
+### 配布ビルド（`KIKIMI_RELEASE_BUILD=1`）
+
+`mise run build` は 2 つのレイアウトを持つ。ローカルは `.app` を署名し（TCC のため）、
+`KIKIMI_RELEASE_BUILD=1` の配布ビルドは署名せず SwiftPM のリソースバンドルを `.app` ルートに置く。
+**この 2 つは両立しない**: SwiftPM が生成する `Bundle.module` アクセサはアプリバンドルの場合ルート直下しか
+見ないが、`codesign` はルート直下に `Contents` 以外を置くと "unsealed contents present in the bundle root"
+で失敗する。理由は `.mise/tasks/build/_default` の "Resource bundles" コメントに詳しく書いてある。
+配布ビルドは `.github/workflows/release.yml` からのみ呼ばれる。
+
 ### コード署名と TCC 権限
 
 **`mise run signing-identity` を一度実行しないと、ビルドのたびにマイク・画面収録の許可が失効する。**
