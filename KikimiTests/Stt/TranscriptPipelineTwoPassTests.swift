@@ -172,6 +172,23 @@ struct TranscriptPipelineTwoPassTests {
     /// already clears MT4's eligibility gate.
     private static let chunkSampleCount = 4_800
 
+    /// Polls `predicate` until it holds (or `timeout` expires), mirroring the same helper in
+    /// `DictationControllerTwoPassTests.swift`. Every wait below goes through this rather than a
+    /// fixed `Task.sleep`: the pipeline's batch-decoder acquire and each window's confirm are
+    /// concurrent with the test body, so a fixed interval that is comfortable on an idle machine
+    /// silently loses the race under the suite's parallel load -- and the failure is not a timeout
+    /// but a *wrong expectation*, since a window confirmed before the decoder lands falls back to
+    /// streaming text instead of being re-decoded.
+    private func waitUntil(timeout: Duration = .seconds(5), predicate: @escaping () async -> Bool) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if await predicate() { return }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let finalResult = await predicate()
+        #expect(finalResult, "condition did not become true within \(timeout)")
+    }
+
     // MARK: - Batch success
 
     @Test("a successful batch re-decode appends the batch text with stt_source \"batch\"")
@@ -184,8 +201,9 @@ struct TranscriptPipelineTwoPassTests {
             batchDecoderAcquire: { _ in TranscriptPipeline.AcquiredBatchDecoder(decoder: fakeDecoder, release: {}) }
         )
         try await pipeline.prepare()
-        // Let the (immediately-resolving) fake acquire land before the window is confirmed.
-        try await Task.sleep(for: .milliseconds(50))
+        // The (immediately-resolving) fake acquire must land before the window is confirmed, or the
+        // window falls back to streaming text and the "batch" expectations below fail.
+        try await waitUntil { pipeline.hasAcquiredBatchDecoder }
 
         let dummyCapture = AudioCapture(sessionDirectory: makeTempSessionDirectory())
         pipeline.audioCapture(dummyCapture, didCapture: try makeMonoFloatBuffer(frameCount: AVAudioFrameCount(Self.chunkSampleCount)), source: .mic, elapsed: 0.0)
@@ -236,7 +254,10 @@ struct TranscriptPipelineTwoPassTests {
             batchDecoderAcquire: { _ in TranscriptPipeline.AcquiredBatchDecoder(decoder: fakeDecoder, release: {}) }
         )
         try await pipeline.prepare()
-        try await Task.sleep(for: .milliseconds(50))
+        // The decoder has to be in place for the window to reach `transcribe()` at all -- otherwise
+        // this test would pass for the wrong reason (fallback because nothing was acquired, rather
+        // than fallback because `transcribe()` threw), which the call-count expectation below catches.
+        try await waitUntil { pipeline.hasAcquiredBatchDecoder }
 
         let dummyCapture = AudioCapture(sessionDirectory: makeTempSessionDirectory())
         pipeline.audioCapture(dummyCapture, didCapture: try makeMonoFloatBuffer(frameCount: AVAudioFrameCount(Self.chunkSampleCount)), source: .mic, elapsed: 0.0)
@@ -279,17 +300,23 @@ struct TranscriptPipelineTwoPassTests {
             pipeline.audioCapture(dummyCapture, didCapture: try makeMonoFloatBuffer(frameCount: AVAudioFrameCount(Self.chunkSampleCount)), source: .mic, elapsed: elapsed)
         }
 
+        // Each stage waits on the *observable effect* of the previous one rather than a fixed sleep:
+        // the whole point of this test is which mode each window was decoded in, so a stage that
+        // starts early does not fail loudly -- it silently re-decodes window 1 through the batch path
+        // and the expectations below compare the wrong texts. (That is exactly how this test flaked
+        // under parallel load: 50ms was not always enough for window 1 to confirm before the gate
+        // opened.)
         try feed(elapsed: 0.0)
         try feed(elapsed: 1.0)
-        // Window 1 confirms here (decoder not yet acquired -- fallback).
-        try await Task.sleep(for: .milliseconds(50))
+        // Window 1 confirms here (decoder not yet acquired -- fallback), appending "あ。" and "い".
+        try await waitUntil { (try? await sessionHandle.readTranscriptSegments().count) == 2 }
 
         await acquireGate.open()
-        try await Task.sleep(for: .milliseconds(50))
+        try await waitUntil { pipeline.hasAcquiredBatchDecoder }
 
         try feed(elapsed: 2.0)
-        // Window 2 confirms here (decoder now available and succeeding -- batch).
-        try await Task.sleep(for: .milliseconds(50))
+        // Window 2 confirms here (decoder now available and succeeding -- batch), appending "バッチ2".
+        try await waitUntil { (try? await sessionHandle.readTranscriptSegments().count) == 3 }
 
         await fakeDecoder.setOutcome(.fail)
         try feed(elapsed: 3.0)
@@ -316,7 +343,7 @@ struct TranscriptPipelineTwoPassTests {
             batchDecoderAcquire: { _ in TranscriptPipeline.AcquiredBatchDecoder(decoder: fakeDecoder, release: {}) }
         )
         try await pipeline.prepare()
-        try await Task.sleep(for: .milliseconds(50))
+        try await waitUntil { pipeline.hasAcquiredBatchDecoder }
 
         let dummyCapture = AudioCapture(sessionDirectory: makeTempSessionDirectory())
         let frameCount = AVAudioFrameCount(Self.chunkSampleCount)
@@ -355,7 +382,7 @@ struct TranscriptPipelineTwoPassTests {
             batchDecoderAcquire: { _ in TranscriptPipeline.AcquiredBatchDecoder(decoder: fakeDecoder, release: {}) }
         )
         try await pipeline.prepare()
-        try await Task.sleep(for: .milliseconds(50))
+        try await waitUntil { pipeline.hasAcquiredBatchDecoder }
 
         let dummyCapture = AudioCapture(sessionDirectory: makeTempSessionDirectory())
         pipeline.audioCapture(dummyCapture, didCapture: try makeMonoFloatBuffer(frameCount: AVAudioFrameCount(Self.chunkSampleCount)), source: .mic, elapsed: 0.0)
@@ -364,8 +391,10 @@ struct TranscriptPipelineTwoPassTests {
         // residual confirms it and cuts the only window, which must go through the gated redecode.
         let stopTask = Task { await pipeline.stopAndDrain() }
 
-        // Give stopAndDrain a moment to actually reach the gated transcribe() call before opening it.
-        try await Task.sleep(for: .milliseconds(100))
+        // `stopAndDrain()` has to actually be blocked inside the gated `transcribe()` before the gate
+        // opens, otherwise this proves nothing about waiting for an in-flight redecode. The call
+        // count is incremented before the gate is awaited, so it marks exactly that moment.
+        try await waitUntil { await fakeDecoder.transcribeCallCount == 1 }
         await delayGate.open()
         await stopTask.value
 
@@ -392,11 +421,19 @@ struct TranscriptPipelineTwoPassTests {
             }
         )
         try await pipeline.prepare()
-        try await Task.sleep(for: .milliseconds(50))
+        // Nothing is released unless something was acquired first, so wait for the acquire to land
+        // rather than assuming it beat this line.
+        try await waitUntil { pipeline.hasAcquiredBatchDecoder }
 
         await pipeline.stopAndDrain()
-        try await Task.sleep(for: .milliseconds(50))
 
+        // `release` hops through a `Task` of its own, so it is not necessarily visible the instant
+        // `stopAndDrain()` returns -- wait for it instead of sleeping a fixed interval and hoping.
+        // The settle sleep afterwards is the *other* half of "exactly once": it gives a second,
+        // erroneous release time to land. Unlike the wait it can only make this test stricter, never
+        // flakier, since a longer pause cannot hide an extra increment.
+        try await waitUntil { await releaseCounter.count >= 1 }
+        try await Task.sleep(for: .milliseconds(50))
         #expect(await releaseCounter.count == 1)
     }
 }

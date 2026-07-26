@@ -211,6 +211,11 @@ final class MeetingWorkspaceViewModel: ObservableObject {
     /// `MeetingWorkspaceViewModel+Recording.swift`'s `endMeeting()` calls this once, right after
     /// `watcherRunner.run(trigger: .onSessionEnd)`.
     let wikiExporter: WikiExporting
+    /// The wall clock every `recordingButtonState` elapsed-time derivation reads (see
+    /// `+RecordingInternals.swift`'s `cumulativeElapsedSeconds(for:now:)`). Injectable so tests are
+    /// not at the mercy of real time: `== .recording(elapsedSeconds: 0)` assertions used to flake
+    /// whenever parallel test load pushed a second between segment start and the assertion.
+    let now: @Sendable () -> Date
     /// `internal` (not `private`) so `MeetingWorkspaceViewModel+Prep.swift` — split out to keep this
     /// file under the project's `file_length` lint limit — can log through the same logger instance.
     let logger = Logger(subsystem: "io.github.uphy.Kikimi", category: "MeetingWorkspaceViewModel")
@@ -375,7 +380,8 @@ final class MeetingWorkspaceViewModel: ObservableObject {
         overrideEnrollmentExtractorFactory: @escaping OverrideEnrollmentExtractorFactory = MeetingWorkspaceViewModel.defaultOverrideEnrollmentExtractorFactory,
         watcherLibrary: WatcherLibrary = MeetingWorkspaceViewModel.defaultWatcherLibrary(),
         watcherRunnerFactory: @escaping WatcherRunnerFactory = MeetingWorkspaceViewModel.defaultWatcherRunnerFactory,
-        wikiExporter: WikiExporting = MeetingWorkspaceViewModel.defaultWikiExporter()
+        wikiExporter: WikiExporting = MeetingWorkspaceViewModel.defaultWikiExporter(),
+        now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.sessionHandle = sessionHandle
         self.sessionStore = sessionStore
@@ -393,6 +399,7 @@ final class MeetingWorkspaceViewModel: ObservableObject {
         self.watcherLibrary = watcherLibrary
         self.watcherRunner = watcherRunnerFactory(sessionHandle)
         self.wikiExporter = wikiExporter
+        self.now = now
         self.sessionId = sessionHandle.sessionId
         self.meta = Self.placeholderMeta(sessionId: sessionHandle.sessionId)
 
@@ -554,7 +561,7 @@ final class MeetingWorkspaceViewModel: ObservableObject {
         contextText = await sessionHandle.readContext()
         summaryTemplateText = await sessionHandle.readSummaryTemplate()
         if recordingButtonState == .startRecording {
-            recordingButtonState = Self.initialRecordingButtonState(for: loadedMeta)
+            recordingButtonState = Self.initialRecordingButtonState(for: loadedMeta, now: now())
         }
         hydrateAudioInputSelectionIfStillDefault()
 
@@ -568,27 +575,11 @@ final class MeetingWorkspaceViewModel: ObservableObject {
         }
     }
 
-    /// Derives the `recordingButtonState` a freshly-hydrated `meta.state` implies. `.recording` is
-    /// not expected in ordinary operation (a session left `.recording` across an app relaunch is
-    /// instead resolved by `SessionStore.finalizeCrashedSession(_:)` — to `.paused`, not `.ended` —
-    /// before any workspace window reopens it, `07-session-store.md` section 10), but is handled
-    /// defensively rather than assumed impossible.
-    private static func initialRecordingButtonState(for meta: SessionMeta) -> RecordingButtonState {
-        switch meta.state {
-        case .draft:
-            return .startRecording
-        case .recording:
-            return .recording(elapsedSeconds: Self.cumulativeElapsedSeconds(for: meta))
-        case .paused:
-            return .paused(elapsedSeconds: Self.cumulativeElapsedSeconds(for: meta))
-        case .ended:
-            return .ended
-        }
-    }
 }
 
-// `cumulativeElapsedSeconds(for:now:)` moved to `+RecordingInternals.swift` to keep this file under
-// the project's `file_length` lint limit (a `static func`, so any extension file can host it).
+// `cumulativeElapsedSeconds(for:now:)` and `initialRecordingButtonState(for:now:)` moved to
+// `+RecordingInternals.swift` to keep this file under the project's `file_length` lint limit
+// (both `static func`s, so any extension file can host them).
 
 // Split out to keep this file under the project's `file_length` lint limit:
 // `+Recording.swift` (recording-segment state machine + `flushSessionHandle()`), `+RecordingInternals.swift`

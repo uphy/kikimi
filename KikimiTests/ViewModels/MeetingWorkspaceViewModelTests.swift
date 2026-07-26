@@ -495,9 +495,20 @@ struct MeetingWorkspaceViewModelTests {
         refinementLLM: LLMCompleting = FakeSummaryLLM(),
         refinementConfig: RefinementConfig = RefinementConfig(model: "test-model", batchSize: 1_000, batchTimeoutMs: 60_000, contextSegments: 3, contextRefreshBatches: 10),
         refinementQueueFactory: MeetingWorkspaceViewModel.RefinementQueueFactory? = nil,
-        wikiExporter: WikiExporting = FakeWikiExporter()
+        wikiExporter: WikiExporting = FakeWikiExporter(),
+        now: (@Sendable () -> Date)? = nil
     ) -> MeetingWorkspaceViewModel {
-        MeetingWorkspaceViewModel(
+        // Frozen here, before any recording segment exists, so every `recordingButtonState` elapsed
+        // -time derivation (`MeetingWorkspaceViewModel+RecordingInternals.swift`'s
+        // `cumulativeElapsedSeconds(for:now:)`) is deterministic: a segment opened after this instant
+        // is always "0 seconds in" no matter how much real time the suite's parallel load actually
+        // burns between the two. Reading the real clock instead made every
+        // `== .recording(elapsedSeconds: 0)` assertion below flaky, failing with `1` whenever a run
+        // happened to cross a second boundary. Tests that want a *non*-zero elapsed time pass their
+        // own `now`; the arithmetic itself is covered directly by the
+        // `cumulativeElapsedSeconds`/`initialRecordingButtonState` tests, which feed it explicit dates.
+        let frozenNow = Date()
+        return MeetingWorkspaceViewModel(
             sessionHandle: handle,
             sessionStore: store,
             audioCaptureFactory: { _, _, _ in capture },
@@ -515,7 +526,8 @@ struct MeetingWorkspaceViewModelTests {
             voiceprintStore: voiceprintStore,
             voiceprintWavFallbackExtractorFactory: voiceprintWavFallbackExtractorFactory,
             overrideEnrollmentExtractorFactory: overrideEnrollmentExtractorFactory,
-            wikiExporter: wikiExporter
+            wikiExporter: wikiExporter,
+            now: now ?? { frozenNow }
         )
     }
 
@@ -869,11 +881,18 @@ struct MeetingWorkspaceViewModelTests {
         await viewModel.startRecording()
         await viewModel.pauseRecording()
 
-        #expect(viewModel.recordingButtonState == .paused(elapsedSeconds: 0))
         #expect(capture.stopCallCount == 1)
         #expect(pipeline.stopAndDrainCallCount == 1)
 
         let refreshedMeta = await handle.meta
+        // A paused session's `elapsedSeconds` comes from the closed segment's persisted
+        // `meta.durationMs`, which `SessionStore.pauseRecording(_:)` derives from real wall-clock
+        // time -- unlike the `.recording` cases above, `makeViewModel`'s frozen clock cannot pin it,
+        // and asserting a literal `0` flaked whenever the suite's parallel load pushed this test past
+        // a second boundary. Assert it mirrors the duration actually written to disk instead; the
+        // seconds arithmetic itself is covered deterministically by
+        // `MeetingWorkspaceViewModelElapsedTimeTests`.
+        #expect(viewModel.recordingButtonState == .paused(elapsedSeconds: refreshedMeta.durationMs / 1_000))
         #expect(refreshedMeta.state == .paused)
         #expect(refreshedMeta.recordings.count == 1)
         #expect(refreshedMeta.recordings[0].endedAt != nil)
@@ -3976,6 +3995,64 @@ struct MeetingWorkspaceViewModelTests {
         await viewModel.endMeeting()
     }
 
+    /// Regression test for the review finding that a `joins_next=true` merge widening the leader
+    /// row's `endMs` never re-ran `recomputeSpeakerLabels()`, leaving `speakerLabels[leaderId]
+    /// ?.attributedSlots` (the rename popup's target list, `MeetingWorkspaceView.swift`'s
+    /// `renameTargets`) stuck reflecting the narrower pre-merge range until some unrelated
+    /// diarization trigger (a new turn, a rename, the grace-period ticker) happened to fire next.
+    /// Here nothing else ever fires one: both rows are already resolved (`.mixed`, not
+    /// `.recognizing`), so `startDiarizationLabelTicker()`'s per-second tick is a no-op the whole
+    /// time. Without `applyRefinedUnit(_:)` recomputing labels itself, `attributedSlots` would stay
+    /// `["spk_1"]` forever after the merge instead of widening to also cover `spk_2`.
+    @Test("a joins_next=true merge on system rows immediately widens the leader's attributedSlots to cover the merged range, with no other diarization trigger")
+    func batchCompletedMergeImmediatelyWidensAttributedSlots() async throws {
+        let root = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = makeStore(root: root)
+        let created = try await store.createDraftSession()
+        let handle = try await store.openSession(created.id)
+
+        let capture = FakeAudioCapture()
+        let pipeline = FakeTranscriptPipeline()
+        let fakeLLM = FakeRefinementLLM()
+        let coordinator = FakeDiarizationCoordinator()
+        let viewModel = makeViewModel(
+            handle: handle, store: store, capture: capture, pipeline: pipeline,
+            diarizationCoordinatorFactory: { _ in coordinator },
+            refinementLLM: fakeLLM
+        )
+
+        await viewModel.startRecording()
+        let first = try await handle.appendTranscriptSegment(source: .system, startMs: 0, endMs: 500, text: "そうですね次のスプリントで", confidence: 0.9)
+        let second = try await handle.appendTranscriptSegment(source: .system, startMs: 500, endMs: 1_000, text: "対応します", confidence: 0.9)
+        pipeline.yield(first)
+        pipeline.yield(second)
+        try await waitUntil { await viewModel.transcriptRows.first(where: { $0.id == second.id })?.state == .refining }
+
+        // Two evenly split slots, one per pre-merge segment -- `secondSpeakerMixedThreshold` (0.3)
+        // makes a 50/50 split resolve to `.mixed`, so `attributedSlots` carries both ids once the
+        // leader's range widens to cover both turns.
+        await coordinator.emitTurn(DiarizationTurn(slot: "spk_1", startMs: 0, endMs: 500))
+        await coordinator.emitTurn(DiarizationTurn(slot: "spk_2", startMs: 500, endMs: 1_000))
+        try await waitUntil { await viewModel.speakerLabels[first.id]?.attributedSlots == ["spk_1"] }
+
+        await fakeLLM.setResponse(
+            """
+            {"segments":[
+              {"id":"\(first.id)","refined_text":"そうですね次のスプリントで","joins_next":true},
+              {"id":"\(second.id)","refined_text":"対応します。","joins_next":false}
+            ]}
+            """
+        )
+        await viewModel.refinementQueue?.flush()
+
+        try await waitUntil { await viewModel.transcriptRows.first(where: { $0.id == first.id })?.endMs == 1_000 }
+
+        try await waitUntil { await viewModel.speakerLabels[first.id]?.attributedSlots.sorted() == ["spk_1", "spk_2"] }
+
+        await viewModel.endMeeting()
+    }
+
     @Test("a refinement response missing the segment's id sets the matching row to .refinedFailed")
     func batchCompletedMissingIdSetsRefinedFailedState() async throws {
         let root = makeTemporaryDirectory()
@@ -4660,5 +4737,147 @@ struct NextRecordingButtonStateTests {
             activeSessionId: "other-2"
         )
         #expect(next == .pausedDisabledOtherRecording(elapsedSeconds: 42, otherSessionId: "other-2"))
+    }
+}
+
+// MARK: - MeetingWorkspaceViewModel.cumulativeElapsedSeconds / initialRecordingButtonState
+//
+// Both take an explicit `now:`, so these cover the elapsed-time arithmetic deterministically -- the
+// coverage the flaky-fix deliberately moved *out* of the recording-lifecycle tests above, whose
+// `makeViewModel` now freezes the clock (see its `frozenNow` comment) and can therefore only ever
+// observe `elapsedSeconds: 0`.
+
+@Suite("MeetingWorkspaceViewModel elapsed-time arithmetic")
+@MainActor
+struct MeetingWorkspaceViewModelElapsedTimeTests {
+    private static let sessionStart = Date(timeIntervalSince1970: 1_751_000_000)
+
+    private static func meta(
+        state: SessionState,
+        durationMs: Int,
+        recordings: [RecordingSegment]
+    ) -> SessionMeta {
+        SessionMeta(
+            id: "session-elapsed",
+            title: "",
+            titleAutoGenerated: true,
+            titleAutoNamedOnce: false,
+            titleProposal: nil,
+            state: state,
+            createdAt: sessionStart,
+            startedAt: sessionStart,
+            endedAt: nil,
+            durationMs: durationMs,
+            recordings: recordings,
+            basedOnSession: nil,
+            segmentCount: 0,
+            refinedCount: 0,
+            appVersion: "0.1.0"
+        )
+    }
+
+    private static func closedSegment(index: Int, startOffsetSeconds: Int, lengthSeconds: Int) -> RecordingSegment {
+        RecordingSegment(
+            index: index,
+            startedAt: sessionStart.addingTimeInterval(Double(startOffsetSeconds)),
+            endedAt: sessionStart.addingTimeInterval(Double(startOffsetSeconds + lengthSeconds)),
+            startMsOffset: 0
+        )
+    }
+
+    private static func openSegment(index: Int, startOffsetSeconds: Int) -> RecordingSegment {
+        RecordingSegment(
+            index: index,
+            startedAt: sessionStart.addingTimeInterval(Double(startOffsetSeconds)),
+            endedAt: nil,
+            startMsOffset: 0
+        )
+    }
+
+    @Test("with no recording segments at all, elapsed falls back to meta.durationMs")
+    func noSegmentsUsesDurationMs() {
+        let elapsed = MeetingWorkspaceViewModel.cumulativeElapsedSeconds(
+            for: Self.meta(state: .paused, durationMs: 90_000, recordings: []),
+            now: Self.sessionStart.addingTimeInterval(10_000)
+        )
+        #expect(elapsed == 90)
+    }
+
+    @Test("with every segment closed, elapsed is meta.durationMs alone -- `now` never enters the sum")
+    func closedSegmentsIgnoreNow() {
+        let meta = Self.meta(
+            state: .paused,
+            durationMs: 125_000,
+            recordings: [Self.closedSegment(index: 0, startOffsetSeconds: 0, lengthSeconds: 125)]
+        )
+        // Two wildly different `now`s, same answer: a paused session's clock does not keep running.
+        #expect(MeetingWorkspaceViewModel.cumulativeElapsedSeconds(for: meta, now: Self.sessionStart) == 125)
+        #expect(
+            MeetingWorkspaceViewModel.cumulativeElapsedSeconds(
+                for: meta, now: Self.sessionStart.addingTimeInterval(9_999)
+            ) == 125
+        )
+    }
+
+    @Test("with an open segment, elapsed is prior segments' durationMs plus time since that segment started")
+    func openSegmentAddsTimeSinceItStarted() {
+        let meta = Self.meta(
+            state: .recording,
+            durationMs: 60_000,
+            recordings: [
+                Self.closedSegment(index: 0, startOffsetSeconds: 0, lengthSeconds: 60),
+                Self.openSegment(index: 1, startOffsetSeconds: 300)
+            ]
+        )
+        // 60s of closed segment + 7s into the open one.
+        let elapsed = MeetingWorkspaceViewModel.cumulativeElapsedSeconds(
+            for: meta, now: Self.sessionStart.addingTimeInterval(307)
+        )
+        #expect(elapsed == 67)
+    }
+
+    @Test("a `now` before the open segment even started clamps to 0 rather than going negative")
+    func nowBeforeSegmentStartClampsToZero() {
+        let meta = Self.meta(
+            state: .recording,
+            durationMs: 0,
+            recordings: [Self.openSegment(index: 0, startOffsetSeconds: 300)]
+        )
+        let elapsed = MeetingWorkspaceViewModel.cumulativeElapsedSeconds(
+            for: meta, now: Self.sessionStart.addingTimeInterval(120)
+        )
+        #expect(elapsed == 0)
+    }
+
+    @Test("initialRecordingButtonState maps each hydrated meta.state, carrying the elapsed seconds it derives")
+    func initialRecordingButtonStatePerSessionState() {
+        let openRecordings = [Self.openSegment(index: 0, startOffsetSeconds: 0)]
+        let now = Self.sessionStart.addingTimeInterval(42)
+
+        #expect(
+            MeetingWorkspaceViewModel.initialRecordingButtonState(
+                for: Self.meta(state: .draft, durationMs: 0, recordings: []), now: now
+            ) == .startRecording
+        )
+        #expect(
+            MeetingWorkspaceViewModel.initialRecordingButtonState(
+                for: Self.meta(state: .recording, durationMs: 0, recordings: openRecordings), now: now
+            ) == .recording(elapsedSeconds: 42)
+        )
+        #expect(
+            MeetingWorkspaceViewModel.initialRecordingButtonState(
+                for: Self.meta(
+                    state: .paused,
+                    durationMs: 30_000,
+                    recordings: [Self.closedSegment(index: 0, startOffsetSeconds: 0, lengthSeconds: 30)]
+                ),
+                now: now
+            ) == .paused(elapsedSeconds: 30)
+        )
+        #expect(
+            MeetingWorkspaceViewModel.initialRecordingButtonState(
+                for: Self.meta(state: .ended, durationMs: 30_000, recordings: []), now: now
+            ) == .ended
+        )
     }
 }

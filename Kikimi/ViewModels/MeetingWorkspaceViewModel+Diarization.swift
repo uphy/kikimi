@@ -376,6 +376,16 @@ extension MeetingWorkspaceViewModel {
     /// sound with no attributable speech at all). A no-op when diarization is disabled -- there is
     /// nothing to tick.
     ///
+    /// Every *other* trigger for `recomputeSpeakerLabels()` (a new turn, a segment confirming, a
+    /// rename, an assignment update) already calls it directly -- this tick's only reason to exist is
+    /// advancing the grace-period clock for a row still sitting at `.recognizing`. So when nothing is
+    /// currently `.recognizing`, this tick is a pure no-op recompute over every row, every second,
+    /// for the rest of the recording -- one of the two dominant contributors to a real
+    /// CPU-pinning/UI-freeze bug in long meetings (the other being `SegmentAttribution`'s per-row
+    /// cost, fixed separately). Skipping the recompute whenever there is nothing pending removes that
+    /// entire steady-state cost without changing what a caller ever observes: no `.recognizing` row
+    /// means no row's label could possibly change from time passing alone.
+    ///
     /// Not `private`: called from `runRecordingSegmentStart` in `MeetingWorkspaceViewModel.swift`.
     func startDiarizationLabelTicker() {
         guard appConfig.data.diarization.enabled else {
@@ -385,8 +395,11 @@ extension MeetingWorkspaceViewModel {
         diarizationLabelTickTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
-                guard !Task.isCancelled else { return }
-                await self?.recomputeSpeakerLabels()
+                guard !Task.isCancelled, let self else { return }
+                guard self.speakerLabels.values.contains(where: { $0.label == .recognizing }) else {
+                    continue
+                }
+                await self.recomputeSpeakerLabels()
             }
         }
     }

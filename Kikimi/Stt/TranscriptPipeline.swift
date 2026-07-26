@@ -79,6 +79,15 @@ final class TranscriptPipeline: AudioCaptureDelegate {
     /// `await` it and release the lease exactly once if one was obtained (MT8). `nil` when
     /// `twoPassDecode` is `false` -- two-pass OFF never touches the pool at all.
     private let batchDecoderAcquireTaskStorage = OSAllocatedUnfairLock<Task<AcquiredBatchDecoder, Error>?>(initialState: nil)
+    /// `true` once `startBatchDecoderAcquire()`'s `Task` has actually installed the decoder into
+    /// `batchDecoderStorage` -- the exact moment from which a newly-confirmed window is re-decoded
+    /// (MT5) rather than falling back to streaming text. Exists so tests can wait on that transition
+    /// instead of sleeping a fixed interval and hoping the acquire won the race; a fixed sleep here
+    /// made `TranscriptPipelineTwoPassTests` flaky under parallel test load, silently turning
+    /// "decoded by batch" expectations into streaming-fallback text.
+    var hasAcquiredBatchDecoder: Bool {
+        batchDecoderStorage.withLock { $0 != nil }
+    }
     /// This recording segment's `startMsOffset` (kikimi.md 5/6 章): added to every
     /// `SttFinalizedSegment.startMs`/`endMs` (which are relative to *this instance's* own
     /// `AudioCapture.start()`, since a fresh `TranscriptPipeline`/`SttEngine` pair is created for

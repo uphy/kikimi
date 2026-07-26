@@ -94,7 +94,7 @@ extension MeetingWorkspaceViewModel {
         presentRecordingStartFailedBanner(Self.recordingStoreFailureMessage(error))
         switch previousState {
         case .paused:
-            recordingButtonState = .paused(elapsedSeconds: Self.cumulativeElapsedSeconds(for: meta))
+            recordingButtonState = .paused(elapsedSeconds: Self.cumulativeElapsedSeconds(for: meta, now: now()))
         case .ended:
             recordingButtonState = .ended
         case .draft, .recording:
@@ -142,7 +142,7 @@ extension MeetingWorkspaceViewModel {
         case .draft:
             recordingButtonState = .startRecording
         case .paused:
-            recordingButtonState = .paused(elapsedSeconds: Self.cumulativeElapsedSeconds(for: meta))
+            recordingButtonState = .paused(elapsedSeconds: Self.cumulativeElapsedSeconds(for: meta, now: now()))
         case .ended:
             recordingButtonState = .ended
         case .recording:
@@ -217,7 +217,7 @@ extension MeetingWorkspaceViewModel {
         elapsedTimerTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                let elapsedInSegment = Date().timeIntervalSince(segmentStartedAt)
+                let elapsedInSegment = self.now().timeIntervalSince(segmentStartedAt)
                 let totalSeconds = max(0, Int((Double(baseDurationMs) / 1_000) + elapsedInSegment))
                 self.recordingButtonState = .recording(elapsedSeconds: totalSeconds)
                 try? await Task.sleep(for: .seconds(1))
@@ -244,6 +244,26 @@ extension MeetingWorkspaceViewModel {
         }
         let elapsedInSegment = now.timeIntervalSince(lastSegment.startedAt)
         return max(0, Int((Double(meta.durationMs) / 1_000) + elapsedInSegment))
+    }
+
+    /// Derives the `recordingButtonState` a freshly-hydrated `meta.state` implies. `.recording` is
+    /// not expected in ordinary operation (a session left `.recording` across an app relaunch is
+    /// instead resolved by `SessionStore.finalizeCrashedSession(_:)` — to `.paused`, not `.ended` —
+    /// before any workspace window reopens it, `07-session-store.md` section 10), but is handled
+    /// defensively rather than assumed impossible. Lives here (not next to its only caller,
+    /// `hydrateFromSessionHandle()`) to keep `MeetingWorkspaceViewModel.swift` under the project's
+    /// `file_length` lint limit, same as `cumulativeElapsedSeconds(for:now:)` above.
+    static func initialRecordingButtonState(for meta: SessionMeta, now: Date = Date()) -> RecordingButtonState {
+        switch meta.state {
+        case .draft:
+            return .startRecording
+        case .recording:
+            return .recording(elapsedSeconds: cumulativeElapsedSeconds(for: meta, now: now))
+        case .paused:
+            return .paused(elapsedSeconds: cumulativeElapsedSeconds(for: meta, now: now))
+        case .ended:
+            return .ended
+        }
     }
 
     // MARK: - Live transcript segment subscription (section 6.3)

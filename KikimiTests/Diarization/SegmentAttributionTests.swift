@@ -277,4 +277,110 @@ struct SegmentAttributionAttributeTests {
 
         #expect(fromInOrder == fromReversed)
     }
+
+    /// A brute-force, deliberately-`O(n^2)` reference for `hasOverlapMarker` (midpoint-sampling every
+    /// breakpoint against every interval, exactly what `computeHasOverlapMarker`'s pre-sweep-rewrite
+    /// implementation did) -- used only by `sweepMatchesBruteForceReferenceOverRandomTurns` below to
+    /// verify the coordinate-sweep rewrite (`SegmentAttribution.swift`'s `computeHasOverlapMarker`)
+    /// never changes the *result*, only its complexity.
+    private static func bruteForceHasOverlapMarker(startMs: Int, endMs: Int, turns: [DiarizationTurn]) -> Bool {
+        let occupancies = SegmentAttribution.computeOccupancies(startMs: startMs, endMs: endMs, turns: turns)
+        guard !occupancies.isEmpty else {
+            return false
+        }
+        let length = endMs - startMs
+        let trim = Int((Double(length) * 0.15).rounded())
+        let trimmedStart = startMs + trim
+        let trimmedEnd = endMs - trim
+        let rangeLength = trimmedEnd - trimmedStart
+        guard rangeLength > 0 else {
+            return false
+        }
+        let intervals = turns.compactMap { turn -> (slot: String, start: Int, end: Int)? in
+            let start = max(trimmedStart, turn.startMs)
+            let end = min(trimmedEnd, turn.endMs)
+            guard end > start else { return nil }
+            return (turn.slot, start, end)
+        }
+        guard intervals.count >= 2 else {
+            return false
+        }
+        var boundaries = Set<Int>()
+        for interval in intervals {
+            boundaries.insert(interval.start)
+            boundaries.insert(interval.end)
+        }
+        let sortedBoundaries = boundaries.sorted()
+        var multiSlotMs = 0
+        for index in 0..<(sortedBoundaries.count - 1) {
+            let segmentStart = sortedBoundaries[index]
+            let segmentEnd = sortedBoundaries[index + 1]
+            guard segmentEnd > segmentStart else { continue }
+            let midpoint = segmentStart + (segmentEnd - segmentStart) / 2
+            let activeSlots = Set(intervals.filter { $0.start <= midpoint && midpoint < $0.end }.map(\.slot))
+            if activeSlots.count >= 2 {
+                multiSlotMs += segmentEnd - segmentStart
+            }
+        }
+        return Double(multiSlotMs) / Double(rangeLength) >= 0.3
+    }
+
+    @Test("the O(M log M) coordinate-sweep hasOverlapMarker matches an O(M^2) brute-force reference over many randomized turn sets (regression guard for the CPU-freeze fix)")
+    func sweepMatchesBruteForceReferenceOverRandomTurns() {
+        var generator = SplitMix64(seed: 0xC0FF_EE42)
+        for _ in 0..<200 {
+            let turnCount = Int.random(in: 0...12, using: &generator)
+            let turns: [DiarizationTurn] = (0..<turnCount).map { _ in
+                let start = Int.random(in: 0...900, using: &generator)
+                let duration = Int.random(in: 1...400, using: &generator)
+                let slot = "spk_\(Int.random(in: 1...4, using: &generator))"
+                return DiarizationTurn(slot: slot, startMs: start, endMs: start + duration)
+            }
+
+            let expected = Self.bruteForceHasOverlapMarker(startMs: 0, endMs: 1000, turns: turns)
+            let actual = SegmentAttribution.attribute(startMs: 0, endMs: 1000, turns: turns).hasOverlapMarker
+
+            #expect(actual == expected, "turns=\(turns)")
+        }
+    }
+
+    @Test("attribute(...) stays fast with hundreds of accumulated turns overlapping one segment (CPU-freeze regression guard)")
+    func attributeStaysFastWithManyOverlappingTurns() {
+        // Simulates a long recording's worth of accumulated `diarizationTurns` all landing within one
+        // segment's trimmed range (the worst case the old O(M^2) `computeHasOverlapMarker` hit as
+        // `turns` grew unboundedly over a meeting's duration -- see
+        // `MeetingWorkspaceViewModel+Diarization.swift`'s `recomputeSpeakerLabels()`).
+        let turns: [DiarizationTurn] = (0..<2000).map { index in
+            let slot = "spk_\(index % 3)"
+            let start = (index * 3) % 900
+            return DiarizationTurn(slot: slot, startMs: start, endMs: start + 50)
+        }
+
+        let clock = ContinuousClock()
+        let elapsed = clock.measure {
+            for _ in 0..<50 {
+                _ = SegmentAttribution.attribute(startMs: 0, endMs: 1000, turns: turns)
+            }
+        }
+
+        #expect(elapsed < .seconds(2), "50 attribute() calls over 2000 overlapping turns took \(elapsed) -- expected sub-second (O(M log M), not O(M^2))")
+    }
+}
+
+/// Deterministic, dependency-free `RandomNumberGenerator` (splitmix64) so
+/// `sweepMatchesBruteForceReferenceOverRandomTurns` reproduces the exact same cases on every run.
+private struct SplitMix64: RandomNumberGenerator {
+    private var state: UInt64
+
+    init(seed: UInt64) {
+        state = seed
+    }
+
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
+    }
 }
