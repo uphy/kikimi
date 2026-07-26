@@ -110,7 +110,7 @@ extension MeetingWorkspaceViewModel {
 
         finishStoppingCapture()
         meta = await sessionHandle.meta
-        recordingButtonState = .paused(elapsedSeconds: Self.cumulativeElapsedSeconds(for: meta))
+        recordingButtonState = .paused(elapsedSeconds: Self.cumulativeElapsedSeconds(for: meta, now: now()))
     }
 
     /// Paused -> Recording. Re-runs the audio-input guard/resolution (a different device/app may
@@ -346,7 +346,7 @@ extension MeetingWorkspaceViewModel {
         // and the `meta` loaded before this segment started never reflects the just-opened segment.
         meta = await sessionHandle.meta
 
-        recordingButtonState = .recording(elapsedSeconds: Self.cumulativeElapsedSeconds(for: meta))
+        recordingButtonState = .recording(elapsedSeconds: Self.cumulativeElapsedSeconds(for: meta, now: now()))
         startElapsedTimer()
         startLiveSegmentSubscription(pipeline: pipeline)
         startVolatileTranscriptSubscription(pipeline: pipeline)
