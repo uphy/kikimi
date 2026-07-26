@@ -68,46 +68,68 @@ struct WavFileWriterTests {
         #expect(try readDataChunkSize(at: fileURL) == 0)
     }
 
-    @Test("in-progress header reflects only data flushed so far; close() writes the final total")
-    func inProgressHeaderThenFinalHeaderOnClose() async throws {
+    @Test("the periodic timer rewrites the in-progress header to cover the data appended so far")
+    func periodicTimerFlushesInProgressHeader() async throws {
         let fileURL = makeTemporaryFileURL()
         defer { try? FileManager.default.removeItem(at: fileURL) }
 
-        let flushInterval: TimeInterval = 0.3
+        let flushInterval: TimeInterval = 0.1
         let writer = try WavFileWriter(fileURL: fileURL, sampleRate: sampleRate, channels: channels, headerFlushInterval: flushInterval)
         let failures = FailureRecorder()
 
-        // First chunk: 100 frames of mono Int16 == 200 bytes.
+        // 100 frames of mono Int16 == 200 bytes.
+        let frameCount: AVAudioFrameCount = 100
+        let byteCount = UInt32(frameCount) * UInt32(channels) * UInt32(MemoryLayout<Int16>.size)
+        writer.append(makeBuffer(frameCount: frameCount)) { failures.record($0) }
+
+        // Polls for the flush rather than sleeping a fixed multiple of the interval: this waits
+        // *for* an event, so a slow runner only makes it take longer, never fail. A fixed sleep
+        // would also have to be long enough to cover a late timer, which is the same wait with a
+        // hard failure attached.
+        var flushed: UInt32 = 0
+        for _ in 0..<100 {
+            flushed = try readDataChunkSize(at: fileURL)
+            if flushed == byteCount { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        #expect(flushed == byteCount)
+
+        writer.close()
+        #expect(failures.count == 0)
+    }
+
+    @Test("the header is not rewritten between flushes; close() writes the final total")
+    func staleHeaderUntilCloseWritesFinalTotal() async throws {
+        let fileURL = makeTemporaryFileURL()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        // A 60s interval means no periodic flush can land inside this test. Asserting the *absence*
+        // of a flush against a live timer is a race the CI runner loses: the previous version slept
+        // past one flush and then assumed the next one was still 200ms away, which stopped holding
+        // as soon as `Task.sleep` overshot on a loaded machine.
+        let writer = try WavFileWriter(fileURL: fileURL, sampleRate: sampleRate, channels: channels, headerFlushInterval: 60)
+        let failures = FailureRecorder()
+
         let firstFrameCount: AVAudioFrameCount = 100
         let firstByteCount = UInt32(firstFrameCount) * UInt32(channels) * UInt32(MemoryLayout<Int16>.size)
         writer.append(makeBuffer(frameCount: firstFrameCount)) { failures.record($0) }
 
-        // Wait past the first scheduled header flush so the in-progress header on disk reflects
-        // the first chunk.
-        try await Task.sleep(nanoseconds: UInt64((flushInterval + 0.4) * 1_000_000_000))
-
-        let inProgressDataSize = try readDataChunkSize(at: fileURL)
-        #expect(inProgressDataSize == firstByteCount)
-
-        // Second chunk, written right after reading the in-progress header and well before the
-        // next scheduled flush: the on-disk header should still be stale (only reflects the first
-        // chunk) until the writer is explicitly closed.
         let secondFrameCount: AVAudioFrameCount = 50
         let secondByteCount = UInt32(secondFrameCount) * UInt32(channels) * UInt32(MemoryLayout<Int16>.size)
         writer.append(makeBuffer(frameCount: secondFrameCount)) { failures.record($0) }
-        try await Task.sleep(nanoseconds: 50_000_000) // 50ms: long enough to be enqueued, short of the next flush
 
-        let staleDataSize = try readDataChunkSize(at: fileURL)
-        #expect(staleDataSize == firstByteCount)
+        // Long enough for both appends to have been drained by the writer queue -- the point is
+        // that the sample data lands on disk while the header still reports the placeholder 0.
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        let finalByteCount = firstByteCount + secondByteCount
+        #expect(try readDataChunkSize(at: fileURL) == 0)
+        #expect(try Data(contentsOf: fileURL).count == 44 + Int(finalByteCount))
 
         writer.close()
 
-        let finalByteCount = firstByteCount + secondByteCount
-        let finalDataSize = try readDataChunkSize(at: fileURL)
-        #expect(finalDataSize == finalByteCount)
-
-        let finalFileData = try Data(contentsOf: fileURL)
-        #expect(finalFileData.count == 44 + Int(finalByteCount))
+        #expect(try readDataChunkSize(at: fileURL) == finalByteCount)
+        #expect(try Data(contentsOf: fileURL).count == 44 + Int(finalByteCount))
 
         #expect(failures.count == 0)
     }
