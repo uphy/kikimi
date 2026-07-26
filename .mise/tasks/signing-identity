@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+#MISE description="ローカル開発用のコード署名 identity を作成（初回のみ・冪等）"
+set -euo pipefail
+
+# なぜこれが要るか
+# ----------------
+# swift build が付ける ad-hoc 署名は TeamIdentifier を持たないため、TCC が保存する
+# designated requirement が cdhash に直結する（`designated => cdhash H"..."`）。
+# cdhash はビルドごとに変わるので、マイク・画面収録・アクセシビリティの許可が
+# 再ビルドのたびに失効する。しかも TCC.db の auth_value は 2（許可）のまま残るので、
+# システム設定は「許可済み」と表示し続ける。挙動だけが壊れる。
+#
+# 証明書で署名すると designated requirement が
+#   identifier "io.github.uphy.Kikimi" and certificate leaf H"<証明書のハッシュ>"
+# になる。証明書を保持する限り cdhash が変わっても一致するので、許可が保たれる。
+#
+# かつて毎ビルド出ていたキーチェーンのパスワードダイアログは TCC と別問題で、証明書の信頼
+# （ensure_trusted）でも直らなかった。API キーの保管を Keychain から Secure Enclave 暗号化
+# ファイルへ移したことで解消済み（docs/design/35-secure-enclave-credentials.md、
+# 詳細な経緯は kikimi-signing-troubleshoot skill）。ensure_trusted は署名の信頼評価を
+# 安定させるために残している。
+#
+# 取り消し: security delete-identity -c "Kikimi Local Dev"
+#           security remove-trusted-cert <cert.pem>（信頼設定）
+# 証明書を消しても build は ad-hoc 署名にフォールバックするだけで壊れない。
+
+CN="Kikimi Local Dev"
+KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
+
+create_identity() {
+  local tmp="$1"
+
+  cat > "$tmp/cert.conf" <<EOF
+[req]
+distinguished_name = dn
+x509_extensions = v3
+prompt = no
+[dn]
+CN = $CN
+[v3]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+extendedKeyUsage = critical,codeSigning
+EOF
+
+  # Use the system LibreSSL, not a Homebrew OpenSSL 3.x. The latter writes PKCS12
+  # bundles with a SHA-256 MAC that `security import` rejects ("MAC verification failed").
+  local openssl=/usr/bin/openssl
+
+  "$openssl" req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$tmp/key.pem" -out "$tmp/cert.pem" \
+    -days 3650 -config "$tmp/cert.conf" 2>/dev/null
+
+  "$openssl" pkcs12 -export \
+    -inkey "$tmp/key.pem" -in "$tmp/cert.pem" -out "$tmp/id.p12" \
+    -passout pass:kikimi -name "$CN" 2>/dev/null
+
+  # -T limits the ACL to codesign. No -A: no other binary may use this key.
+  security import "$tmp/id.p12" -k "$KEYCHAIN" -P kikimi -T /usr/bin/codesign
+
+  echo "created: $CN"
+}
+
+# Trust the cert for code signing (user domain, idempotent). TCC only compares the
+# designated requirement, so an untrusted cert already keeps mic/screen permissions.
+# This does NOT silence the per-build keychain dialog — that was the ACL partition list
+# falling back to cdhash (no TeamIdentifier), and is now moot because credentials live in
+# Secure Enclave-encrypted files rather than the keychain (design 35).
+# Shows a macOS auth dialog once.
+ensure_trusted() {
+  local tmp="$1"
+
+  if security dump-trust-settings 2>/dev/null | grep -qF "$CN"; then
+    echo "already trusted for code signing: $CN"
+    return 0
+  fi
+
+  security find-certificate -c "$CN" -p "$KEYCHAIN" > "$tmp/trusted-cert.pem"
+  echo "Adding trust settings for '$CN' (macOS will ask for your password)..."
+  security add-trusted-cert -p codeSign -k "$KEYCHAIN" "$tmp/trusted-cert.pem"
+  echo "trusted for code signing: $CN"
+}
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+# NOTE: `find-identity -v` lists only *valid* identities, and a self-signed cert may be
+# reported as CSSMERR_TP_NOT_TRUSTED — never "valid" — until trust settings are added.
+# Filtering on -v would make this check miss, re-importing the key on every run. Drop
+# -v and match by name.
+if security find-identity -p codesigning 2>/dev/null | grep -qF "$CN"; then
+  echo "signing identity already exists: $CN"
+else
+  create_identity "$tmp"
+fi
+
+ensure_trusted "$tmp"
+
+echo
+echo "Next: mise run reset-permissions && mise run apply"

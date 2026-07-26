@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+#MISE description="kikimi-verify skillの主要フロー（ビルド+apply→起動→ダミー録音→会議終了→セッション構造検証）を対話なしで1コマンド実行するスモークテスト"
+set -uo pipefail
+
+# Non-interactive wrapper around the `kikimi-verify` skill
+# (~/.claude/skills/kikimi-verify/) so hooks/workflows can drive the same
+# "build+apply -> launch with dummy input+stub LLM -> start recording ->
+# wait -> end meeting -> verify session folder" flow that a human/agent
+# would otherwise run by hand, one script call at a time. See SKILL.md
+# section 5 ("録音パイプラインの確認（主要フロー）") for the manual version
+# this mirrors.
+#
+# Exit code: 0 on PASS, 1 on FAIL (missing skill scripts, build failure,
+# recording never started, session verification failure, or a new crash
+# report). Always leaves Kikimi running in normal (real mic, real LLM)
+# mode on exit, regardless of pass/fail -- never leaves the dummy-input /
+# stub-LLM test process behind (see cleanup()).
+
+SKILL_DIR="$HOME/.claude/skills/kikimi-verify"
+SCRIPTS="$SKILL_DIR/scripts"
+SESSIONS_DIR="$HOME/.local/state/kikimi/sessions"
+APP_BIN="$HOME/Applications/Kikimi.app/Contents/MacOS/Kikimi"
+APP_BUNDLE="$HOME/Applications/Kikimi.app"
+
+WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/kikimi-verify-smoke.XXXXXX")"
+STATUS=0
+
+log() { echo "==> $*"; }
+fail() {
+  echo "FAIL: $*" >&2
+  STATUS=1
+}
+abort() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+# --- guard: refuse to run while a real meeting is being recorded ---
+# Deliberately placed *before* `trap cleanup EXIT` below: `cleanup()` itself
+# `pkill -x Kikimi`s any running process, so if this guard's `abort()` ran
+# after the trap was registered, aborting would still kill the very
+# recording it's trying to protect. Placed before the trap, `abort()`'s
+# `exit 1` here leaves the running Kikimi process (and the real meeting)
+# completely untouched.
+if pgrep -x Kikimi >/dev/null 2>&1 && [ -d "$SESSIONS_DIR" ]; then
+  if ! command -v jq >/dev/null 2>&1; then
+    abort "jq is required to check for an in-progress recording before running verify-smoke (refusing to guess); install jq and retry"
+  fi
+  recording_session=""
+  for meta in "$SESSIONS_DIR"/*/meta.json; do
+    [ -e "$meta" ] || continue
+    state="$(jq -r '.state // empty' "$meta" 2>/dev/null || true)"
+    if [ "$state" = "recording" ]; then
+      recording_session="$(basename "$(dirname "$meta")")"
+      break
+    fi
+  done
+  if [ -n "$recording_session" ]; then
+    abort "Kikimi is currently recording a real meeting ($recording_session) -- refusing to run verify-smoke, which would kill the app (via 'mise run apply') and cut the recording off mid-meeting. Re-run this after the meeting ends (Paused/Ended)."
+  fi
+fi
+
+cleanup() {
+  # Mandatory teardown (SKILL.md section 5): never leave the
+  # KIKIMI_TEST_INPUT/KIKIMI_STUB_LLM process running, or a later normal
+  # launch looks like "transcription is completely broken" to the user.
+  if pgrep -x Kikimi >/dev/null 2>&1; then
+    pkill -x Kikimi || true
+    sleep 1
+  fi
+  if [ -d "$APP_BUNDLE" ]; then
+    open -a "$APP_BUNDLE" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$WORKDIR"
+}
+trap cleanup EXIT
+
+# --- 0) sanity: kikimi-verify skill must be present ---
+[ -d "$SCRIPTS" ] || abort "kikimi-verify skill scripts not found at $SCRIPTS (skill not installed?)"
+for f in build_and_apply.sh with_env.sh crash_diff.sh verify_session.py kikimi_interact.py ax_click.py; do
+  [ -e "$SCRIPTS/$f" ] || abort "required script missing: $SCRIPTS/$f"
+done
+
+# --- 1) dummy input WAV (16kHz mono, includes an "えーと" filler so the
+#        KIKIMI_STUB_LLM drop path -- refined_text=="" -- is exercised too) ---
+log "[1/7] Preparing dummy input WAV"
+DUMMY_AIFF="$WORKDIR/dummy.aiff"
+DUMMY_WAV="$WORKDIR/dummy-16k-mono.wav"
+PHRASE="えーと、それでは動作確認を開始します。次のスプリントで対応します。よろしくお願いします。"
+if ! say -v Kyoko -o "$DUMMY_AIFF" "$PHRASE"; then
+  abort "'say' failed to synthesize dummy audio (Kyoko voice missing? try: say -v '?' | grep ja_JP)"
+fi
+if ! afconvert "$DUMMY_AIFF" "$DUMMY_WAV" -d LEI16@16000 -c 1 -f WAVE; then
+  abort "'afconvert' failed to produce a 16kHz mono WAV from $DUMMY_AIFF"
+fi
+[ -s "$DUMMY_WAV" ] || abort "dummy WAV $DUMMY_WAV is empty after afconvert"
+
+# --- 2) build + apply (~/Applications/Kikimi.app) ---
+log "[2/7] Build + apply"
+if ! "$SCRIPTS/build_and_apply.sh"; then
+  abort "build_and_apply.sh failed -- see output above"
+fi
+
+# --- 3) crash baseline ---
+log "[3/7] Snapshot crash report baseline"
+"$SCRIPTS/crash_diff.sh" snapshot || abort "crash_diff.sh snapshot failed"
+
+# --- 4) launch with dummy input + stub LLM, process-scoped (no launchctl) ---
+log "[4/7] Launch Kikimi with KIKIMI_TEST_INPUT + KIKIMI_STUB_LLM + KIKIMI_TEST_HIDDEN"
+mkdir -p "$SESSIONS_DIR"
+MARKER="$WORKDIR/marker"
+touch "$MARKER"
+# `KIKIMI_TEST_HIDDEN=1` (`Kikimi/Window/FloatingPanel.swift`'s `HiddenTestMode`): keeps every panel
+# fully transparent and off the visible screen for the whole run, so this automated smoke test never
+# flashes a window or steals frontmost-app status from whatever the user is doing.
+if ! "$SCRIPTS/with_env.sh" "KIKIMI_TEST_INPUT=$DUMMY_WAV" "KIKIMI_STUB_LLM=1" "KIKIMI_TEST_HIDDEN=1" -- "$APP_BIN"; then
+  abort "with_env.sh failed to launch $APP_BIN"
+fi
+
+# --- 5) start recording via the kikimi:// URL scheme (no global hotkey in MVP) ---
+log "[5/7] Start recording via kikimi://record/quick"
+python3 "$SCRIPTS/kikimi_interact.py" open_url "kikimi://record/quick"
+sleep 2
+
+NEW_SESSION=""
+for _ in $(seq 1 20); do
+  NEW_SESSION="$(find "$SESSIONS_DIR" -mindepth 1 -maxdepth 1 -type d -newer "$MARKER" 2>/dev/null | sort | tail -1)"
+  [ -n "$NEW_SESSION" ] && break
+  sleep 0.5
+done
+if [ -z "$NEW_SESSION" ]; then
+  abort "no new session folder appeared under $SESSIONS_DIR -- record/quick was rejected (another window already Recording?) or the URL scheme did not fire"
+fi
+log "    session: $NEW_SESSION"
+
+log "    waiting for dummy audio to stream through STT + batch refinement"
+sleep 15
+
+# --- 6) end the meeting (triggers on_session_end; can take ~10s+ with the stub LLM) ---
+log "[6/7] End the meeting (Recording/Paused -> Ended)"
+if ! python3 "$SCRIPTS/ax_click.py" click "" 会議終了 ended "$NEW_SESSION" 30; then
+  fail "ax_click.py could not confirm meta.json state reached 'ended' for $NEW_SESSION"
+fi
+
+# --- 7) verify session folder structure + crash check ---
+log "[7/7] Verify session folder + crash report diff"
+if ! python3 "$SCRIPTS/verify_session.py" --mic-only "$NEW_SESSION"; then
+  fail "verify_session.py reported structural failures for $NEW_SESSION"
+fi
+
+if ! "$SCRIPTS/crash_diff.sh" check; then
+  fail "crash_diff.sh detected a new crash report during this run"
+fi
+
+echo
+if [ "$STATUS" -eq 0 ]; then
+  echo "PASS: verify-smoke completed successfully"
+  echo "session: $NEW_SESSION"
+else
+  echo "FAIL: verify-smoke found one or more failures above"
+  echo "session: $NEW_SESSION"
+fi
+exit "$STATUS"

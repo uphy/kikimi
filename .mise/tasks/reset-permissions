@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+#MISE description="Kikimi の TCC 許可をリセット（署名方式を変えた直後に一度だけ）"
+set -euo pipefail
+
+# 署名の designated requirement が変わると、TCC に残った古いエントリは
+# auth_value=2（許可）のままなのに csreq 検証で落ちる。システム設定は
+# 「許可済み」と表示し続けるので、トグル OFF/ON では直らない。
+# エントリごと消して、次回起動時のダイアログから許可し直す必要がある。
+
+bundle_id="io.github.uphy.Kikimi"
+
+tccutil reset All "$bundle_id"
+
+echo
+echo "Reset all TCC entries for $bundle_id."
+echo "Launch Kikimi and grant microphone / screen recording again — this is the last time."

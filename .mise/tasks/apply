@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+#MISE description="~/Applications にインストール"
+#MISE depends=["build"]
+set -euo pipefail
+
+app_path="build/Kikimi.app"
+if [ ! -d "$app_path" ]; then
+  echo "Error: $app_path not found"
+  exit 1
+fi
+
+# 実行中かチェック
+was_running=false
+is_installed=false
+if [ -d ~/Applications/Kikimi.app ]; then
+  is_installed=true
+fi
+if pgrep -x Kikimi >/dev/null 2>&1; then
+  was_running=true
+  pkill -x Kikimi
+  sleep 0.5
+fi
+
+mkdir -p ~/Applications
+rm -rf ~/Applications/Kikimi.app
+cp -R "$app_path" ~/Applications/Kikimi.app
+echo "Installed to ~/Applications/Kikimi.app"
+
+# 起動中だったら再起動、未インストールだったら新規起動
+if [ "$was_running" = true ] || [ "$is_installed" = false ]; then
+  open ~/Applications/Kikimi.app
+  if [ "$was_running" = true ]; then
+    echo "Restarted Kikimi"
+  else
+    echo "Started Kikimi"
+  fi
+fi

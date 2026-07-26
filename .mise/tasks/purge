@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+#MISE description="Remove app, config, and state"
+set -euo pipefail
+
+# Stop if running
+if pgrep -x Kikimi >/dev/null 2>&1; then
+  pkill -x Kikimi
+  sleep 0.5
+  echo "Stopped Kikimi"
+fi
+
+# Remove app
+if [ -d ~/Applications/Kikimi.app ]; then
+  rm -rf ~/Applications/Kikimi.app
+  echo "Removed ~/Applications/Kikimi.app"
+fi
+
+# Remove config directory
+if [ -d ~/.config/kikimi ]; then
+  rm -rf ~/.config/kikimi
+  echo "Removed ~/.config/kikimi"
+fi
+
+# Remove state directory
+# STT moved from a self-managed sherpa-onnx model cache (~/.local/state/kikimi/models/sherpa-onnx/)
+# to FluidAudio, which downloads models to its own cache elsewhere. Kikimi no longer writes to
+# models/sherpa-onnx/, but per docs/design/11-streaming-stt.md 3.8 an existing directory from a
+# previous install must be left in place (residual policy) rather than auto-deleted here.
+legacy_model_dir=~/.local/state/kikimi/models/sherpa-onnx
+if [ -d ~/.local/state/kikimi ]; then
+  if [ -d "$legacy_model_dir" ]; then
+    find ~/.local/state/kikimi -mindepth 1 -maxdepth 1 ! -name models -exec rm -rf {} +
+    find ~/.local/state/kikimi/models -mindepth 1 -maxdepth 1 ! -name sherpa-onnx -exec rm -rf {} +
+    echo "Removed ~/.local/state/kikimi (kept legacy $legacy_model_dir; delete it manually if no longer needed)"
+  else
+    rm -rf ~/.local/state/kikimi
+    echo "Removed ~/.local/state/kikimi"
+  fi
+fi
+
+echo "Purge complete"

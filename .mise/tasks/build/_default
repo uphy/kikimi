@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+#MISE description="Release ビルド (.app バンドル生成)"
+#MISE depends=["build:swift"]
+set -euo pipefail
+
+version="${APP_VERSION:-0.0.0-dev}"
+
+# .app バンドル構成
+app_dir="build/Kikimi.app/Contents"
+mkdir -p "$app_dir/MacOS" "$app_dir/Resources"
+
+cp .build/release/Kikimi "$app_dir/MacOS/Kikimi"
+
+# Menu bar icon
+menu_icon_src="Kikimi/Resources/Assets.xcassets/MenuBarIcon.imageset"
+if [ -d "$menu_icon_src" ] && [ -f "$menu_icon_src/MenuBarIcon.png" ]; then
+  cp "$menu_icon_src/MenuBarIcon.png"    "$app_dir/Resources/MenuBarIcon.png"
+  cp "$menu_icon_src/MenuBarIcon@2x.png" "$app_dir/Resources/MenuBarIcon@2x.png"
+  echo "Icon: MenuBarIcon copied"
+fi
+
+# アイコン (icns) 生成
+src_png="Kikimi/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png"
+if [ -f "$src_png" ]; then
+  iconset_dir="$(mktemp -d)/AppIcon.iconset"
+  mkdir -p "$iconset_dir"
+  sips -z 16   16   "$src_png" --out "$iconset_dir/icon_16x16.png"    > /dev/null
+  sips -z 32   32   "$src_png" --out "$iconset_dir/icon_16x16@2x.png" > /dev/null
+  sips -z 32   32   "$src_png" --out "$iconset_dir/icon_32x32.png"    > /dev/null
+  sips -z 64   64   "$src_png" --out "$iconset_dir/icon_32x32@2x.png" > /dev/null
+  sips -z 128  128  "$src_png" --out "$iconset_dir/icon_128x128.png"   > /dev/null
+  sips -z 256  256  "$src_png" --out "$iconset_dir/icon_128x128@2x.png" > /dev/null
+  sips -z 256  256  "$src_png" --out "$iconset_dir/icon_256x256.png"   > /dev/null
+  sips -z 512  512  "$src_png" --out "$iconset_dir/icon_256x256@2x.png" > /dev/null
+  cp "$src_png"                     "$iconset_dir/icon_512x512@2x.png"
+  iconutil -c icns "$iconset_dir" -o "$app_dir/Resources/AppIcon.icns"
+  rm -rf "$(dirname "$iconset_dir")"
+  echo "Icon: AppIcon.icns generated"
+fi
+
+# Info.plist の Xcode 変数を実値に置換
+sed \
+  -e 's/$(DEVELOPMENT_LANGUAGE)/en/' \
+  -e 's/$(EXECUTABLE_NAME)/Kikimi/' \
+  -e 's/$(PRODUCT_BUNDLE_IDENTIFIER)/io.github.uphy.Kikimi/' \
+  -e "s/\$(MARKETING_VERSION)/$version/" \
+  -e "s/\$(CURRENT_PROJECT_VERSION)/$version/" \
+  -e 's/$(MACOSX_DEPLOYMENT_TARGET)/14.2/' \
+  Kikimi/Info.plist > "$app_dir/Info.plist"
+
+# Code signing
+# ------------
+# Without an explicit signature the bundle keeps the ad-hoc one that `swift build`
+# applies at link time, whose designated requirement is `cdhash H"..."`. That hash
+# changes on every build, so TCC silently revokes microphone / screen recording /
+# accessibility each time — while still showing "allowed" in System Settings.
+#
+# Signing with a stable certificate makes the requirement reference the certificate
+# instead of the hash, so permissions survive rebuilds. See `mise run signing-identity`.
+#
+# `find-identity` is queried without -v on purpose: a self-signed certificate is never
+# reported as "valid" (CSSMERR_TP_NOT_TRUSTED), yet codesign signs with it just fine.
+identity="Kikimi Local Dev"
+if security find-identity -p codesigning 2>/dev/null | grep -qF "$identity"; then
+  codesign --force --sign "$identity" \
+    --identifier io.github.uphy.Kikimi \
+    --entitlements Kikimi/Kikimi.entitlements \
+    "build/Kikimi.app"
+  echo "Signed with: $identity"
+else
+  codesign --force --sign - --identifier io.github.uphy.Kikimi "build/Kikimi.app"
+  echo "WARNING: no '$identity' in the keychain — signed ad-hoc."
+  echo "         macOS will revoke mic/screen/accessibility permissions on every build."
+  echo "         Fix once with: mise run signing-identity"
+fi
+
+echo "Built build/Kikimi.app (version: $version)"

@@ -1,0 +1,1041 @@
+import Foundation
+import Testing
+
+@testable import Kikimi
+
+// MARK: - FakeLLM
+
+/// Deterministic, network-free stand-in for `LLMCompleting` (mirrors `SummaryUpdaterTests.FakeLLM`'s
+/// shape). Responses/errors are scripted per `stubKey` as a FIFO queue so retry tests can express
+/// "fails once, then succeeds" precisely; an unscripted call falls back to `defaultResponseJSON`
+/// (the empty-`segments` shape `LLMStubProvider`'s own built-in default returns, §9). Also tracks
+/// concurrent in-flight calls (`maxConcurrentCalls`) so serialization (§3.1) is verifiable directly,
+/// and supports an `artificialDelay` so tests can hold a call open long enough to observe
+/// `drain()`'s "in-flight, not just pending-empty" behavior.
+private actor FakeLLM: LLMCompleting {
+    private(set) var callCount = 0
+    private(set) var receivedRequests: [LLMRequest] = []
+    private(set) var maxConcurrentCalls = 0
+    private var activeCalls = 0
+
+    var artificialDelay: Duration = .zero
+    var defaultResponseJSON = "{\"segments\":[]}"
+    /// Simulates `LLMBackendResponse.respondedModel` (`OpenAIChatBackend`'s Azure-legacy-deployment
+    /// case, `docs/design/16-llm-usage-stats.md` section 2). `nil` (the default) mirrors
+    /// `ClaudeCLIBackend`, which never reports one -- `RefinementQueue` then stamps `refined.jsonl`
+    /// with `config.model` instead, unchanged from before this fallback was introduced.
+    var respondedModelToReturn: String?
+    private var scripted: [String: [Result<String, LLMClientError>]] = [:]
+
+    func enqueueResponse(_ json: String, for key: String = "refinement") {
+        scripted[key, default: []].append(.success(json))
+    }
+
+    func enqueueError(_ error: LLMClientError, for key: String = "refinement") {
+        scripted[key, default: []].append(.failure(error))
+    }
+
+    func complete<T: Decodable & Sendable>(_ request: LLMRequest) async throws -> LLMResult<T> {
+        let json = try await resolveOutcome(for: request)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let value = try decoder.decode(T.self, from: Data(json.utf8))
+        return LLMResult(value: value, usage: .zero, respondedModel: respondedModelToReturn)
+    }
+
+    /// `docs/design/05-watcher-runner.md` §5.1: not exercised by any test in this file (no Watcher
+    /// tests live here), but required to satisfy `LLMCompleting`. Shares `resolveOutcome(for:)` with
+    /// `complete<T>` so both paths see identical scripted responses.
+    func completeRaw(_ request: LLMRequest) async throws -> LLMResult<Data> {
+        let json = try await resolveOutcome(for: request)
+        return LLMResult(value: Data(json.utf8), usage: .zero, respondedModel: respondedModelToReturn)
+    }
+
+    private func resolveOutcome(for request: LLMRequest) async throws -> String {
+        callCount += 1
+        receivedRequests.append(request)
+        activeCalls += 1
+        maxConcurrentCalls = max(maxConcurrentCalls, activeCalls)
+        defer { activeCalls -= 1 }
+
+        if artificialDelay > .zero {
+            try? await Task.sleep(for: artificialDelay)
+        }
+
+        let key = request.stubKey ?? ""
+        var queue = scripted[key] ?? []
+        let outcome: Result<String, LLMClientError>
+        if queue.isEmpty {
+            outcome = .success(defaultResponseJSON)
+        } else {
+            outcome = queue.removeFirst()
+            scripted[key] = queue
+        }
+
+        switch outcome {
+        case .success(let json):
+            return json
+        case .failure(let error):
+            throw error
+        }
+    }
+}
+
+// MARK: - EventCollector
+
+/// Buffers `RefinementQueue.events` off the main test flow, since events are pushed onto an
+/// `AsyncStream` and this suite needs to inspect them synchronously after `await queue.drain()`.
+private actor EventCollector {
+    private(set) var events: [RefinementEvent] = []
+
+    func record(_ event: RefinementEvent) {
+        events.append(event)
+    }
+}
+
+private func collectEvents(from queue: RefinementQueue) -> (EventCollector, Task<Void, Never>) {
+    let collector = EventCollector()
+    let task = Task {
+        for await event in queue.events {
+            await collector.record(event)
+        }
+    }
+    return (collector, task)
+}
+
+// MARK: - Test suite
+
+@Suite("RefinementQueue")
+struct RefinementQueueTests {
+    // MARK: Helpers
+
+    private func makeTempSessionDirectory() -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RefinementQueueTests-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    private func baseMeta(id: String = "2026-07-01T14-30-00_a1b2c3d4") -> SessionMeta {
+        SessionMeta(
+            id: id,
+            title: "Test Session",
+            titleAutoGenerated: true,
+            titleAutoNamedOnce: false,
+            titleProposal: nil,
+            state: .recording,
+            createdAt: Date(timeIntervalSince1970: 1_751_000_000),
+            startedAt: Date(timeIntervalSince1970: 1_751_000_010),
+            endedAt: nil,
+            durationMs: 0,
+            basedOnSession: nil,
+            segmentCount: 0,
+            refinedCount: 0,
+            appVersion: "0.1.0"
+        )
+    }
+
+    private func makeHandle() -> SessionHandle {
+        SessionHandle(directoryURL: makeTempSessionDirectory(), meta: baseMeta())
+    }
+
+    private func makeConfig(
+        batchSize: Int = 10,
+        batchTimeoutMs: Int = 5_000,
+        contextSegments: Int = 3,
+        contextRefreshBatches: Int = 10
+    ) -> RefinementConfig {
+        RefinementConfig(
+            model: "claude-haiku-4-5-20251001",
+            batchSize: batchSize,
+            batchTimeoutMs: batchTimeoutMs,
+            contextSegments: contextSegments,
+            contextRefreshBatches: contextRefreshBatches
+        )
+    }
+
+    private func makeRefinedSegment(id: String, startMs: Int = 0, endMs: Int = 500, refinedText: String? = "seed", batchId: String) -> RefinedSegment {
+        RefinedSegment(
+            id: id,
+            startMs: startMs,
+            endMs: endMs,
+            speaker: .mic,
+            rawText: "raw",
+            refinedText: refinedText,
+            error: nil,
+            refinedAt: Date(timeIntervalSince1970: 1_751_000_020),
+            model: "claude-haiku-4-5-20251001",
+            batchId: batchId
+        )
+    }
+
+    @discardableResult
+    private func appendSegments(_ count: Int, to handle: SessionHandle, startingAt: Int = 0, stepMs: Int = 500) async throws -> [TranscriptSegment] {
+        var results: [TranscriptSegment] = []
+        for index in 0..<count {
+            let startMs = startingAt + index * stepMs
+            let segment = try await handle.appendTranscriptSegment(
+                source: index.isMultiple(of: 2) ? .mic : .system,
+                startMs: startMs,
+                endMs: startMs + stepMs,
+                text: "segment \(index)",
+                confidence: 0.9
+            )
+            results.append(segment)
+        }
+        return results
+    }
+
+    private func successJSON(_ items: [(id: String, refinedText: String)]) -> String {
+        let body = items.map { "{\"id\":\"\($0.id)\",\"refined_text\":\"\($0.refinedText)\"}" }.joined(separator: ",")
+        return "{\"segments\":[\(body)]}"
+    }
+
+    /// Polls `predicate` on a short interval until it returns `true` or a timeout elapses (mirrors
+    /// `SummaryUpdaterTests.waitUntil`), for the handful of assertions that can't be synchronized via
+    /// `queue.drain()` alone (e.g. `EventCollector`'s independent consuming `Task`).
+    private func waitUntil(timeout: Duration = .seconds(5), predicate: @escaping () async -> Bool) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if await predicate() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await predicate(), "condition did not become true within \(timeout)")
+    }
+
+    // MARK: - Flush triggers (§4.1)
+
+    @Test("reaching batchSize flushes immediately without waiting for the timeout")
+    func batchSizeTriggerFlushesImmediately() async throws {
+        let handle = makeHandle()
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 3, batchTimeoutMs: 5_000))
+        await queue.start()
+        let segments = try await appendSegments(3, to: handle)
+
+        let clock = ContinuousClock()
+        let elapsed = await clock.measure {
+            for segment in segments {
+                await queue.enqueue(segment)
+            }
+            await queue.drain()
+        }
+
+        #expect(elapsed < .milliseconds(1_000), "should not have waited anywhere near the 5s timeout")
+        let refined = try await handle.readRefinedSegments()
+        #expect(refined.count == 3)
+    }
+
+    @Test("the batch timeout flushes a partial batch that never reaches batchSize")
+    func timeoutTriggerFlushesPartialBatch() async throws {
+        let handle = makeHandle()
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 10, batchTimeoutMs: 60))
+        await queue.start()
+        let segments = try await appendSegments(2, to: handle)
+
+        for segment in segments {
+            await queue.enqueue(segment)
+        }
+        await queue.drain()
+
+        let refined = try await handle.readRefinedSegments()
+        #expect(refined.count == 2)
+    }
+
+    @Test("flush() force-cuts the current pending buffer regardless of batchSize")
+    func explicitFlushCutsPartialBatch() async throws {
+        let handle = makeHandle()
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 10, batchTimeoutMs: 5_000))
+        await queue.start()
+        let segments = try await appendSegments(2, to: handle)
+
+        for segment in segments {
+            await queue.enqueue(segment)
+        }
+
+        let clock = ContinuousClock()
+        let elapsed = await clock.measure {
+            await queue.flush()
+            await queue.drain()
+        }
+
+        #expect(elapsed < .milliseconds(1_000), "flush() must not wait for the 5s timeout")
+        let refined = try await handle.readRefinedSegments()
+        #expect(refined.count == 2)
+    }
+
+    @Test("the timer only arms once per pending window and is not renewed by later arrivals")
+    func timerIsNotRenewedByLaterArrivals() async throws {
+        let handle = makeHandle()
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 10, batchTimeoutMs: 150))
+        await queue.start()
+        let segments = try await appendSegments(2, to: handle)
+
+        // Asserted via `timerArmCount` (a counter incremented only when a *new* timer is actually
+        // started) rather than wall-clock bounds, which are flaky under a heavily parallel `swift
+        // test` run (CPU contention can add hundreds of ms of jitter to a real `Task.sleep`).
+        await queue.enqueue(segments[0])
+        #expect(await queue.timerArmCount == 1)
+        try? await Task.sleep(for: .milliseconds(50))
+        await queue.enqueue(segments[1]) // must not arm a second timer for the still-open window
+        #expect(await queue.timerArmCount == 1, "a later arrival within the same window re-armed the timer")
+
+        await queue.drain()
+        let refined = try await handle.readRefinedSegments()
+        #expect(refined.count == 2, "both segments should still eventually flush via the original timer")
+    }
+
+    // MARK: - Serialization (§3.1)
+
+    @Test("drain() waits for an in-flight batch, not just an empty pending buffer")
+    func drainWaitsForInFlightBatch() async throws {
+        let handle = makeHandle()
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 2, batchTimeoutMs: 5_000))
+        await queue.start()
+        let segments = try await appendSegments(2, to: handle)
+        await fakeLLM.enqueueResponse(successJSON(segments.map { ($0.id, "refined") }))
+        await fakeLLM.setDelay(.milliseconds(150))
+
+        let clock = ContinuousClock()
+        let elapsed = await clock.measure {
+            for segment in segments {
+                await queue.enqueue(segment)
+            }
+            await queue.drain()
+        }
+
+        #expect(elapsed >= .milliseconds(120), "drain() returned before the in-flight LLM call finished")
+    }
+
+    @Test("never more than one batch is processed concurrently, even under a burst of enqueues")
+    func batchesAreProcessedSerially() async throws {
+        let handle = makeHandle()
+        let fakeLLM = FakeLLM()
+        await fakeLLM.setDelay(.milliseconds(20))
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 3, batchTimeoutMs: 5_000))
+        await queue.start()
+        let segments = try await appendSegments(12, to: handle)
+
+        for segment in segments {
+            await queue.enqueue(segment)
+        }
+        await queue.drain()
+
+        #expect(await fakeLLM.maxConcurrentCalls == 1)
+        #expect(await fakeLLM.callCount == 4)
+        let refined = try await handle.readRefinedSegments()
+        #expect(refined.count == 12)
+    }
+
+    // MARK: - joins_next merge (§15.2.3)
+
+    @Test("a joins_next=true batch response merges two adjacent same-speaker segments into one refined.jsonl row")
+    func joinsNextMergesAdjacentSegmentsIntoOneRow() async throws {
+        let handle = makeHandle()
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 2, batchTimeoutMs: 5_000))
+        await queue.start()
+        // Both segments must share the same speaker for the merge gate's guard to allow merging --
+        // `appendSegments(_:to:)` alternates mic/system by index, so these are appended directly.
+        let segments = [
+            try await handle.appendTranscriptSegment(source: .mic, startMs: 0, endMs: 500, text: "segment 0", confidence: 0.9),
+            try await handle.appendTranscriptSegment(source: .mic, startMs: 500, endMs: 1_000, text: "segment 1", confidence: 0.9),
+        ]
+
+        await fakeLLM.enqueueResponse(
+            """
+            {"segments":[
+              {"id":"\(segments[0].id)","refined_text":"first","joins_next":true},
+              {"id":"\(segments[1].id)","refined_text":"second","joins_next":false}
+            ]}
+            """
+        )
+        for segment in segments {
+            await queue.enqueue(segment)
+        }
+        await queue.drain()
+
+        let refined = try await handle.readRefinedSegments()
+        #expect(refined.count == 1, "the two segments must collapse into one derived unit")
+        #expect(refined[0].sourceSegIds == [segments[0].id, segments[1].id])
+        #expect(refined[0].refinedText == "firstsecond")
+        #expect(refined[0].endMs == segments[1].endMs)
+    }
+
+    @Test("start()'s backlog scan does not re-enqueue a raw seg_id already covered by a merged refined unit (§15.2.4)")
+    func backlogScanSkipsIdsCoveredByAMergedUnit() async throws {
+        let handle = makeHandle()
+        let segments = try await appendSegments(3, to: handle)
+        // Simulate a merged unit (from a previous run) that covers segments[0] and segments[1] --
+        // segments[1]'s own id never appears as a top-level `id` in refined.jsonl, only inside
+        // `source_seg_ids`.
+        let mergedUnit = RefinedSegment(
+            id: segments[0].id,
+            startMs: segments[0].startMs,
+            endMs: segments[1].endMs,
+            speaker: .mic,
+            rawText: "raw",
+            refinedText: "merged",
+            error: nil,
+            refinedAt: Date(timeIntervalSince1970: 1_751_000_020),
+            model: "claude-haiku-4-5-20251001",
+            batchId: "batch_00001",
+            sourceSegIds: [segments[0].id, segments[1].id]
+        )
+        try await handle.appendRefinedSegment(mergedUnit)
+
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 10, batchTimeoutMs: 5_000))
+        await queue.start()
+
+        #expect(
+            await queue.pending.map(\.id) == [segments[2].id],
+            "segments[1] is covered by the merged unit's sourceSegIds and must not be treated as unrefined backlog"
+        )
+    }
+
+    // MARK: - id dedup (§3.2)
+
+    @Test("enqueuing the same segment id twice only ever appends one refined.jsonl row")
+    func duplicateEnqueueIsIgnored() async throws {
+        let handle = makeHandle()
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 1))
+        await queue.start()
+        let segment = try await appendSegments(1, to: handle).first!
+
+        await queue.enqueue(segment)
+        await queue.enqueue(segment)
+        await queue.drain()
+
+        let refined = try await handle.readRefinedSegments()
+        #expect(refined.count == 1)
+    }
+
+    @Test("a live enqueue racing the backlog scan for the same id does not duplicate it")
+    func liveEnqueueRacingBacklogScanDoesNotDuplicate() async throws {
+        let handle = makeHandle()
+        let segment = try await appendSegments(1, to: handle).first!
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 10, batchTimeoutMs: 5_000))
+
+        // Simulate a segment confirmed just before start()'s backlog scan runs.
+        await queue.enqueue(segment)
+        await queue.start()
+
+        #expect(await queue.pending.count == 1, "the backlog scan must not have re-added the already-known id")
+
+        await queue.flush()
+        await queue.drain()
+        let refined = try await handle.readRefinedSegments()
+        #expect(refined.count == 1)
+    }
+
+    // MARK: - Responded-model resolution (`docs/design/16-llm-usage-stats.md` section 2)
+
+    @Test("refined.jsonl stamps the backend's respondedModel when the backend reports one")
+    func refinedSegmentsUseRespondedModelWhenReported() async throws {
+        // Mirrors the Azure legacy deployment bug this covers: `config.model` is the
+        // `refinement.model` config default (`claude-haiku-4-5-20251001`), but the endpoint actually
+        // answered with `gpt-5.4-nano` -- `refined.jsonl`'s `model` field must record the model that
+        // actually answered, not the configured default.
+        let handle = makeHandle()
+        let fakeLLM = FakeLLM()
+        await fakeLLM.setRespondedModel("gpt-5.4-nano")
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 2))
+        await queue.start()
+        let segments = try await appendSegments(2, to: handle)
+        await fakeLLM.enqueueResponse(successJSON(segments.map { ($0.id, "refined \($0.id)") }))
+
+        for segment in segments {
+            await queue.enqueue(segment)
+        }
+        await queue.drain()
+
+        let refined = try await handle.readRefinedSegments()
+        #expect(refined.count == 2)
+        #expect(refined.allSatisfy { $0.model == "gpt-5.4-nano" })
+    }
+
+    @Test("refined.jsonl falls back to config.model when the backend reports no respondedModel")
+    func refinedSegmentsFallBackToConfigModelWhenRespondedModelNil() async throws {
+        // `ClaudeCLIBackend` never reports a `respondedModel`, so this must keep stamping
+        // `config.model` exactly as before this fallback was introduced.
+        let handle = makeHandle()
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 2))
+        await queue.start()
+        let segments = try await appendSegments(2, to: handle)
+        await fakeLLM.enqueueResponse(successJSON(segments.map { ($0.id, "refined \($0.id)") }))
+
+        for segment in segments {
+            await queue.enqueue(segment)
+        }
+        await queue.drain()
+
+        let refined = try await handle.readRefinedSegments()
+        #expect(refined.count == 2)
+        #expect(refined.allSatisfy { $0.model == "claude-haiku-4-5-20251001" })
+    }
+
+    @Test("a retried batch's refined.jsonl rows also use the retry's respondedModel")
+    func retriedBatchUsesRespondedModelFromSuccessfulRetry() async throws {
+        let handle = makeHandle()
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(
+            sessionHandle: handle,
+            llm: fakeLLM,
+            config: makeConfig(batchSize: 2),
+            retryDelay: .milliseconds(20)
+        )
+        await queue.start()
+        let segments = try await appendSegments(2, to: handle)
+        await fakeLLM.enqueueError(.timedOut(.seconds(1)))
+        await fakeLLM.setRespondedModel("gpt-5.4-nano")
+        await fakeLLM.enqueueResponse(successJSON(segments.map { ($0.id, "refined \($0.id)") }))
+
+        for segment in segments {
+            await queue.enqueue(segment)
+        }
+        await queue.drain()
+
+        let refined = try await handle.readRefinedSegments()
+        #expect(refined.count == 2)
+        #expect(refined.allSatisfy { $0.model == "gpt-5.4-nano" })
+    }
+
+    // MARK: - Retry (§5.2)
+
+    @Test("a transient failure is retried once and succeeds")
+    func transientFailureRetriesOnceAndSucceeds() async throws {
+        let handle = makeHandle()
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(
+            sessionHandle: handle,
+            llm: fakeLLM,
+            config: makeConfig(batchSize: 2),
+            retryDelay: .milliseconds(20)
+        )
+        await queue.start()
+        let segments = try await appendSegments(2, to: handle)
+        await fakeLLM.enqueueError(.timedOut(.seconds(1)))
+        await fakeLLM.enqueueResponse(successJSON(segments.map { ($0.id, "refined \($0.id)") }))
+
+        for segment in segments {
+            await queue.enqueue(segment)
+        }
+        await queue.drain()
+
+        #expect(await fakeLLM.callCount == 2)
+        let refined = try await handle.readRefinedSegments()
+        #expect(refined.count == 2)
+        #expect(refined.allSatisfy { $0.refinedText != nil })
+    }
+
+    @Test("two consecutive transient failures append null + the retry's actual error, then move on")
+    func twoTransientFailuresAppendRetryErrorAndAdvance() async throws {
+        let handle = makeHandle()
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(
+            sessionHandle: handle,
+            llm: fakeLLM,
+            config: makeConfig(batchSize: 2),
+            retryDelay: .milliseconds(20)
+        )
+        await queue.start()
+        let segments = try await appendSegments(2, to: handle)
+        await fakeLLM.enqueueError(.processFailed(exitCode: 1, stderr: "first-attempt-failure"))
+        await fakeLLM.enqueueError(.processFailed(exitCode: 2, stderr: "second-attempt-failure"))
+
+        for segment in segments {
+            await queue.enqueue(segment)
+        }
+        await queue.drain()
+
+        #expect(await fakeLLM.callCount == 2)
+        let refined = try await handle.readRefinedSegments()
+        #expect(refined.count == 2)
+        #expect(refined.allSatisfy { $0.refinedText == nil })
+        #expect(refined.allSatisfy { $0.error?.contains("second-attempt-failure") == true })
+        #expect(refined.allSatisfy { $0.error?.contains("first-attempt-failure") == false })
+    }
+
+    // MARK: - Stop / recover (§5.2/§7)
+
+    @Test("a fatal LLM failure stops the queue without retrying, discards pending, and fires .disabled")
+    func fatalFailureStopsWithoutRetry() async throws {
+        let handle = makeHandle()
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 2))
+        let (collector, collectTask) = collectEvents(from: queue)
+        defer { collectTask.cancel() }
+        await queue.start()
+        let segments = try await appendSegments(2, to: handle)
+        await fakeLLM.enqueueError(.cliNotFound(searchedPaths: ["/usr/local/bin/claude"]))
+
+        for segment in segments {
+            await queue.enqueue(segment)
+        }
+        await queue.drain()
+
+        #expect(await fakeLLM.callCount == 1, "cliNotFound must not be retried")
+        let refined = try await handle.readRefinedSegments()
+        #expect(refined.isEmpty, "nothing should be written to refined.jsonl on a fatal failure")
+        #expect(await queue.stopped)
+        #expect(await queue.knownIds.isEmpty, "discarded ids must be removed from knownIds so the next start() recovers them")
+
+        try await waitUntil {
+            await collector.events.contains {
+                if case .disabled = $0 { return true }
+                return false
+            }
+        }
+    }
+
+    @Test("missingAPIKey is fatal: stops the queue without retrying, discards pending, and fires .disabled")
+    func missingAPIKeyStopsWithoutRetry() async throws {
+        // `docs/design/14-llm-provider.md` section 5: `.missingAPIKey` (openai provider, no API key
+        // resolved) joins `cliNotFound`/`notAuthenticated` as a fatal, non-retryable configuration
+        // error -- mirrors `fatalFailureStopsWithoutRetry` above exactly, just with the new error case.
+        let handle = makeHandle()
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 2))
+        let (collector, collectTask) = collectEvents(from: queue)
+        defer { collectTask.cancel() }
+        await queue.start()
+        let segments = try await appendSegments(2, to: handle)
+        await fakeLLM.enqueueError(.missingAPIKey)
+
+        for segment in segments {
+            await queue.enqueue(segment)
+        }
+        await queue.drain()
+
+        #expect(await fakeLLM.callCount == 1, "missingAPIKey must not be retried")
+        let refined = try await handle.readRefinedSegments()
+        #expect(refined.isEmpty, "nothing should be written to refined.jsonl on a fatal failure")
+        #expect(await queue.stopped)
+        #expect(await queue.knownIds.isEmpty, "discarded ids must be removed from knownIds so the next start() recovers them")
+
+        try await waitUntil {
+            await collector.events.contains {
+                if case .disabled = $0 { return true }
+                return false
+            }
+        }
+    }
+
+    @Test("enqueue is rejected while stopped, and the next start() recovers the discarded backlog")
+    func nextStartRecoversAfterFatalFailure() async throws {
+        let handle = makeHandle()
+        let fakeLLM = FakeLLM()
+        // batchSize == 3 so the recovery start() below (which re-discovers all 3 unrefined
+        // segments at once) cuts them as a single batch, matching the single scripted success
+        // response registered for that phase.
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 3))
+        await queue.start()
+        let segments = try await appendSegments(2, to: handle)
+        await fakeLLM.enqueueError(.notAuthenticated)
+
+        for segment in segments {
+            await queue.enqueue(segment)
+        }
+        await queue.flush() // force the 2-segment batch through immediately (batchSize is 3)
+        await queue.drain()
+        #expect(await queue.stopped)
+
+        // Enqueue attempts while stopped must be silently ignored.
+        let extra = try await appendSegments(1, to: handle, startingAt: 10_000).first!
+        await queue.enqueue(extra)
+        #expect(await queue.pending.isEmpty)
+
+        // Recovery: the next start() clears `stopped` and re-discovers every unrefined segment
+        // (the original two, discarded on the fatal failure, plus `extra`, never accepted above)
+        // in one backlog scan, dispatched as a single batch of 3.
+        await fakeLLM.enqueueResponse(successJSON((segments + [extra]).map { ($0.id, "refined \($0.id)") }))
+        await queue.start()
+        #expect(!(await queue.stopped))
+        await queue.drain()
+
+        let refined = try await handle.readRefinedSegments()
+        #expect(Set(refined.map(\.id)) == Set((segments + [extra]).map(\.id)))
+        #expect(refined.allSatisfy { $0.refinedText != nil })
+    }
+
+    // MARK: - Backlog (§7)
+
+    @Test("start() enqueues the transcript-minus-refined backlog, in start_ms order, skipping already-refined ids")
+    func backlogScanEnqueuesOnlyUnrefinedSegments() async throws {
+        let handle = makeHandle()
+        let segments = try await appendSegments(3, to: handle)
+        // Segment 1 (middle) was already refined by a previous run.
+        try await handle.appendRefinedSegment(makeRefinedSegment(id: segments[1].id, startMs: segments[1].startMs, batchId: "batch_00001"))
+
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 10, batchTimeoutMs: 5_000))
+        let (collector, collectTask) = collectEvents(from: queue)
+        defer { collectTask.cancel() }
+
+        await queue.start()
+
+        #expect(await queue.pending.map(\.id) == [segments[0].id, segments[2].id])
+
+        try await waitUntil {
+            await collector.events.contains {
+                if case .queued(let ids) = $0 { return Set(ids) == Set([segments[0].id, segments[2].id]) }
+                return false
+            }
+        }
+
+        await queue.flush()
+        await queue.drain()
+        let refined = try await handle.readRefinedSegments()
+        #expect(refined.count == 3, "the pre-seeded row plus the two newly-refined backlog rows")
+    }
+
+    @Test("batchId sequence numbering is restored from the max existing batchId in refined.jsonl")
+    func batchSequenceRestoredFromExistingRefinedRows() async throws {
+        let handle = makeHandle()
+        // Two segments already fully processed by a previous run (id space bumped first via
+        // appendTranscriptSegment, so the *new* segment enqueued below can't collide with either).
+        let priorSegments = try await appendSegments(2, to: handle)
+        try await handle.appendRefinedSegment(makeRefinedSegment(id: priorSegments[0].id, batchId: "batch_00007"))
+        try await handle.appendRefinedSegment(makeRefinedSegment(id: priorSegments[1].id, batchId: "batch_00003"))
+
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig())
+        await queue.start()
+
+        #expect(await queue.nextBatchSequence == 8)
+
+        let segment = try await appendSegments(1, to: handle, startingAt: 10_000).first!
+        await queue.enqueue(segment)
+        await queue.flush()
+        await queue.drain()
+
+        let refined = try await handle.readRefinedSegments()
+        let newRow = try #require(refined.first { $0.id == segment.id })
+        #expect(newRow.batchId == "batch_00008")
+    }
+
+    // MARK: - appendRefinedSegment I/O failure recovery (§5.2)
+
+    @Test("an appendRefinedSegment I/O failure keeps the id recoverable by the next start()'s backlog scan")
+    func appendFailureIsRecoveredByNextStart() async throws {
+        let directoryURL = makeTempSessionDirectory()
+        let handle = SessionHandle(directoryURL: directoryURL, meta: baseMeta())
+        let segments = try await appendSegments(2, to: handle)
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 10, batchTimeoutMs: 5_000))
+        await queue.start()
+
+        // Block refined.jsonl from ever being created, so every appendRefinedSegment call in the
+        // first batch fails with a real I/O error (§5.2's "appendRefinedSegment の I/O エラー" row).
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: directoryURL.path)
+
+        await fakeLLM.enqueueResponse(successJSON(segments.map { ($0.id, "refined \($0.id)") }))
+        for segment in segments {
+            await queue.enqueue(segment)
+        }
+        await queue.flush()
+        await queue.drain()
+
+        // Restore write access before touching the directory again.
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directoryURL.path)
+
+        var refined = try await handle.readRefinedSegments()
+        #expect(refined.isEmpty, "the append failure must not have written anything to refined.jsonl")
+        #expect(await queue.knownIds == Set(segments.map(\.id)), "failed ids stay in knownIds so they are neither double-refined nor immediately retried")
+
+        // Recovery: the next start() must re-discover these ids despite knownIds still containing
+        // them (docs/design/03-refinement-batch.md §5.2: "次回 start() のバックログスキャンは refined.jsonl
+        // を正とするので自然に再挑戦される").
+        await fakeLLM.enqueueResponse(successJSON(segments.map { ($0.id, "recovered \($0.id)") }))
+        await queue.start()
+        #expect(await queue.pending.map(\.id).sorted() == segments.map(\.id).sorted(), "the append-failed ids must be re-enqueued by the backlog scan")
+
+        await queue.flush()
+        await queue.drain()
+
+        refined = try await handle.readRefinedSegments()
+        #expect(Set(refined.map(\.id)) == Set(segments.map(\.id)))
+        #expect(refined.allSatisfy { $0.refinedText?.hasPrefix("recovered") == true })
+    }
+
+    // MARK: - start() racing an in-flight batch (§3.1/§7)
+
+    @Test("start() waits for an in-flight batch to finish before restoring nextBatchSequence, so two batches never share a batchId")
+    func startDoesNotRaceInFlightBatchSequenceRestore() async throws {
+        let handle = makeHandle()
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 2, batchTimeoutMs: 5_000))
+        await queue.start()
+
+        // Mirrors pauseRecording()'s fire-and-forget `await refinementQueue?.flush()` (never awaits
+        // drain()) immediately followed by resumeRecording()'s `start()` call: this batch's LLM call
+        // is still sleeping when the second `start()` below runs.
+        let firstBatch = try await appendSegments(2, to: handle)
+        await fakeLLM.setDelay(.milliseconds(150))
+        await fakeLLM.enqueueResponse(successJSON(firstBatch.map { ($0.id, "refined \($0.id)") }))
+        for segment in firstBatch {
+            await queue.enqueue(segment) // batchSize == 2: cuts immediately, LLM call still in flight.
+        }
+
+        await queue.start() // simulates a near-instant pause -> resume racing the in-flight batch above.
+
+        let secondBatch = try await appendSegments(2, to: handle, startingAt: 100_000)
+        await fakeLLM.enqueueResponse(successJSON(secondBatch.map { ($0.id, "refined \($0.id)") }))
+        for segment in secondBatch {
+            await queue.enqueue(segment)
+        }
+        await queue.drain()
+
+        let refined = try await handle.readRefinedSegments()
+        #expect(refined.count == 4)
+        let batchIdById = Dictionary(uniqueKeysWithValues: refined.map { ($0.id, $0.batchId) })
+        let firstBatchIds = Set(firstBatch.map { batchIdById[$0.id] })
+        let secondBatchIds = Set(secondBatch.map { batchIdById[$0.id] })
+        #expect(firstBatchIds.count == 1, "the first batch's segments must share one batchId")
+        #expect(secondBatchIds.count == 1, "the second batch's segments must share one batchId")
+        #expect(firstBatchIds != secondBatchIds, "two unrelated batches must never share a batchId, even when start() races an in-flight one")
+    }
+
+    // MARK: - Context refresh (§4.3)
+
+    @Test("system prompt only reloads context.md every contextRefreshBatches batches, or on refreshContextNow()")
+    func contextReloadsOnCadenceAndOnDemand() async throws {
+        let handle = makeHandle()
+        try await handle.writeContext("V1")
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 1, contextRefreshBatches: 2))
+        await queue.start()
+
+        let segments = try await appendSegments(4, to: handle)
+
+        await queue.enqueue(segments[0]) // batch 1: uses V1 (initial load)
+        await queue.drain()
+        try await handle.writeContext("V2")
+        await queue.enqueue(segments[1]) // batch 2: still V1 (batchesSinceContextLoad == 1 < 2)
+        await queue.drain()
+        await queue.enqueue(segments[2]) // batch 3: reload -> V2 (batchesSinceContextLoad == 2 >= 2)
+        await queue.drain()
+
+        try await handle.writeContext("V3")
+        await queue.refreshContextNow()
+        await queue.enqueue(segments[3]) // batch 4: forced reload -> V3
+        await queue.drain()
+
+        let requests = await fakeLLM.receivedRequests
+        #expect(requests.count == 4)
+        #expect(requests[0].system.contains("V1"))
+        #expect(requests[1].system.contains("V1"))
+        #expect(requests[2].system.contains("V2"))
+        #expect(requests[3].system.contains("V3"))
+    }
+
+    // MARK: - §9 participant context injection (docs/design/22-participant-hints.md §9)
+
+    private func makeVoiceprintStore() -> VoiceprintStore {
+        VoiceprintStore(fileURL: makeTempSessionDirectory().appendingPathComponent("voiceprints.json"))
+    }
+
+    @Test("a non-empty roster injects a 【参加者】 block into the reloaded system prompt")
+    func rosterInjectsParticipantBlock() async throws {
+        let handle = makeHandle()
+        try await handle.writeContext("アジェンダ: 進捗確認")
+        let voiceprintStore = makeVoiceprintStore()
+        let tanaka = try await voiceprintStore.registerSpeaker(name: "田中さん", embedding: [])
+        let sato = try await voiceprintStore.registerSpeaker(name: "佐藤さん", embedding: [])
+        try await handle.updateParticipants { participants in
+            participants.participantIds = [tanaka.id, sato.id]
+        }
+
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 1), voiceprintStore: voiceprintStore)
+        await queue.start()
+        let segments = try await appendSegments(1, to: handle)
+        await queue.enqueue(segments[0])
+        await queue.drain()
+
+        let requests = await fakeLLM.receivedRequests
+        #expect(requests.count == 1)
+        #expect(requests[0].system.contains("アジェンダ: 進捗確認"))
+        #expect(requests[0].system.contains("【参加者】\n田中さん、佐藤さん"))
+    }
+
+    @Test("an empty roster leaves the system prompt exactly as before (no 【参加者】 block)")
+    func emptyRosterLeavesSystemPromptUnchanged() async throws {
+        let handle = makeHandle()
+        try await handle.writeContext("アジェンダ: 進捗確認")
+        let voiceprintStore = makeVoiceprintStore()
+
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 1), voiceprintStore: voiceprintStore)
+        await queue.start()
+        let segments = try await appendSegments(1, to: handle)
+        await queue.enqueue(segments[0])
+        await queue.drain()
+
+        let requests = await fakeLLM.receivedRequests
+        #expect(requests.count == 1)
+        #expect(requests[0].system.contains("アジェンダ: 進捗確認"))
+        #expect(!requests[0].system.contains("【参加者】"))
+    }
+
+    @Test("roster changes mid-recording are only picked up on the next context reload cadence, not immediately")
+    func rosterChangeFollowsContextRefreshCadence() async throws {
+        let handle = makeHandle()
+        try await handle.writeContext("V1")
+        let voiceprintStore = makeVoiceprintStore()
+        let tanaka = try await voiceprintStore.registerSpeaker(name: "田中さん", embedding: [])
+
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(
+            sessionHandle: handle,
+            llm: fakeLLM,
+            config: makeConfig(batchSize: 1, contextRefreshBatches: 2),
+            voiceprintStore: voiceprintStore
+        )
+        await queue.start()
+
+        let segments = try await appendSegments(3, to: handle)
+        await queue.enqueue(segments[0]) // batch 1: initial load, roster still empty
+        await queue.drain()
+
+        // Roster added mid-window; no refreshContextNow() call (§9: same lazy cadence as context.md).
+        try await handle.updateParticipants { participants in
+            participants.participantIds = [tanaka.id]
+        }
+        await queue.enqueue(segments[1]) // batch 2: batchesSinceContextLoad == 1 < 2, cache not reloaded yet
+        await queue.drain()
+        await queue.enqueue(segments[2]) // batch 3: batchesSinceContextLoad == 2 >= 2, reload picks up roster
+        await queue.drain()
+
+        let requests = await fakeLLM.receivedRequests
+        #expect(requests.count == 3)
+        #expect(!requests[0].system.contains("【参加者】"))
+        #expect(!requests[1].system.contains("【参加者】"), "roster change must not be reflected before the next cadence reload")
+        #expect(requests[2].system.contains("【参加者】\n田中さん"))
+    }
+
+    // MARK: - glossaryProvider (`docs/design/28-glossary.md` §3)
+
+    @Test("glossaryProvider's rendered block is injected into every batch's system prompt")
+    func glossaryProviderInjectsRenderedBlockIntoEverySystemPrompt() async throws {
+        let handle = makeHandle()
+        try await handle.writeContext("アジェンダ: 進捗確認")
+        let glossary = [GlossaryEntry(term: "nekosuke", reading: "ねこすけ")]
+
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(
+            sessionHandle: handle,
+            llm: fakeLLM,
+            config: makeConfig(batchSize: 1),
+            glossaryProvider: { glossary }
+        )
+        await queue.start()
+        let segments = try await appendSegments(2, to: handle)
+        await queue.enqueue(segments[0])
+        await queue.drain()
+        await queue.enqueue(segments[1])
+        await queue.drain()
+
+        let requests = await fakeLLM.receivedRequests
+        #expect(requests.count == 2)
+        let expectedBlock = GlossaryRenderer.render(entries: glossary)!
+        // Unlike context.md, the glossary block is not gated by the context-reload cadence -- it
+        // must appear in every batch's system prompt, not just the first.
+        #expect(requests[0].system.contains(expectedBlock))
+        #expect(requests[1].system.contains(expectedBlock))
+    }
+
+    @Test("glossaryCategoriesProvider groups the glossary block in every batch's system prompt")
+    func glossaryCategoriesProviderGroupsTheBlockInEveryBatch() async throws {
+        let handle = makeHandle()
+        try await handle.writeContext("アジェンダ: 進捗確認")
+        let glossary = [
+            GlossaryEntry(term: "Acme Works", reading: ""),
+            GlossaryEntry(term: "nekosuke", reading: "ねこすけ", category: "person")
+        ]
+        let categories = [GlossaryCategory(id: "person", name: "人物名", instruction: "敬称は残す。")]
+
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(
+            sessionHandle: handle,
+            llm: fakeLLM,
+            config: makeConfig(batchSize: 1),
+            glossaryProvider: { glossary },
+            glossaryCategoriesProvider: { categories }
+        )
+        await queue.start()
+        let segments = try await appendSegments(2, to: handle)
+        await queue.enqueue(segments[0])
+        await queue.drain()
+        await queue.enqueue(segments[1])
+        await queue.drain()
+
+        let requests = await fakeLLM.receivedRequests
+        #expect(requests.count == 2)
+        let expectedBlock = GlossaryRenderer.render(entries: glossary, categories: categories)!
+        #expect(expectedBlock.contains("## 人物名"), "sanity: the fixture actually exercises grouping")
+        // Like `glossaryProvider`, not gated by the context-reload cadence: every batch, not just the first.
+        #expect(requests[0].system.contains(expectedBlock))
+        #expect(requests[1].system.contains(expectedBlock))
+    }
+
+    @Test("glossaryCategoriesProvider defaults to an empty list, preserving the flat glossary block")
+    func glossaryCategoriesProviderDefaultsToEmptyList() async throws {
+        let handle = makeHandle()
+        try await handle.writeContext("アジェンダ: 進捗確認")
+        let glossary = [GlossaryEntry(term: "nekosuke", reading: "ねこすけ", category: "person")]
+
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(
+            sessionHandle: handle,
+            llm: fakeLLM,
+            config: makeConfig(batchSize: 1),
+            glossaryProvider: { glossary }
+        )
+        await queue.start()
+        let segments = try await appendSegments(1, to: handle)
+        await queue.enqueue(segments[0])
+        await queue.drain()
+
+        let requests = await fakeLLM.receivedRequests
+        #expect(requests.count == 1)
+        // With no categories, the entry's now-dangling `person` reference degrades to uncategorized.
+        #expect(requests[0].system.contains(GlossaryRenderer.render(entries: glossary)!))
+        #expect(!requests[0].system.contains("## 人物名"))
+    }
+
+    @Test("glossaryProvider defaults to an empty list, so the system prompt has no glossary section")
+    func glossaryProviderDefaultsToEmptyList() async throws {
+        let handle = makeHandle()
+        try await handle.writeContext("アジェンダ: 進捗確認")
+
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 1))
+        await queue.start()
+        let segments = try await appendSegments(1, to: handle)
+        await queue.enqueue(segments[0])
+        await queue.drain()
+
+        let requests = await fakeLLM.receivedRequests
+        #expect(requests.count == 1)
+        #expect(!requests[0].system.contains("# Glossary"))
+    }
+}
+
+private extension FakeLLM {
+    func setDelay(_ delay: Duration) {
+        artificialDelay = delay
+    }
+
+    func setRespondedModel(_ model: String?) {
+        respondedModelToReturn = model
+    }
+}

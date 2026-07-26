@@ -1,0 +1,77 @@
+name: Kikimi
+
+options:
+  bundleIdPrefix: io.github.uphy
+  deploymentTarget:
+    macOS: "14.2"
+  createIntermediateGroups: true
+
+packages:
+  Yams:
+    url: https://github.com/jpsim/Yams
+    from: "5.0.0"
+
+targets:
+  Kikimi:
+    type: application
+    platform: macOS
+    preBuildScripts:
+      - name: SwiftLint
+        basedOnDependencyAnalysis: false
+        shell: /bin/bash
+        script: |
+          if command -v swiftlint >/dev/null 2>&1; then
+            swiftlint lint --strict
+          else
+            echo "warning: SwiftLint not installed. Run 'brew install swiftlint'."
+          fi
+    sources:
+      - path: Kikimi
+    info:
+      path: Kikimi/Info.plist
+      properties:
+        CFBundleDisplayName: Kikimi
+        CFBundleName: Kikimi
+        LSMinimumSystemVersion: "$(MACOSX_DEPLOYMENT_TARGET)"
+        LSUIElement: true
+        NSHumanReadableCopyright: "Copyright © 2026 uphy"
+        NSPrincipalClass: NSApplication
+        NSMicrophoneUsageDescription: "Kikimi needs microphone access to transcribe meetings."
+        NSAudioCaptureUsageDescription: "Kikimi needs system audio access to transcribe meeting audio from other apps."
+        CFBundleURLTypes:
+          - CFBundleURLName: io.github.uphy.Kikimi
+            CFBundleURLSchemes:
+              - kikimi
+        # Drag payload for reordering / re-categorizing 用語集 entries
+        # (`Kikimi/Glossary/GlossaryEntryTransfer.swift`, docs/design/28-glossary.md §4.3).
+        # `UTType(exportedAs:)` expects its identifier to be declared here; without the declaration the
+        # runtime logs "type ... was expected to be declared and exported" and drag delivery is not
+        # guaranteed. The type never leaves this process, hence no UTTypeTagSpecification.
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: io.github.uphy.Kikimi.glossary-entry
+            UTTypeDescription: Kikimi Glossary Entry
+            UTTypeConformsTo:
+              - public.data
+    settings:
+      base:
+        SWIFT_VERSION: "5.9"
+        MACOSX_DEPLOYMENT_TARGET: "14.2"
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.uphy.Kikimi
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_ENTITLEMENTS: Kikimi/Kikimi.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    dependencies:
+      - package: Yams
+        product: Yams
+  KikimiTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: KikimiTests
+    dependencies:
+      - target: Kikimi
+      - package: Yams
+        product: Yams
+    settings:
+      base:
+        SWIFT_VERSION: "5.9"
