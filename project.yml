@@ -32,6 +32,11 @@ targets:
       properties:
         CFBundleDisplayName: Kikimi
         CFBundleName: Kikimi
+        # Overrides xcodegen's "1.0" / "1" defaults. `.mise/tasks/build/_default` substitutes
+        # these from `APP_VERSION` when it assembles the .app, so a release ships the tag's
+        # version instead of a hardcoded one; Xcode resolves them from the settings below.
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         LSMinimumSystemVersion: "$(MACOSX_DEPLOYMENT_TARGET)"
         LSUIElement: true
         NSHumanReadableCopyright: "Copyright © 2026 uphy"
@@ -56,6 +61,10 @@ targets:
       base:
         SWIFT_VERSION: "5.9"
         MACOSX_DEPLOYMENT_TARGET: "14.2"
+        # Placeholder only — the shipped version comes from the git tag via `APP_VERSION`
+        # (`.mise/tasks/build/_default`). Xcode builds are for browsing and debugging.
+        MARKETING_VERSION: "0.0.0"
+        CURRENT_PROJECT_VERSION: "0.0.0"
         PRODUCT_BUNDLE_IDENTIFIER: io.github.uphy.Kikimi
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_ENTITLEMENTS: Kikimi/Kikimi.entitlements
