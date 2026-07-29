@@ -114,6 +114,19 @@ struct MeetingWorkspaceView: View {
                 onUpdateSimpleWatcher: { id, draft in try await viewModel.updateSimpleWatcher(id: id, draft) },
                 onConvertSimpleWatcherToFull: { id in try await viewModel.convertSimpleWatcherToFull(id: id) }
             )
+        case .chat:
+            // `docs/design/38-session-chat.md` §3.5. Available from Recording onward, like every
+            // other tab -- Draft shows no tab bar at all (§3.1/CH1), and there is nothing to ask
+            // about before a single line has been transcribed.
+            ChatTabView(
+                turns: viewModel.chatTurns,
+                draft: $viewModel.chatDraft,
+                isResponding: viewModel.isChatResponding,
+                copyFeedbackTurnId: viewModel.chatCopyFeedbackTurnId,
+                onSend: { Task { await viewModel.sendChatMessage() } },
+                onRetry: { id in Task { await viewModel.retryChatTurn(id: id) } },
+                onCopy: { id in viewModel.copyChatAnswer(id: id) }
+            )
         }
     }
 

@@ -395,6 +395,8 @@ struct KikimiConfigData: Codable, Equatable, Sendable {
     var export: ExportConfig
     var audio: AudioConfig
     var dictation: DictationConfig
+    /// `docs/design/38-session-chat.md` §6: the session chat tab's model/budget/timeout.
+    var chat: ChatConfig
     var defaults: DefaultsConfig
     var glossary: [GlossaryEntry]
     var glossaryCategories: [GlossaryCategory]
@@ -402,7 +404,7 @@ struct KikimiConfigData: Codable, Equatable, Sendable {
     /// Every other field's Swift name already matches its `config.yaml` key verbatim, so this type had
     /// no `CodingKeys` at all until `glossaryCategories` -- the first one needing a snake_case mapping.
     enum CodingKeys: String, CodingKey {
-        case diarization, refinement, llm, stt, summary, watchers, export, audio, dictation, defaults, glossary
+        case diarization, refinement, llm, stt, summary, watchers, export, audio, dictation, chat, defaults, glossary
         case glossaryCategories = "glossary_categories"
     }
 
@@ -416,6 +418,7 @@ struct KikimiConfigData: Codable, Equatable, Sendable {
         export: ExportConfig = .default,
         audio: AudioConfig = .default,
         dictation: DictationConfig = .default,
+        chat: ChatConfig = .default,
         defaults: DefaultsConfig = .default,
         glossary: [GlossaryEntry] = [],
         glossaryCategories: [GlossaryCategory] = []
@@ -429,6 +432,7 @@ struct KikimiConfigData: Codable, Equatable, Sendable {
         self.export = export
         self.audio = audio
         self.dictation = dictation
+        self.chat = chat
         self.defaults = defaults
         self.glossary = glossary
         self.glossaryCategories = glossaryCategories
@@ -451,6 +455,7 @@ struct KikimiConfigData: Codable, Equatable, Sendable {
         export = try container.decodeIfPresent(ExportConfig.self, forKey: .export) ?? .default
         audio = try container.decodeIfPresent(AudioConfig.self, forKey: .audio) ?? .default
         dictation = try container.decodeIfPresent(DictationConfig.self, forKey: .dictation) ?? .default
+        chat = try container.decodeIfPresent(ChatConfig.self, forKey: .chat) ?? .default
         defaults = try container.decodeIfPresent(DefaultsConfig.self, forKey: .defaults) ?? .default
 
         // Mirrors `DictationContextConfig.init(from:)`'s glossary-array handling (now superseded by

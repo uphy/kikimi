@@ -20,6 +20,8 @@ enum MeetingWorkspaceTab: String, Codable, CaseIterable, Sendable, Identifiable 
     case prep
     case meeting
     case watchers
+    /// `docs/design/38-session-chat.md` CH1: ad-hoc questions about this session's conversation.
+    case chat
 
     var id: String { rawValue }
 
@@ -29,6 +31,7 @@ enum MeetingWorkspaceTab: String, Codable, CaseIterable, Sendable, Identifiable 
         case .prep: return "準備"
         case .meeting: return "会議"
         case .watchers: return "Watchers"
+        case .chat: return "チャット"
         }
     }
 }
@@ -140,6 +143,12 @@ struct WorkspaceWindowState: Codable, Equatable, Identifiable, Sendable {
             meetingPaneMode = decodedPaneMode ?? .both
         case MeetingWorkspaceTab.meeting.rawValue:
             activeTab = .meeting
+            meetingPaneMode = decodedPaneMode ?? .both
+        case MeetingWorkspaceTab.chat.rawValue:
+            // `docs/design/38-session-chat.md` §8.1(d): this `switch` is hand-written, so adding the
+            // enum case alone is not enough -- without this arm `chat` falls to `default:` and the
+            // window silently reopens on 準備 every time.
+            activeTab = .chat
             meetingPaneMode = decodedPaneMode ?? .both
         default:
             activeTab = .prep
