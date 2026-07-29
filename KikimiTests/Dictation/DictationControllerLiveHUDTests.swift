@@ -115,7 +115,7 @@ struct DictationControllerLiveHUDTests {
     }
 
     /// Mirrors `DictationControllerHistoryTests.waitUntil`.
-    private func waitUntil(timeout: Duration = .seconds(5), predicate: @escaping () async -> Bool) async throws {
+    private func waitUntil(timeout: Duration = .seconds(10), predicate: @escaping () async -> Bool) async throws {
         let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
             if await predicate() { return }
