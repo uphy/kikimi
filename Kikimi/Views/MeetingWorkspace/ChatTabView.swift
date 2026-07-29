@@ -222,21 +222,23 @@ struct ChatTabView: View {
 
     private var composer: some View {
         VStack(alignment: .trailing, spacing: 6) {
+            // `PlainTextEditor`, not a bare `TextEditor`: it already solves the two things this
+            // field needs. Its placeholder is positioned against the `NSTextView`'s own text origin
+            // (a hand-layered overlay has to guess that inset, and guessed wrong here -- the
+            // placeholder sat a line below the caret), and its `updateNSView` refuses to touch the
+            // string while an IME composition is in flight, which is what keeps fast Japanese input
+            // from dropping characters. A chat composer is a Japanese-input field, so that matters
+            // as much here as it does in the Prep tab.
+            //
             // Multi-line, and Return inserts a newline rather than sending: questions written during
             // a meeting are often several lines long, so ⌘⏎ is the send gesture (§3.5).
-            TextEditor(text: $draft)
-                .font(.body)
-                .frame(minHeight: 56, maxHeight: 120)
-                .overlay(alignment: .topLeading) {
-                    if draft.isEmpty {
-                        Text("質問を入力…")
-                            .foregroundStyle(.tertiary)
-                            .padding(.leading, 5)
-                            .padding(.top, 8)
-                            .allowsHitTesting(false)
-                    }
-                }
-                .disabled(isResponding)
+            PlainTextEditor(
+                text: $draft,
+                isEditable: !isResponding,
+                placeholder: "質問を入力…"
+            )
+            .frame(minHeight: 56, maxHeight: 120)
+            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.3)))
 
             Button("送信") { onSend() }
                 .keyboardShortcut(.return, modifiers: .command)
