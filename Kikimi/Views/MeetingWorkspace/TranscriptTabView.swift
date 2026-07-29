@@ -130,6 +130,14 @@ struct TranscriptTabView: View {
     /// to `true` once they scroll back down. Starts `true` so a freshly opened tab follows along.
     @State private var isPinnedToBottom = true
 
+    /// `true` from the moment an auto-scroll is issued until shortly after its animation would have
+    /// finished. Guards the bottom anchor's `onDisappear` (see `TranscriptAutoFollow.shouldUnpin`):
+    /// appending a row re-lays out the stack and can briefly pull the anchor out of `LazyVStack`'s
+    /// realized region *because of* the very scroll that is chasing it, which used to unpin
+    /// auto-follow permanently -- once unpinned, nothing scrolls, so the anchor never reappears to
+    /// re-pin it, and the tab silently stopped following mid-meeting.
+    @State private var isAutoScrolling = false
+
     /// Zero-height marker appended after the last row. Its `onAppear`/`onDisappear` firing is used
     /// as a proxy for "is the bottom of the list currently visible", since `LazyVStack` only
     /// realizes views inside (or near) the scroll view's visible region. This avoids depending on
@@ -170,7 +178,10 @@ struct TranscriptTabView: View {
                         .frame(height: 1)
                         .id(Self.bottomAnchorID)
                         .onAppear { isPinnedToBottom = true }
-                        .onDisappear { isPinnedToBottom = false }
+                        .onDisappear {
+                            guard TranscriptAutoFollow.shouldUnpin(isAutoScrolling: isAutoScrolling) else { return }
+                            isPinnedToBottom = false
+                        }
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
@@ -182,8 +193,8 @@ struct TranscriptTabView: View {
                 // initial follow-to-bottom has to happen here rather than in `onChange`.
                 scrollToBottom(proxy: proxy, animated: false)
             }
-            .onChange(of: rows) { oldRows, newRows in
-                handleRowsChange(oldRows: oldRows, newRows: newRows, proxy: proxy)
+            .onChange(of: rows) { _, _ in
+                scrollToBottomIfPinned(proxy: proxy)
             }
             .onChange(of: micVolatileText) { _, _ in
                 scrollToBottomIfPinned(proxy: proxy)
@@ -248,41 +259,39 @@ struct TranscriptTabView: View {
         }
     }
 
-    /// Auto-scrolls only when both hold:
-    /// 1. `isPinnedToBottom` — the user hasn't scrolled away.
-    /// 2. The newest change landed at the tail of `newRows` — i.e. `TranscriptRowList.inserted`'s
-    ///    insertion position matched `rows.last?.id` at insertion time. A mid-list insertion (an
-    ///    out-of-order segment from the other audio stream arriving late, section 6.3 "実装上の注意")
-    ///    leaves the previous tail row's `id` unchanged as the new list's last element too, so
-    ///    comparing `oldRows.last?.id` against `newRows.last?.id` distinguishes the two cases without
-    ///    needing to re-derive the insertion index here.
-    private func handleRowsChange(
-        oldRows: [TranscriptRowViewModel],
-        newRows: [TranscriptRowViewModel],
-        proxy: ScrollViewProxy
-    ) {
-        guard isPinnedToBottom, newRows.last != nil else { return }
-        guard oldRows.last?.id != newRows.last?.id else { return }
-        scrollToBottom(proxy: proxy, animated: true)
-    }
-
-    /// Scrolls to the bottom anchor only if the user hasn't scrolled away -- used by the volatile-text
-    /// `onChange` handlers, which (unlike `handleRowsChange`) have no "did this land at the tail"
-    /// question to ask: `micVolatileText`/`systemVolatileText` are always rendered after every
-    /// confirmed row, so any change to either is always a tail-of-list change.
+    /// Follows the bottom whenever the user hasn't scrolled away, for *any* change to `rows` --
+    /// deliberately not just an append.
+    ///
+    /// This used to additionally require `oldRows.last?.id != newRows.last?.id` ("the change landed
+    /// at the tail") so that a mid-list insertion — an out-of-order segment from the other audio
+    /// stream arriving late (`docs/design/06-ui-panels.md` section 6.3 "実装上の注意") — wouldn't yank
+    /// the viewport. But that guard also swallowed every *in-place* row mutation, and those are the
+    /// common case while recording: refinement rewrites `.raw` → `.refined` text (usually longer, and
+    /// often wrapping onto more lines) and the merge gate folds a row away entirely, both of which
+    /// change the stack's height below the viewport without changing the tail row's id. The visible
+    /// bottom then drifted further off-screen with every batch. While pinned to the bottom, following
+    /// is the right answer for a mid-list insertion too: the user is at the end of the list, so the
+    /// end of the list is what should stay on screen.
     private func scrollToBottomIfPinned(proxy: ScrollViewProxy) {
-        guard isPinnedToBottom else { return }
+        guard TranscriptAutoFollow.shouldFollow(isPinnedToBottom: isPinnedToBottom) else { return }
         scrollToBottom(proxy: proxy, animated: true)
     }
 
     private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool) {
         guard !rows.isEmpty || !micVolatileText.isEmpty || !systemVolatileText.isEmpty else { return }
+        // Held across the scroll so the anchor's own `onDisappear` can't mistake this scroll's
+        // relayout for the user scrolling away (see `isAutoScrolling`).
+        isAutoScrolling = true
         if animated {
-            withAnimation(.easeOut(duration: 0.2)) {
+            withAnimation(.easeOut(duration: TranscriptAutoFollow.scrollAnimationDuration)) {
                 proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
             }
         } else {
             proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(TranscriptAutoFollow.autoScrollSettleDuration))
+            isAutoScrolling = false
         }
     }
 }
