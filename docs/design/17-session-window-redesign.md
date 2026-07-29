@@ -57,11 +57,13 @@ Session Window の UX リデザインの詳細設計。**本ドキュメント�
 - 「Watchers」を開くと Watchers タブと同じ管理コンポーネント（§5.4）を埋め込み表示
 - フッタは「他セッションから複製…」のみ（「初期値に戻す」は撤去、R8）
 
-### 3.2 Recording / Paused / Ended: 3 タブ
+### 3.2 Recording / Paused / Ended: 4 タブ
+
+`docs/design/38-session-chat.md` CH1 で「チャット」タブが加わり、当初の 3 タブから 4 タブになった。
 
 ```
 ┌──────────────────────────────────────────────────┐
-│ [ 準備 ] [ 会議 ] [ Watchers ]                     │
+│ [ 準備 ] [ 会議 ] [ Watchers ] [ チャット ]          │
 ├──────────────────────────────────────────────────┤
 │ デイリースクラム    [■ 一時停止] [⏹ 会議終了]  25:12  │
 ├──────────────────────────────────────［▤|▥|▦]──┤   ← 会議タブのみ
@@ -122,6 +124,7 @@ enum MeetingPaneMode: String, Codable, Sendable, CaseIterable, Identifiable {
 | `summary` | `.meeting` | `.summary` |
 | `watchers` | `.watchers` | `.both`（既定） |
 | `meeting`（新値） | `.meeting` | `meeting_pane_mode` キーがあればその値、なければ `.both` |
+| `chat`（design 38 CH1） | `.chat` | `meeting_pane_mode` キーがあればその値、なければ `.both` |
 | 不明値 | `.prep` にフォールバック | `.both` |
 
 - `meeting_pane_mode` キーが存在する場合はそちらを優先（新形式の読み込み）
@@ -169,7 +172,7 @@ var body: some View {
         if viewModel.isDraft {
             PrepContentView(..., showsWatchersSection: true)   // Draft 専用画面
         } else {
-            TabView(selection: $viewModel.activeTab) { ... }   // 3 タブ
+            TabView(selection: $viewModel.activeTab) { ... }   // 4 タブ（design 38 CH1）
         }
     }
 }
@@ -296,7 +299,7 @@ var body: some View {
 
 | 現状 | 変更後 | 箇所 |
 |---|---|---|
-| Prep / Transcript / Summary / Watchers（タブ） | 準備 / 会議 / Watchers（3 タブ） | `MeetingWorkspaceTab.title` |
+| Prep / Transcript / Summary / Watchers（タブ） | 準備 / 会議 / Watchers / チャット（4 タブ。チャットは design 38） | `MeetingWorkspaceTab.title` |
 | Context | 事前メモ | `PrepContentView` |
 | Summary Template | サマリの構成をカスタマイズ（DisclosureGroup ラベル） | 同上 |
 | summary は次回更新で反映、refinement は最大10バッチ後に反映されます。 | ここの変更は次のサマリ更新から反映されます。書き起こしの整形には少し遅れて反映されます。（Recording/Paused 中のみ表示） | 同上 |
