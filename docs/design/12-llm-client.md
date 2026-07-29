@@ -106,12 +106,28 @@ protocol LLMCompleting: Sendable {
 /// its shape must match `T` (verified by a unit test that decodes a sample into `T`).
 struct LLMRequest: Sendable {
     var system: String        // fixed system prompt, kept small (section 2.2)
-    var user: String          // per-call prompt, passed on stdin
+    var user: String          // per-call prompt, passed on stdin (messages 非 nil なら最新ターンのみ)
+    /// 過去の会話ターン（古い順、最新の質問は含まない）。セッションチャット以外は nil
+    /// （design 38 §8.1(b)）。平坦化はバックエンドの責務: OpenAI 互換は配列のまま送り、
+    /// Claude CLI は `Q:` / `A:` の 1 本のテキストに畳む。
+    var messages: [LLMMessage]?
     var schema: String        // handed to --json-schema
     var model: String         // resolved model id (caller resolves from AppConfig)
+    /// 既定 60 秒は「バッチ／直近セグメント単位の小さいプロンプト」を送る既存の呼び出し元に
+    /// 合わせた値で、入力規模が 1 桁違う呼び出し元は明示的に上書きする
+    /// （`DictationRefiner` の `dictation.refine_timeout_ms`、`ChatRunner` の
+    /// `chat.timeout_seconds` = design 38 CH19）。
     var timeout: Duration = .seconds(60)
     /// Stub-mode dispatch key (section 5); ignored in production.
     var stubKey: String? = nil
+}
+
+/// `LLMRequest.messages` の 1 要素。`system` ロールは持たない（system prompt は
+/// `LLMRequest.system` で、各バックエンドが自分の流儀で置く）。
+struct LLMMessage: Sendable, Equatable {
+    enum Role: String, Sendable, Equatable { case user, assistant }
+    var role: Role
+    var text: String
 }
 
 /// `value` plus the usage/cost the CLI reported, so callers that want per-session cost accounting
@@ -210,8 +226,14 @@ subprocess の起動・待機・タイムアウトは runner に閉じ込める�
   使わない）
 - stdout / stderr の `Pipe` は `readabilityHandler`（または専用の読み取り Task）で**終了待ちと並行に**逐次
   読み出し、バッファに追記する。これで pipe デッドロックを回避
-- stdin にユーザープロンプトを書いて close → プロセス起動 → 終了 handler で continuation を resume →
-  蓄積した stdout を返す
+- プロセス起動 → **stdin への書き込みと close は専用の detached Task に出し、その完了を待たずに**
+  タイムアウトの race に入る → 終了 handler で continuation を resume → 蓄積した stdout を返す
+  （design 38 §8.1(a) / CH20）。macOS の pipe バッファは最大 64KB なので、同期 write のままだと
+  それを超えるプロンプト（チャットの `max_context_chars: 120000` は日本語で約 360KB）で
+  **タイムアウトが張られる前にブロック**し、子が stdin を読まずに固まると永久に返らない。
+  write は `write(contentsOf:)` を使い、EPIPE を Swift エラーとして受ける（ObjC 例外だとアプリが落ちる）。
+  あわせて**プロセス起動前に一度だけ `SIGPIPE` を `SIG_IGN` にする** — 子が stdin を読まずに終了した
+  瞬間にシグナルでプロセスごと死ぬのを防ぐ
 - **タイムアウト**: `Task.sleep(timeout)` を並行に走らせ、超過したら `process.terminate()`（SIGTERM）→ 短い
   猶予後になお生きていれば `interrupt`/kill。**必ず子プロセスを reap し、両 `Pipe` の FD を close してから**
   `timedOut` を投げる（プロセス／FD リーク防止, SWE review C3）。正常終了経路でも `readabilityHandler` を

@@ -132,6 +132,63 @@ struct ClaudeCLIProcessRunnerTests {
         }
     }
 
+    // MARK: - Large stdin (38-session-chat.md section 8.1(a) / CH20)
+
+    @Test("run(_:) delivers a stdin payload several times larger than the pipe buffer")
+    func runDeliversLargeStdin() async throws {
+        // A macOS pipe buffers at most 64KB, so this only completes if the write happens off the
+        // calling task while `cat` drains the pipe. Chat prompts are routinely this size
+        // (`chat.max_context_chars: 120000` is ~360KB in Japanese UTF-8).
+        let runner = ClaudeCLIProcessRunner(
+            claudePathOverride: "/bin/cat",
+            isExecutableFile: { _ in true },
+            whichResolver: { nil }
+        )
+        let payload = String(repeating: "あ", count: 100_000)
+
+        let stdout = try await runner.run(arguments: [], stdin: payload, timeout: .seconds(30))
+
+        #expect(stdout == payload)
+    }
+
+    @Test("run(_:) still times out when the child never reads a stdin payload past the pipe buffer")
+    func runTimesOutOnLargeStdinChildNeverReads() async throws {
+        // The regression this guards: with a synchronous `write`, the >64KB payload blocks before
+        // the timeout race is even armed, so `run` hangs forever instead of returning `.timedOut`.
+        // `sleep` never reads stdin, which is exactly how a wedged `claude` process behaves.
+        let runner = ClaudeCLIProcessRunner(
+            claudePathOverride: "/bin/sleep",
+            isExecutableFile: { _ in true },
+            whichResolver: { nil }
+        )
+        let start = ContinuousClock.now
+        await #expect(throws: LLMClientError.timedOut(.milliseconds(300))) {
+            _ = try await runner.run(
+                arguments: ["30"],
+                stdin: String(repeating: "あ", count: 100_000),
+                timeout: .milliseconds(300)
+            )
+        }
+        #expect(ContinuousClock.now - start < .seconds(5))
+    }
+
+    @Test("run(_:) survives a child that exits without reading its stdin (EPIPE, not SIGPIPE)")
+    func runSurvivesChildExitingWithoutReadingStdin() async throws {
+        // Writing to a pipe whose reader is gone raises SIGPIPE, which would kill this whole test
+        // process if the runner did not set it to SIG_IGN before launching children.
+        let runner = ClaudeCLIProcessRunner(
+            claudePathOverride: "/bin/sh",
+            isExecutableFile: { _ in true },
+            whichResolver: { nil }
+        )
+        let stdout = try await runner.run(
+            arguments: ["-c", "echo done"],
+            stdin: String(repeating: "あ", count: 100_000),
+            timeout: .seconds(10)
+        )
+        #expect(stdout == "done\n")
+    }
+
     @Test("run(_:) times out, kills the child, and returns promptly rather than hanging")
     func runTimesOutAndKillsChild() async throws {
         let runner = ClaudeCLIProcessRunner(

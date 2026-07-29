@@ -24,7 +24,7 @@ struct ClaudeCLIBackend: LLMBackend {
         let arguments = Self.buildArguments(request: request)
         let stdout: String
         do {
-            stdout = try await runner.run(arguments: arguments, stdin: request.user, timeout: request.timeout)
+            stdout = try await runner.run(arguments: arguments, stdin: Self.buildStdin(request: request), timeout: request.timeout)
         } catch let error as LLMClientError {
             logger.error("claude CLI call failed: \(String(describing: error), privacy: .public)")
             throw error
@@ -53,6 +53,39 @@ struct ClaudeCLIBackend: LLMBackend {
             "--json-schema", request.schema,
             "--model", request.model
         ]
+    }
+
+    // MARK: - stdin assembly (38-session-chat.md section 4.1)
+
+    /// Folds `request.messages` (if any) and `request.user` into the single prompt the CLI accepts.
+    ///
+    /// `claude -p --output-format json` takes one prompt on stdin and has no multi-turn input form
+    /// (`--input-format stream-json` exists but is only usable together with
+    /// `--output-format stream-json`, which would mean rewriting the whole response parser), so the
+    /// conversation is flattened into `Q:` / `A:` blocks here -- in the backend, where the workaround
+    /// can be deleted the day the CLI does support turn arrays, without touching prompt construction
+    /// (38-session-chat.md CH15).
+    ///
+    /// Order is preserved exactly as the prompt builder laid it out: prior turns oldest-first, then
+    /// the latest question last (§4.2's "安定した大きい塊 → 伸びる部分 → 最新の質問").
+    ///
+    /// With `messages == nil` -- every consumer other than chat -- this returns `request.user`
+    /// unchanged, so no existing call path sees a single byte of difference.
+    static func buildStdin(request: LLMRequest) -> String {
+        guard let messages = request.messages, !messages.isEmpty else {
+            return request.user
+        }
+        let priorTurns = messages.map { "\(prefix(for: $0.role))\($0.text)" }
+        // The latest question carries the same `Q:` prefix as the prior user turns; without it the
+        // model reads it as a continuation of the preceding `A:` block.
+        return (priorTurns + ["\(prefix(for: .user))\(request.user)"]).joined(separator: "\n\n")
+    }
+
+    private static func prefix(for role: LLMMessage.Role) -> String {
+        switch role {
+        case .user: return "Q: "
+        case .assistant: return "A: "
+        }
     }
 
     // MARK: - Response parsing (section 6.2)

@@ -232,6 +232,38 @@ struct OpenAIChatBackendTests {
         #expect(schema["type"] as? String == "object")
     }
 
+    @Test("buildMessages inserts request.messages between system and the latest user turn")
+    func buildMessagesInsertsPriorTurns() {
+        // 38-session-chat.md section 4.1: prior turns keep their own roles here (unlike the CLI
+        // backend, which has to flatten them), so a past answer reaches the model as the
+        // assistant's own words.
+        var request = makeChatRequest()
+        request.user = "決まったことは？"
+        request.messages = [
+            LLMMessage(role: .user, text: "context"),
+            LLMMessage(role: .assistant, text: "ack"),
+            LLMMessage(role: .user, text: "前半の論点は？"),
+            LLMMessage(role: .assistant, text: "価格と納期")
+        ]
+
+        #expect(OpenAIChatBackend.buildMessages(request: request) == [
+            ["role": "system", "content": "system prompt"],
+            ["role": "user", "content": "context"],
+            ["role": "assistant", "content": "ack"],
+            ["role": "user", "content": "前半の論点は？"],
+            ["role": "assistant", "content": "価格と納期"],
+            ["role": "user", "content": "決まったことは？"]
+        ])
+    }
+
+    @Test("buildMessages keeps the pre-chat two-message body when messages is nil")
+    func buildMessagesUnchangedForSingleShotRequests() {
+        #expect(OpenAIChatBackend.buildMessages(request: makeChatRequest()) == [
+            ["role": "system", "content": "system prompt"],
+            ["role": "user", "content": "user prompt"]
+        ])
+    }
+
     @Test("buildURLRequest sets the api-key header (not Authorization) when auth_header derives to api-key")
     func buildURLRequestAPIKeyHeader() throws {
         let config = makeConfig(apiVersion: "2024-06-01")

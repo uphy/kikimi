@@ -123,6 +123,11 @@ private struct LLMUsageDetailView: View {
             // `LLMUsageRecord.purpose` per this type's own convention -- is the fixed string
             // "dictation".
             return "音声入力整形"
+        case "chat":
+            // `docs/design/38-session-chat.md` CH11: `ChatRunner` sets `stubKey: "chat"`, which
+            // `UsageRecordingLLM` records as the `purpose`, so chat cost shows up as its own row
+            // here instead of being pooled into the `unknown` fallback.
+            return "チャット"
         default:
             return purpose
         }
