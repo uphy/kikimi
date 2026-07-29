@@ -190,6 +190,12 @@ R5/R6。整形完了（D1 は STT flush 完了）後に 1 回だけ挿入する�
     1 イベントに載せられる UTF-16 units には上限があるため**チャンクに分けて送る**（spike は 16 units 単位で
     実挿入を確認）。クリップボードを踏まないが、IME 実機検証が取れるまでは既定にしない
   - 切り替えは `insert_method` の明示指定のみ。実行時の自動判定（`auto`）は行わない（R6）
+  - 合成イベントの注入先は **`.cghidEventTap`**（両方式共通）。物理キーと同じ入口なので WindowServer が
+    通常のルーティングを行い、**アプリが非アクティブなままの key window（`.nonactivatingPanel`）にも届く**。
+    spike が使っていた `.cgAnnotatedSessionEventTap` は「アクティブアプリへ直接配送」される経路のため、
+    背面アプリの nonactivating panel をクリックしてフォーカスした状態で**別アプリへ挿入してしまう**
+    （Chirami のノートウィンドウで再現。手打ちの `⌘V` はノートに入るのに、合成 `⌘V` は背後の端末に入る）。
+    この誤配送は `FrontmostGuard` では検知できない（§8）
 - 挿入 API の戻り値は信用しない（spike）。挿入の成否は best-effort とし、確認はしない（会議 transcript と違い
   永続化しないので readback 検証は不要）
 

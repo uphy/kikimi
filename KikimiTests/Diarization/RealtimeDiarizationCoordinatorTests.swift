@@ -213,9 +213,10 @@ struct RealtimeDiarizationCoordinatorTests {
     /// Polls `condition` until it becomes `true` or `timeout` elapses (mirrors
     /// `MeetingWorkspaceViewModelTests.waitUntil`): voiceprint extraction/matching runs on a
     /// fire-and-forget `Task` the coordinator never awaits, so assertions about its outcome cannot rely
-    /// on `feed(samples:)` having returned.
+    /// on `feed(samples:)` having returned. The timeout is a hang guard only; 10s for the same
+    /// reason as that helper.
     private func waitUntil(
-        timeout: Duration = .seconds(2),
+        timeout: Duration = .seconds(10),
         condition: @escaping () async -> Bool
     ) async throws {
         let deadline = ContinuousClock.now + timeout

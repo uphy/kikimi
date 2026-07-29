@@ -33,6 +33,11 @@ struct AXUIElementBox: Equatable, @unchecked Sendable {
 /// app (Slack's message box vs. its `⌘K` search field, both same pid); pid is only the fallback
 /// when either snapshot has no focused element to compare (`kAXErrorNoValue`, or an app -- e.g.
 /// Electron -- that simply doesn't expose one at that moment).
+///
+/// Known blind spot: both signals describe the *active application*, so neither sees a key window
+/// that belongs to a `.nonactivatingPanel` in a background app -- clicking such a panel makes it
+/// key without activating its app. Both snapshots then agree (on the wrong app) and the insertion
+/// proceeds. See `DictationInserter.eventTap` for why the insertion still lands correctly.
 enum FrontmostGuard {
     /// One focus snapshot. `element` is `nil` when nothing was focused at capture time
     /// (`kAXErrorNoValue`) -- confirmed by the spike to mean "no focused element right now", not
