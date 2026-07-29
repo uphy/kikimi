@@ -4624,8 +4624,13 @@ struct MeetingWorkspaceViewModelTests {
     /// Polls `condition` on the main actor until it becomes `true` or `timeout` elapses. Used instead
     /// of a fixed `Task.sleep` for the `liveSegments` forwarding test, since the forwarding `Task`
     /// (`startLiveSegmentSubscription`) processes the yielded segments asynchronously.
+    ///
+    /// The timeout is a hang guard only -- the poll returns as soon as the condition holds, so a
+    /// generous ceiling costs a passing test nothing. It is 10s rather than 2s because a runner
+    /// sharing few cores with ~1,900 parallel tests overran the tighter bound (same cause as
+    /// `1cea520`'s window-suite polls).
     private func waitUntil(
-        timeout: Duration = .seconds(2),
+        timeout: Duration = .seconds(10),
         condition: @escaping () async -> Bool
     ) async throws {
         let deadline = ContinuousClock.now + timeout
