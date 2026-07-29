@@ -97,7 +97,8 @@ macOS メニューバー + フローティングパネル型の会議書き起�
 │       └── watchers/
 │           ├── enabled.yaml       # このセッションで有効な Watcher ID 一覧
 │           ├── <id>.md            # session-local Watcher（preset を fork した場合もここ）
-│           └── <id>.state.json    # 各 Watcher の実行状態
+│           ├── <id>.state.json    # 各 Watcher の実行状態
+│           └── <id>.run.json      # 最終実行の時刻と input_scope（docs/design/05 §7.2）
 └── plugins/                       # 予約
 
 ~/.config/kikimi/

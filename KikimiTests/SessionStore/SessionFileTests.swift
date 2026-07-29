@@ -33,6 +33,13 @@ struct SessionFileTests {
         )
     }
 
+    @Test("resolves watcherRunRecord(id:) to watchers/<id>.run.json")
+    func watcherRunRecordResolvesUnderWatchersSubdirectory() throws {
+        #expect(
+            try SessionFile.watcherRunRecord(id: "pre-check").relativePath() == "watchers/pre-check.run.json"
+        )
+    }
+
     @Test(
         "accepts watcher ids made only of ASCII letters, digits, and hyphens",
         arguments: ["pre-check", "action-items", "risk1", "ABC", "a", "123", "a-b-c-123"]
@@ -40,6 +47,7 @@ struct SessionFileTests {
     func acceptsValidWatcherIds(id: String) throws {
         #expect(try SessionFile.watcherDefinition(id: id).relativePath() == "watchers/\(id).md")
         #expect(try SessionFile.watcherState(id: id).relativePath() == "watchers/\(id).state.json")
+        #expect(try SessionFile.watcherRunRecord(id: id).relativePath() == "watchers/\(id).run.json")
     }
 
     @Test(
@@ -63,6 +71,9 @@ struct SessionFileTests {
         }
         #expect(throws: SessionFileError.invalidWatcherId(id)) {
             try SessionFile.watcherState(id: id).relativePath()
+        }
+        #expect(throws: SessionFileError.invalidWatcherId(id)) {
+            try SessionFile.watcherRunRecord(id: id).relativePath()
         }
     }
 

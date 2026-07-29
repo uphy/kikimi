@@ -23,7 +23,11 @@ struct WatcherEvent: Sendable {
 
     enum Kind: Sendable {
         case started
-        case finished(renderedMarkdown: String, at: Date)
+        /// `inputScope` is the scope *this run* used, which the ViewModel keeps distinct from the
+        /// definition's current value so the Watchers-tab footer can describe the result on screen
+        /// rather than the next run (`WatcherPanelItem.lastRunInputScope`). Mirrors what the same
+        /// run persisted to `watchers/<id>.run.json` (`WatcherRunRecord`).
+        case finished(renderedMarkdown: String, at: Date, inputScope: WatcherInputScope)
         /// Every failure mode -- parse/LLM/validation/render -- collapses into this one case
         /// (§9.1: "どの段で失敗しても `.failed(message:)` を yield").
         case failed(message: String)
@@ -296,6 +300,25 @@ actor WatcherRunner {
             return
         }
 
+        let finishedAt = now()
+        // Written right after the state it describes, and *before* the render below: a view-template
+        // failure still leaves an updated `state.json` on disk, which a later reopen renders (see
+        // `renderExistingState(for:)`) -- so the record describing that state has to exist too.
+        // A failure here is logged, never fatal: `.run.json` is display metadata, and losing it only
+        // costs the footer its timestamp/scope precision (§7.2), which is not worth failing a run
+        // whose real output is already safely persisted.
+        do {
+            let record = WatcherRunRecord(finishedAt: finishedAt, inputScope: definition.inputScope)
+            try await sessionHandle.writeJSON(record, to: .watcherRunRecord(id: id))
+        } catch {
+            logger.warning(
+                """
+                Failed to write watchers/\(id, privacy: .public).run.json: \
+                \(String(describing: error), privacy: .public)
+                """
+            )
+        }
+
         guard let renderedMarkdown = WatcherViewRenderer.render(state: canonicalMergedState, schema: definition.schema, template: definition.view) else {
             // §12: view のレンダリング失敗 -- state は更新済みのまま. The next successful render (after the
             // user fixes the view template) picks up this already-persisted state.
@@ -303,7 +326,10 @@ actor WatcherRunner {
             return
         }
 
-        eventsContinuation.yield(WatcherEvent(watcherId: id, kind: .finished(renderedMarkdown: renderedMarkdown, at: now())))
+        eventsContinuation.yield(WatcherEvent(
+            watcherId: id,
+            kind: .finished(renderedMarkdown: renderedMarkdown, at: finishedAt, inputScope: definition.inputScope)
+        ))
     }
 
     /// Loads `watchers/<id>.state.json` (§7.1). No file yet is the normal pre-first-run case
