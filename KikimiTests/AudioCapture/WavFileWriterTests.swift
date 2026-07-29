@@ -55,6 +55,25 @@ struct WavFileWriterTests {
             .appendingPathExtension("wav")
     }
 
+    /// Polls until the on-disk `data` chunk size reaches `expected`, so a test can wait for a
+    /// scheduled header flush *without* pinning the wait to a fixed duration -- the same
+    /// poll-don't-sleep pattern the view model/diarization suites use, and for the same reason: a
+    /// runner sharing a few cores with ~2,000 parallel tests delays a `DispatchSourceTimer`
+    /// arbitrarily. Returns as soon as the condition holds, so the generous ceiling costs a passing
+    /// test nothing.
+    private func waitForDataChunkSize(
+        _ expected: UInt32,
+        at url: URL,
+        timeout: Duration = .seconds(10)
+    ) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if (try? readDataChunkSize(at: url)) == expected { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(try readDataChunkSize(at: url) == expected, "the header never reached \(expected) within \(timeout)")
+    }
+
     @Test("init creates the file with a 44-byte placeholder header of size 0")
     func initWritesPlaceholderHeader() throws {
         let fileURL = makeTemporaryFileURL()
@@ -73,7 +92,12 @@ struct WavFileWriterTests {
         let fileURL = makeTemporaryFileURL()
         defer { try? FileManager.default.removeItem(at: fileURL) }
 
-        let flushInterval: TimeInterval = 0.3
+        // A 2-second period, not a fraction of one: the stale-header assertion below has to happen
+        // between two flushes, and the headroom it gets is the whole interval minus the poll's own
+        // granularity. The previous 0.3s interval plus a fixed `sleep(interval + 0.4)` failed on CI
+        // for exactly this reason -- an overrun sleep landed just before a flush boundary, so the
+        // "still stale" read raced the very next flush and saw both chunks.
+        let flushInterval: TimeInterval = 2
         let writer = try WavFileWriter(fileURL: fileURL, sampleRate: sampleRate, channels: channels, headerFlushInterval: flushInterval)
         let failures = FailureRecorder()
 
@@ -82,20 +106,17 @@ struct WavFileWriterTests {
         let firstByteCount = UInt32(firstFrameCount) * UInt32(channels) * UInt32(MemoryLayout<Int16>.size)
         writer.append(makeBuffer(frameCount: firstFrameCount)) { failures.record($0) }
 
-        // Wait past the first scheduled header flush so the in-progress header on disk reflects
-        // the first chunk.
-        try await Task.sleep(nanoseconds: UInt64((flushInterval + 0.4) * 1_000_000_000))
+        // Wait for the first scheduled header flush, rather than for a fixed span assumed to
+        // contain it, so the in-progress header on disk provably reflects the first chunk.
+        try await waitForDataChunkSize(firstByteCount, at: fileURL)
 
-        let inProgressDataSize = try readDataChunkSize(at: fileURL)
-        #expect(inProgressDataSize == firstByteCount)
-
-        // Second chunk, written right after reading the in-progress header and well before the
-        // next scheduled flush: the on-disk header should still be stale (only reflects the first
-        // chunk) until the writer is explicitly closed.
+        // Second chunk, appended immediately after that flush was observed -- which puts the next
+        // one a full `flushInterval` away, so the read below cannot straddle it. The on-disk header
+        // must still be stale (first chunk only) until the writer is explicitly closed.
         let secondFrameCount: AVAudioFrameCount = 50
         let secondByteCount = UInt32(secondFrameCount) * UInt32(channels) * UInt32(MemoryLayout<Int16>.size)
         writer.append(makeBuffer(frameCount: secondFrameCount)) { failures.record($0) }
-        try await Task.sleep(nanoseconds: 50_000_000) // 50ms: long enough to be enqueued, short of the next flush
+        try await Task.sleep(for: .milliseconds(50)) // long enough to be enqueued, far short of the next flush
 
         let staleDataSize = try readDataChunkSize(at: fileURL)
         #expect(staleDataSize == firstByteCount)
