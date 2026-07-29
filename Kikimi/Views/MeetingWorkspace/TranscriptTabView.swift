@@ -97,6 +97,22 @@ struct TranscriptTabView: View {
     /// pass that method directly.
     var onTogglePlayback: (TranscriptRowViewModel) -> Void = { _ in }
 
+    /// Copies one row's Markdown line (`docs/design/37-transcript-markdown-copy.md` §3.3/§4.4).
+    /// Mirrors `MeetingWorkspaceViewModel.copyRowMarkdown(rowId:)` exactly so `MeetingWorkspaceView`
+    /// can pass that method directly, the same convention as `onTogglePlayback`. This view has no
+    /// compile-time dependency on the view model (top of file), so it only forwards the tap upward
+    /// rather than rendering Markdown or touching the pasteboard itself.
+    var onCopyRow: (TranscriptRowViewModel) -> Void = { _ in }
+
+    /// `MeetingWorkspaceViewModel.copyFeedbackRowId` verbatim (`docs/design/37-transcript-markdown-copy.md`
+    /// §3.3/§6/TC11(f)): the id of the row whose copy most recently *succeeded*, `nil` after a toolbar
+    /// copy or on startup. Driving the row's checkmark from this (rather than firing it unconditionally
+    /// on tap) is what makes a failed pasteboard write correctly show no feedback -- mirrors
+    /// `MeetingTabView.copyFeedbackToken`'s exact pattern for the toolbar button. A plain `String?`
+    /// value parameter, so this keeps the same "no compile-time ViewModel dependency" contract as
+    /// `playingRowId` above, not a new one.
+    var copyFeedbackRowId: String?
+
     /// A pending "scroll to this segment" request (`docs/design/05-watcher-runner.md` §10.4), verbatim
     /// from `MeetingWorkspaceViewModel.pendingTranscriptScrollTarget` -- set by a Watchers-tab seg-id
     /// link click. `MeetingWorkspaceView` passes this as a plain parameter (not a `Binding`) since this
@@ -113,6 +129,14 @@ struct TranscriptTabView: View {
     /// inserted rows; becomes `false` the moment the user scrolls away from the bottom, and returns
     /// to `true` once they scroll back down. Starts `true` so a freshly opened tab follows along.
     @State private var isPinnedToBottom = true
+
+    /// `true` from the moment an auto-scroll is issued until shortly after its animation would have
+    /// finished. Guards the bottom anchor's `onDisappear` (see `TranscriptAutoFollow.shouldUnpin`):
+    /// appending a row re-lays out the stack and can briefly pull the anchor out of `LazyVStack`'s
+    /// realized region *because of* the very scroll that is chasing it, which used to unpin
+    /// auto-follow permanently -- once unpinned, nothing scrolls, so the anchor never reappears to
+    /// re-pin it, and the tab silently stopped following mid-meeting.
+    @State private var isAutoScrolling = false
 
     /// Zero-height marker appended after the last row. Its `onAppear`/`onDisappear` firing is used
     /// as a proxy for "is the bottom of the list currently visible", since `LazyVStack` only
@@ -141,7 +165,9 @@ struct TranscriptTabView: View {
                                 onRenameSlot: onRenameSlot,
                                 onOverrideSegment: onOverrideSegment,
                                 isPlaying: playingRowId == row.id,
-                                onTogglePlayback: { onTogglePlayback(row) }
+                                onTogglePlayback: { onTogglePlayback(row) },
+                                onCopyRow: onCopyRow,
+                                copyFeedbackRowId: copyFeedbackRowId
                             )
                             .id(row.id)
                         }
@@ -152,7 +178,10 @@ struct TranscriptTabView: View {
                         .frame(height: 1)
                         .id(Self.bottomAnchorID)
                         .onAppear { isPinnedToBottom = true }
-                        .onDisappear { isPinnedToBottom = false }
+                        .onDisappear {
+                            guard TranscriptAutoFollow.shouldUnpin(isAutoScrolling: isAutoScrolling) else { return }
+                            isPinnedToBottom = false
+                        }
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
@@ -164,8 +193,8 @@ struct TranscriptTabView: View {
                 // initial follow-to-bottom has to happen here rather than in `onChange`.
                 scrollToBottom(proxy: proxy, animated: false)
             }
-            .onChange(of: rows) { oldRows, newRows in
-                handleRowsChange(oldRows: oldRows, newRows: newRows, proxy: proxy)
+            .onChange(of: rows) { _, _ in
+                scrollToBottomIfPinned(proxy: proxy)
             }
             .onChange(of: micVolatileText) { _, _ in
                 scrollToBottomIfPinned(proxy: proxy)
@@ -230,41 +259,39 @@ struct TranscriptTabView: View {
         }
     }
 
-    /// Auto-scrolls only when both hold:
-    /// 1. `isPinnedToBottom` — the user hasn't scrolled away.
-    /// 2. The newest change landed at the tail of `newRows` — i.e. `TranscriptRowList.inserted`'s
-    ///    insertion position matched `rows.last?.id` at insertion time. A mid-list insertion (an
-    ///    out-of-order segment from the other audio stream arriving late, section 6.3 "実装上の注意")
-    ///    leaves the previous tail row's `id` unchanged as the new list's last element too, so
-    ///    comparing `oldRows.last?.id` against `newRows.last?.id` distinguishes the two cases without
-    ///    needing to re-derive the insertion index here.
-    private func handleRowsChange(
-        oldRows: [TranscriptRowViewModel],
-        newRows: [TranscriptRowViewModel],
-        proxy: ScrollViewProxy
-    ) {
-        guard isPinnedToBottom, newRows.last != nil else { return }
-        guard oldRows.last?.id != newRows.last?.id else { return }
-        scrollToBottom(proxy: proxy, animated: true)
-    }
-
-    /// Scrolls to the bottom anchor only if the user hasn't scrolled away -- used by the volatile-text
-    /// `onChange` handlers, which (unlike `handleRowsChange`) have no "did this land at the tail"
-    /// question to ask: `micVolatileText`/`systemVolatileText` are always rendered after every
-    /// confirmed row, so any change to either is always a tail-of-list change.
+    /// Follows the bottom whenever the user hasn't scrolled away, for *any* change to `rows` --
+    /// deliberately not just an append.
+    ///
+    /// This used to additionally require `oldRows.last?.id != newRows.last?.id` ("the change landed
+    /// at the tail") so that a mid-list insertion — an out-of-order segment from the other audio
+    /// stream arriving late (`docs/design/06-ui-panels.md` section 6.3 "実装上の注意") — wouldn't yank
+    /// the viewport. But that guard also swallowed every *in-place* row mutation, and those are the
+    /// common case while recording: refinement rewrites `.raw` → `.refined` text (usually longer, and
+    /// often wrapping onto more lines) and the merge gate folds a row away entirely, both of which
+    /// change the stack's height below the viewport without changing the tail row's id. The visible
+    /// bottom then drifted further off-screen with every batch. While pinned to the bottom, following
+    /// is the right answer for a mid-list insertion too: the user is at the end of the list, so the
+    /// end of the list is what should stay on screen.
     private func scrollToBottomIfPinned(proxy: ScrollViewProxy) {
-        guard isPinnedToBottom else { return }
+        guard TranscriptAutoFollow.shouldFollow(isPinnedToBottom: isPinnedToBottom) else { return }
         scrollToBottom(proxy: proxy, animated: true)
     }
 
     private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool) {
         guard !rows.isEmpty || !micVolatileText.isEmpty || !systemVolatileText.isEmpty else { return }
+        // Held across the scroll so the anchor's own `onDisappear` can't mistake this scroll's
+        // relayout for the user scrolling away (see `isAutoScrolling`).
+        isAutoScrolling = true
         if animated {
-            withAnimation(.easeOut(duration: 0.2)) {
+            withAnimation(.easeOut(duration: TranscriptAutoFollow.scrollAnimationDuration)) {
                 proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
             }
         } else {
             proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(TranscriptAutoFollow.autoScrollSettleDuration))
+            isAutoScrolling = false
         }
     }
 }
@@ -293,10 +320,24 @@ private struct TranscriptRowContentView: View {
     /// Play/stop toggle for this row's audio. Mirrors `MeetingWorkspaceViewModel
     /// .toggleSegmentPlayback(_:)`.
     let onTogglePlayback: () -> Void
+    /// Copies this row's Markdown line (`docs/design/37-transcript-markdown-copy.md` §3.3/§4.4).
+    /// Mirrors `MeetingWorkspaceViewModel.copyRowMarkdown(rowId:)`.
+    let onCopyRow: (TranscriptRowViewModel) -> Void
+    /// `TranscriptTabView.copyFeedbackRowId` verbatim -- `== row.id` only once the copy of *this* row
+    /// has actually succeeded (§6/TC11(f)).
+    let copyFeedbackRowId: String?
 
     /// Drives the playback button's visibility (`docs/design/15-segment-playback.md` section 6:
     /// visible on hover or while playing; always reserves its layout width so rows don't shift).
     @State private var isHovered = false
+
+    /// `true` while `copyFeedbackRowId == row.id` (`docs/design/37-transcript-markdown-copy.md`
+    /// TC11): swaps `copyButton`'s icon to `checkmark` as copy-success feedback, then reverts after
+    /// 1.5s. Driven by `copyFeedbackRowId` (set by the ViewModel only after a *successful* pasteboard
+    /// write, `.task(id:)` below) rather than firing unconditionally on tap, so a failed write
+    /// correctly shows no feedback (§6) -- mirrors `MeetingTabView.showsCopyFeedback`'s exact pattern
+    /// for the toolbar button.
+    @State private var showsCopyFeedback = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -313,6 +354,16 @@ private struct TranscriptRowContentView: View {
         // right as the pointer reaches it.
         .contentShape(Rectangle())
         .onHover { isHovered = $0 }
+        .task(id: copyFeedbackRowId) {
+            guard copyFeedbackRowId == row.id else {
+                showsCopyFeedback = false
+                return
+            }
+            showsCopyFeedback = true
+            try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled else { return }
+            showsCopyFeedback = false
+        }
     }
 
     /// The header line: timestamp + speaker icon + speaker label (natural width, design section 5.3.1
@@ -342,8 +393,28 @@ private struct TranscriptRowContentView: View {
 
             Spacer()
 
+            copyButton
             playbackButton
         }
+    }
+
+    /// This row's Markdown-line copy button (`docs/design/37-transcript-markdown-copy.md` §3.3),
+    /// placed to the left of `playbackButton` and following the exact same visibility/sizing
+    /// convention: fixed width and always laid out (just invisible when idle/unhovered/no feedback
+    /// pending) so its appearance never shifts neighboring rows.
+    private var copyButton: some View {
+        Button {
+            onCopyRow(row)
+        } label: {
+            Image(systemName: showsCopyFeedback ? "checkmark" : "doc.on.doc")
+                .font(.body)
+                .foregroundStyle(showsCopyFeedback ? Color.accentColor : Color.secondary)
+        }
+        .buttonStyle(.plain)
+        .frame(width: 20)
+        .opacity(isHovered || showsCopyFeedback ? 1 : 0)
+        .help("この発言をコピー")
+        .accessibilityLabel("この発言をコピー")
     }
 
     /// This row's audio playback toggle (`docs/design/15-segment-playback.md` section 6). Kept at a
@@ -519,60 +590,5 @@ private struct SpeakerLabelColumnView: View {
             return ""
         }
         return name
-    }
-}
-
-// MARK: - TranscriptVolatileRowContentView
-
-/// One in-progress (unconfirmed) source's trailing line (`docs/design/11-streaming-stt.md` section
-/// 3.6), rendered in the same 2-line layout as `TranscriptRowContentView`
-/// (`docs/design/17-session-window-redesign.md` section 5.3.1): a header line with the speaker icon
-/// only (no timestamp -- this text has no confirmed `startMs`/`endMs` yet, it may still grow, shrink,
-/// or be replaced entirely before ever becoming a real row) followed by a full-width dim/italic text
-/// line.
-private struct TranscriptVolatileRowContentView: View {
-    let source: AudioSourceKind
-    let text: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Image(systemName: source.sfSymbolName)
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-                .accessibilityLabel(source.accessibilityLabel)
-
-            Text(text)
-                .font(.body.italic())
-                .foregroundStyle(.tertiary)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.vertical, 4)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(source.accessibilityLabel)、書き起こし中: \(text)")
-    }
-}
-
-// MARK: - AudioSourceKind display helpers
-
-/// Shared between `TranscriptRowContentView` (confirmed rows) and `TranscriptVolatileRowContentView`
-/// (in-progress rows) so both render the same icon/label per source.
-private extension AudioSourceKind {
-    var sfSymbolName: String {
-        switch self {
-        case .mic:
-            return "mic.fill"
-        case .system:
-            return "speaker.wave.2.fill"
-        }
-    }
-
-    var accessibilityLabel: String {
-        switch self {
-        case .mic:
-            return "マイク"
-        case .system:
-            return "システム音声"
-        }
     }
 }

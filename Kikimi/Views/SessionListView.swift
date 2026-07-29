@@ -1,6 +1,33 @@
 import Foundation
 import SwiftUI
 
+// MARK: - SessionListContextMenuAvailability
+
+/// Pure, side-effect-free availability rules for `SessionListView`'s right-click context menu
+/// items (`docs/design/06-ui-panels.md` section 7: "副次的に右クリックメニューからも「開く / 複製
+/// して新規セッション / 削除」を実行できる（有効条件はフッタのボタンと同一）"). Factored out of
+/// `SessionListView.contextMenuItems(for:)` so this mirrored logic is directly unit-testable
+/// without instantiating a SwiftUI view — the same pattern `SessionListGrouping`
+/// (`SessionListViewModel.swift`) uses for the list's filter/group logic.
+enum SessionListContextMenuAvailability {
+    /// "開く" / "複製して新規セッション" / "Markdown をコピー" are only enabled when exactly one
+    /// session is selected (mirrors the footer's `onlySelectedSessionId`).
+    static func canActOnSingleSelection(_ ids: Set<String>) -> Bool {
+        ids.count == 1
+    }
+
+    /// "削除" is enabled for one or more selected sessions, unless the selection includes the
+    /// actively-recording session (mirrors the footer's `selectionIncludesRecordingSession`;
+    /// `SessionStore.deleteSession` would otherwise throw `.cannotDeleteActiveRecording` for it).
+    static func canDelete(_ ids: Set<String>, recordingSessionId: String?) -> Bool {
+        guard !ids.isEmpty else { return false }
+        if let recordingSessionId, ids.contains(recordingSessionId) {
+            return false
+        }
+        return true
+    }
+}
+
 // MARK: - SessionListView
 
 /// SwiftUI content for the Session List window (kikimi.md 10 章; `docs/design/06-ui-panels.md`
@@ -226,20 +253,25 @@ struct SessionListView: View {
     @ViewBuilder
     private func contextMenuItems(for ids: Set<String>) -> some View {
         let onlyId = ids.count == 1 ? ids.first : nil
+        let canActOnSingleSelection = SessionListContextMenuAvailability.canActOnSingleSelection(ids)
         Button("開く") {
             if let onlyId { performOpen(onlyId) }
         }
-        .disabled(onlyId == nil)
+        .disabled(!canActOnSingleSelection)
         Button("複製して新規セッション") {
             if let onlyId { performDuplicate(onlyId) }
         }
-        .disabled(onlyId == nil)
+        .disabled(!canActOnSingleSelection)
+        Button("Markdown をコピー") {
+            if let onlyId { performCopyMarkdown(onlyId) }
+        }
+        .disabled(!canActOnSingleSelection)
         Divider()
         Button("削除", role: .destructive) {
             guard !ids.isEmpty else { return }
             pendingDeleteSessionIds = ids
         }
-        .disabled(ids.isEmpty || (windowManager.recordingSessionId.map(ids.contains) ?? false))
+        .disabled(!SessionListContextMenuAvailability.canDelete(ids, recordingSessionId: windowManager.recordingSessionId))
     }
 
     // MARK: Footer
@@ -316,6 +348,17 @@ struct SessionListView: View {
     private func performDuplicate(_ sessionId: String) {
         runAction {
             try await viewModel.duplicate(sessionId: sessionId)
+        }
+    }
+
+    /// "Markdown をコピー" (`docs/design/37-transcript-markdown-copy.md` §3.3, TC9/TC11): unlike
+    /// `runAction`'s operations, `copyMarkdown(sessionId:)` never throws -- it reports success/failure
+    /// itself via `viewModel.toast`, which the existing `.onChange(of: viewModel.toast) → showToast(_:)`
+    /// wiring already surfaces. No session-list reload is needed since copying doesn't mutate any
+    /// session.
+    private func performCopyMarkdown(_ sessionId: String) {
+        Task {
+            await viewModel.copyMarkdown(sessionId: sessionId)
         }
     }
 

@@ -1,5 +1,23 @@
 import SwiftUI
 
+// MARK: - CopyFeedbackFlash
+
+/// Pure decision behind the copy toolbar's checkmark-flash timing (`docs/design/37-transcript-markdown
+/// -copy.md` §3.3/TC11), factored out of `MeetingTabView.copyMenu`'s `.task(id: copyFeedbackToken)`
+/// closure so this logic is directly unit-testable without instantiating a SwiftUI view -- the same
+/// pattern `SessionListContextMenuAvailability` (`Kikimi/Views/SessionListView.swift`) uses for its
+/// context menu's enable/disable rules.
+enum CopyFeedbackFlash {
+    /// Whether a `.task(id: copyFeedbackToken)` firing should flash the checkmark, given whether the
+    /// view has already observed its *first* firing once before. The very first firing carries
+    /// whatever `copyFeedbackToken` value the caller started at (not necessarily `0`) and must never be
+    /// treated as "a copy just happened"; every firing after that was triggered by an actual
+    /// `copyFeedbackToken` bump from a successful copy and must flash.
+    static func shouldFlash(hasObservedInitialToken: Bool) -> Bool {
+        hasObservedInitialToken
+    }
+}
+
 // MARK: - MeetingTabView
 
 /// The Session Window's "会議" tab (`docs/design/17-session-window-redesign.md` §3.2/§5.3;
@@ -20,8 +38,27 @@ struct MeetingTabView<TranscriptContent: View, SummaryContent: View>: View {
     /// wasn't visible.
     var summaryHasUnseenUpdate: Bool = false
 
+    /// Invoked with the requested copy scope (design 37 §3.3/TC6). Callers own the actual clipboard
+    /// write and success/failure handling (`MeetingWorkspaceViewModel.copyMarkdown(scope:)`); this
+    /// view only decides *which* scope was requested.
+    var onCopy: (TranscriptMarkdownRenderer.Scope) -> Void
+
+    /// `MeetingWorkspaceViewModel.copyFeedbackToken` verbatim (design 37 §3.3/TC11): bumped by the
+    /// caller after a successful copy so this view can flash the `checkmark` icon for 1.5s. The
+    /// initial value is never treated as a "just copied" signal (see `copyFeedbackTask(id:)` below).
+    var copyFeedbackToken: Int
+
     @ViewBuilder var transcriptContent: () -> TranscriptContent
     @ViewBuilder var summaryContent: () -> SummaryContent
+
+    /// Whether the copy button icon is currently showing `checkmark` instead of `doc.on.doc`
+    /// (design 37 TC11).
+    @State private var showsCopyFeedback = false
+
+    /// Tracks whether `copyFeedbackToken` has been observed once already, so the `.task(id:)` that
+    /// fires on this view's first appearance (with whatever token value the caller started at)
+    /// doesn't spuriously flash the checkmark before any copy has happened.
+    @State private var hasObservedInitialCopyFeedbackToken = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -33,6 +70,7 @@ struct MeetingTabView<TranscriptContent: View, SummaryContent: View>: View {
 
     private var toolbar: some View {
         HStack(spacing: 4) {
+            copyMenu
             Spacer()
             paneButton(mode: .transcript, systemImage: "list.bullet.rectangle", label: "書き起こしのみ表示")
             paneButton(mode: .both, systemImage: "rectangle.split.2x1", label: "両方表示")
@@ -40,6 +78,44 @@ struct MeetingTabView<TranscriptContent: View, SummaryContent: View>: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
+    }
+
+    /// Copy toolbar entry point (design 37 §3.3, `MeetingTabView.swift:34`'s `toolbar`, left of
+    /// `Spacer()`). Clicking the icon itself copies the full document (`primaryAction`); the
+    /// dropdown offers the 3 scopes from TC6. ⌘⇧C mirrors the icon click (TC8) -- ⌘C is deliberately
+    /// left alone so text-selection copy in the transcript rows keeps working.
+    private var copyMenu: some View {
+        Menu {
+            Button("全体をコピー") { onCopy(.full) }
+            Button("書き起こしをコピー") { onCopy(.transcript) }
+            Button("サマリをコピー") { onCopy(.summary) }
+        } label: {
+            Image(systemName: showsCopyFeedback ? "checkmark" : "doc.on.doc")
+                .font(.body)
+                .foregroundStyle(Color.secondary)
+                .padding(6)
+        } primaryAction: {
+            onCopy(.full)
+        }
+        .keyboardShortcut("c", modifiers: [.command, .shift])
+        // AX contract, same as `paneButton` below (design 17 §5.3/§6): `.help` backs AppleScript's
+        // `get help of button`, `.accessibilityLabel` backs AX name lookups used by `kikimi-verify`.
+        .help("Markdown をコピー")
+        .accessibilityLabel("Markdown をコピー")
+        .task(id: copyFeedbackToken) {
+            let shouldFlash = CopyFeedbackFlash.shouldFlash(hasObservedInitialToken: hasObservedInitialCopyFeedbackToken)
+            hasObservedInitialCopyFeedbackToken = true
+            guard shouldFlash else { return }
+            showsCopyFeedback = true
+            try? await Task.sleep(for: .seconds(1.5))
+            // A rapid second copy cancels this task and starts a fresh one (new `copyFeedbackToken`),
+            // which immediately re-sets `showsCopyFeedback = true`. `Task.sleep` throws on
+            // cancellation but that alone doesn't stop this task's remaining statements, so without
+            // this check the stale task would still run `showsCopyFeedback = false` right after the
+            // new task turned it back on, cutting the second copy's checkmark short.
+            guard !Task.isCancelled else { return }
+            showsCopyFeedback = false
+        }
     }
 
     /// One toolbar button. A custom button (not `Picker(.segmented)`) so the "サマリのみ表示" icon can

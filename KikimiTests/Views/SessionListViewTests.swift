@@ -3,6 +3,64 @@ import Testing
 
 @testable import Kikimi
 
+// MARK: - SessionListContextMenuAvailability
+
+/// Unit tests for `SessionListContextMenuAvailability` (`Kikimi/Views/SessionListView.swift`),
+/// which its own doc comment calls out as factored out of `SessionListView.contextMenuItems(for:)`
+/// specifically so this logic "stays directly unit-testable without instantiating a SwiftUI view"
+/// (`docs/design/06-ui-panels.md` section 7: right-click menu availability mirrors the footer's
+/// buttons).
+@Suite("SessionListContextMenuAvailability")
+struct SessionListContextMenuAvailabilityTests {
+    // MARK: canActOnSingleSelection(_:) — "開く" / "複製して新規セッション" / "Markdown をコピー"
+
+    @Test("disabled when no session is selected")
+    func singleSelectionDisabledWhenEmpty() {
+        #expect(SessionListContextMenuAvailability.canActOnSingleSelection([]) == false)
+    }
+
+    @Test("enabled when exactly one session is selected")
+    func singleSelectionEnabledForExactlyOne() {
+        #expect(SessionListContextMenuAvailability.canActOnSingleSelection(["a"]) == true)
+    }
+
+    @Test("disabled when more than one session is selected")
+    func singleSelectionDisabledForMultiple() {
+        #expect(SessionListContextMenuAvailability.canActOnSingleSelection(["a", "b"]) == false)
+        #expect(SessionListContextMenuAvailability.canActOnSingleSelection(["a", "b", "c"]) == false)
+    }
+
+    // MARK: canDelete(_:recordingSessionId:) — "削除"
+
+    @Test("disabled when no session is selected, regardless of recordingSessionId")
+    func deleteDisabledWhenSelectionEmpty() {
+        #expect(SessionListContextMenuAvailability.canDelete([], recordingSessionId: nil) == false)
+        #expect(SessionListContextMenuAvailability.canDelete([], recordingSessionId: "a") == false)
+    }
+
+    @Test("enabled for a single non-recording selection")
+    func deleteEnabledForSingleNonRecordingSelection() {
+        #expect(SessionListContextMenuAvailability.canDelete(["a"], recordingSessionId: nil) == true)
+        #expect(SessionListContextMenuAvailability.canDelete(["a"], recordingSessionId: "b") == true)
+    }
+
+    @Test("enabled for a multi-selection that does not include the recording session")
+    func deleteEnabledForMultiSelectionExcludingRecording() {
+        #expect(SessionListContextMenuAvailability.canDelete(["a", "b", "c"], recordingSessionId: "z") == true)
+        #expect(SessionListContextMenuAvailability.canDelete(["a", "b", "c"], recordingSessionId: nil) == true)
+    }
+
+    @Test("disabled when the single selected session is the recording session")
+    func deleteDisabledForSingleRecordingSelection() {
+        #expect(SessionListContextMenuAvailability.canDelete(["a"], recordingSessionId: "a") == false)
+    }
+
+    @Test("disabled when the recording session is anywhere inside a multi-selection")
+    func deleteDisabledWhenRecordingSessionInsideMultiSelection() {
+        #expect(SessionListContextMenuAvailability.canDelete(["a", "b", "c"], recordingSessionId: "b") == false)
+    }
+}
+
 // MARK: - SessionListFormatting
 
 /// Unit tests for `SessionListFormatting` (`Kikimi/Views/SessionListView.swift`), which its own doc

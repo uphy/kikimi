@@ -964,7 +964,7 @@ struct MeetingWorkspaceViewModelTests {
 
     // MARK: endMeeting() Wiki export (`docs/design/08-wiki-export.md`)
 
-    @Test("endMeeting() calls wikiExporter.export(sessionHandle:) exactly once, right alongside on_session_end")
+    @Test("endMeeting() calls wikiExporter.export(sessionHandle:) at on_session_end, then again once refinementQueue.drain() completes (TC17)")
     func endMeetingCallsWikiExporterExactlyOnce() async throws {
         let root = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -980,8 +980,13 @@ struct MeetingWorkspaceViewModelTests {
         await viewModel.startRecording()
         await viewModel.endMeeting()
 
-        #expect(await exporter.exportCallCount == 1)
-        #expect(await exporter.exportedSessionIds == [created.id])
+        // `docs/design/37-transcript-markdown-copy.md` §5.1 (TC17): the `on_session_end` export
+        // above is synchronous, but the post-`drain()` re-export runs inside the detached,
+        // fire-and-forget `Task` `endMeeting()` spins up right after -- poll instead of asserting
+        // the count synchronously right after `endMeeting()` returns, since that `Task` isn't
+        // awaited by `endMeeting()` itself.
+        try await waitUntil { await exporter.exportCallCount == 2 }
+        #expect(await exporter.exportedSessionIds == [created.id, created.id])
         // A pause alone (no `endMeeting()`) must never trigger `on_session_end`'s Wiki export
         // (kikimi.md 4 章 "一時停止... on_session_end は走らない").
         let secondCreated = try await store.createDraftSession()
@@ -993,7 +998,7 @@ struct MeetingWorkspaceViewModelTests {
         )
         await secondViewModel.startRecording()
         await secondViewModel.pauseRecording()
-        #expect(await exporter.exportCallCount == 1, "pauseRecording() must not trigger the Wiki export")
+        #expect(await exporter.exportCallCount == 2, "pauseRecording() must not trigger the Wiki export")
     }
 
     @Test("endMeeting() still reaches .ended even when wikiExporter.export(sessionHandle:) throws")
@@ -1016,7 +1021,129 @@ struct MeetingWorkspaceViewModelTests {
         #expect(viewModel.recordingButtonState == .ended)
         let refreshedMeta = await handle.meta
         #expect(refreshedMeta.state == .ended)
-        #expect(await exporter.exportCallCount == 1)
+        // `docs/design/37-transcript-markdown-copy.md` §5.1 (TC17): the post-`drain()` re-export
+        // also fails (same fake), is also swallowed (best-effort, `.error` log only) -- poll for
+        // it rather than asserting synchronously, since it runs in a detached, unawaited `Task`.
+        try await waitUntil { await exporter.exportCallCount == 2 }
+    }
+
+    /// The behavioral point of TC17 itself (design 37 §5.1): the synchronous `on_session_end` export
+    /// runs *before* `refinementQueue.flush()`, so a trailing under-batch segment is still unrefined
+    /// at that point and gets written with `TranscriptMarkdownRenderer.rawFallbackMarker`. Without the
+    /// post-`drain()` re-export this file's own `endMeetingCallsWikiExporterExactlyOnce`/
+    /// `endMeetingSurvivesWikiExporterFailure` only pin the *call count* -- this test pins the actual
+    /// content transition the design doc's TC17 row exists to fix (`*(raw)*` placeholder -> refined
+    /// text), using a real `WikiExporter`/`TranscriptMarkdownSource` rooted at a temp export directory
+    /// instead of `FakeWikiExporter` (which never renders anything).
+    @Test("endMeeting()'s post-drain re-export replaces the *(raw)* placeholder the pre-drain export wrote for a trailing under-batch segment with its refined text (design 37 §5.1, TC17)")
+    func endMeetingPostDrainReExportFoldsInTrailingRefinedText() async throws {
+        let root = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = makeStore(root: root)
+        let created = try await store.createDraftSession()
+        let handle = try await store.openSession(created.id)
+
+        let exportTargetDir = makeTemporaryDirectory(prefix: "MeetingWorkspaceViewModelTests-export")
+        defer { try? FileManager.default.removeItem(at: exportTargetDir) }
+        let voiceprintsDir = makeTemporaryDirectory(prefix: "MeetingWorkspaceViewModelTests-voiceprints")
+        defer { try? FileManager.default.removeItem(at: voiceprintsDir) }
+        let exportConfig = ExportConfig(enabled: true, targetDir: exportTargetDir.path)
+        let voiceprintStore = VoiceprintStore(fileURL: voiceprintsDir.appendingPathComponent("voiceprints.json"))
+        let diarization = DiarizationConfig(
+            enabled: false, selfName: "自分", stepMs: 500, variant: "callhome",
+            minEnrollSpeechMs: 5_000, speakerMatchThreshold: 0.45, speakerMatchMargin: 0.05
+        )
+        let exporter = WikiExporter(
+            config: exportConfig, source: TranscriptMarkdownSource(diarization: diarization, voiceprintStore: voiceprintStore)
+        )
+
+        let capture = FakeAudioCapture()
+        let pipeline = FakeTranscriptPipeline()
+        let fakeLLM = FakeRefinementLLM()
+        // Delayed so the pre-drain assertions below (read right after `endMeeting()` returns) can
+        // never race the fire-and-forget `drain()`/re-export -- mirrors
+        // `endMeetingDoesNotAwaitRefinementDrain`'s use of `setDelay(_:)` for the same reason.
+        await fakeLLM.setDelay(.milliseconds(300))
+        let viewModel = makeViewModel(
+            handle: handle, store: store, capture: capture, pipeline: pipeline, refinementLLM: fakeLLM, wikiExporter: exporter
+        )
+
+        await viewModel.startRecording()
+        // `makeViewModel(...)`'s default `RefinementConfig.batchSize: 1_000` keeps this single
+        // segment "pending" (never auto-flushed by batch size) until `endMeeting()`'s own
+        // `refinementQueue.flush()` cuts it -- the exact "trailing under-batch remainder" TC17 exists
+        // for.
+        let segment = try await handle.appendTranscriptSegment(
+            source: .mic, startMs: 0, endMs: 500, text: "生のテキスト", confidence: 0.9
+        )
+        pipeline.yield(segment)
+        try await waitUntil { await viewModel.transcriptRows.first(where: { $0.id == segment.id })?.state == .refining }
+        await fakeLLM.setResponse(#"{"segments":[{"id":"\#(segment.id)","refined_text":"整形済みテキスト"}]}"#)
+
+        await viewModel.endMeeting()
+
+        let meta = await handle.meta
+        let exportedFileURL = exportTargetDir.appendingPathComponent(WikiExportRenderer.fileName(for: meta))
+        let preDrainContent = try String(contentsOf: exportedFileURL, encoding: .utf8)
+        #expect(
+            preDrainContent.contains("生のテキスト\(TranscriptMarkdownRenderer.rawFallbackMarker)"),
+            "the on_session_end export (before flush()/drain()) must still see this segment as unrefined raw text"
+        )
+        #expect(!preDrainContent.contains("整形済みテキスト"))
+
+        // `docs/design/37-transcript-markdown-copy.md` §5.1: once `drain()` completes, the detached
+        // `Task` re-exports and the file on disk must now show the refined text instead of the raw
+        // placeholder -- this is the "trailing raw stuck forever" bug TC17 fixes.
+        try await waitUntil(timeout: .seconds(5)) {
+            (try? String(contentsOf: exportedFileURL, encoding: .utf8))?.contains("整形済みテキスト") == true
+        }
+        let postDrainContent = try String(contentsOf: exportedFileURL, encoding: .utf8)
+        #expect(
+            !postDrainContent.contains(TranscriptMarkdownRenderer.rawFallbackMarker),
+            "once refined, the segment must no longer carry the *(raw)* fallback marker"
+        )
+    }
+
+    /// Design 37 §5.1's own rationale for the re-export shape ("`Task` の中で... キャプチャするのは
+    /// `Sendable` な `WikiExporting` と `SessionHandle` だけで、ViewModel は捕まえない") -- the fire-and-forget
+    /// `Task` `endMeeting()` spins up must keep running to completion even once nothing else references
+    /// the `MeetingWorkspaceViewModel` itself (mirrors `viewModelDeallocationReleasesDiarizationCoordinator`'s
+    /// weak-reference pattern, but asserts the opposite outcome: this `Task`, unlike
+    /// `diarizationTurnsTask`, is deliberately *not* cancelled by `deinit`).
+    @Test("endMeeting()'s post-drain re-export Task keeps running to completion even after the ViewModel itself is deallocated")
+    func endMeetingPostDrainReExportOutlivesViewModelDeallocation() async throws {
+        let root = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = makeStore(root: root)
+        let created = try await store.createDraftSession()
+        let handle = try await store.openSession(created.id)
+
+        let capture = FakeAudioCapture()
+        let pipeline = FakeTranscriptPipeline()
+        let exporter = FakeWikiExporter()
+        let fakeLLM = FakeRefinementLLM()
+        await fakeLLM.setResponse(#"{"segments":[]}"#)
+        await fakeLLM.setDelay(.milliseconds(300))
+
+        var viewModel: MeetingWorkspaceViewModel? = makeViewModel(
+            handle: handle, store: store, capture: capture, pipeline: pipeline, refinementLLM: fakeLLM, wikiExporter: exporter
+        )
+
+        await viewModel?.startRecording()
+        let segment = try await handle.appendTranscriptSegment(source: .mic, startMs: 0, endMs: 500, text: "hello", confidence: 0.9)
+        pipeline.yield(segment)
+        try await waitUntil { await viewModel?.transcriptRows.first(where: { $0.id == segment.id })?.state == .refining }
+
+        await viewModel?.endMeeting()
+        #expect(await exporter.exportCallCount == 1, "only the synchronous on_session_end export has run at this point")
+
+        // Drop the only strong reference to the ViewModel right after `endMeeting()` returns -- the
+        // fire-and-forget `Task` still awaiting `queue.drain()` (it captured `queue`/`exporter`/
+        // `handle`/`logger`, never `self`) must not be torn down along with it.
+        viewModel = nil
+
+        try await waitUntil(timeout: .seconds(5)) { await exporter.exportCallCount == 2 }
+        #expect(await exporter.exportedSessionIds == [created.id, created.id])
     }
 
     @Test("endMeeting() promotes meetingPaneMode from .transcript to .both, so the final summary is visible")

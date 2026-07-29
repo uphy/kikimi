@@ -40,4 +40,16 @@ struct TimeFormattingTests {
         #expect(TimeFormatting.clock(seconds: -1) == "00:00")
         #expect(TimeFormatting.clock(seconds: -3600) == "00:00")
     }
+
+    @Test("minutes/seconds at the top of the hour format's own range still round-trip correctly")
+    func hourFormatMinutesSecondsUpperBound() {
+        #expect(TimeFormatting.clock(seconds: 3600 + 59) == "1:00:59")
+        #expect(TimeFormatting.clock(seconds: 3600 + 59 * 60 + 59) == "1:59:59")
+    }
+
+    @Test("multi-digit hour counts (e.g. a long unattended recording) are not truncated or re-padded")
+    func multiDigitHoursAreNotTruncated() {
+        #expect(TimeFormatting.clock(seconds: 99 * 3600) == "99:00:00")
+        #expect(TimeFormatting.clock(seconds: 100 * 3600 + 5 * 60 + 3) == "100:05:03")
+    }
 }

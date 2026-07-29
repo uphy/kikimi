@@ -85,6 +85,8 @@ struct MeetingWorkspaceView: View {
             MeetingTabView(
                 paneMode: $viewModel.meetingPaneMode,
                 summaryHasUnseenUpdate: viewModel.summaryHasUnseenUpdate,
+                onCopy: { scope in Task { await viewModel.copyMarkdown(scope: scope) } },
+                copyFeedbackToken: viewModel.copyFeedbackToken,
                 transcriptContent: { transcriptTabView },
                 summaryContent: { summaryTabView }
             )
@@ -206,6 +208,8 @@ struct MeetingWorkspaceView: View {
             },
             playingRowId: viewModel.playingSegmentId,
             onTogglePlayback: { row in viewModel.toggleSegmentPlayback(row) },
+            onCopyRow: { row in Task { await viewModel.copyRowMarkdown(rowId: row.id) } },
+            copyFeedbackRowId: viewModel.copyFeedbackRowId,
             scrollTarget: viewModel.pendingTranscriptScrollTarget,
             onScrollTargetConsumed: { viewModel.pendingTranscriptScrollTarget = nil }
         )
