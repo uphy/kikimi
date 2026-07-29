@@ -60,6 +60,8 @@ final class MeetingWorkspaceViewModel: ObservableObject {
     /// an Ended session that never records again). Injectable so tests inject a fake `LLMCompleting`
     /// (see `defaultWatcherRunnerFactory`).
     typealias WatcherRunnerFactory = @MainActor (SessionHandle) -> WatcherRunner
+    // `ChatRunnerFactory` is declared in `+Chat.swift` (a `typealias`, unlike the stored properties
+    // above, does not have to live in the main body) to keep this file under `file_length`.
     // `docs/design/08-wiki-export.md`'s `WikiExporting` (the `wikiExporter` property below) has no
     // session-scoped lifecycle to construct, unlike every collaborator above -- it's injected
     // directly as a plain value (same DI shape as `voiceprintStore`/`inputEnumerator`), so no
@@ -158,6 +160,19 @@ final class MeetingWorkspaceViewModel: ObservableObject {
     /// by `MeetingWorkspaceView`'s `TranscriptTabView` wiring (`scrollTarget`/`onScrollTargetConsumed`).
     @Published var pendingTranscriptScrollTarget: String?
 
+    // Chat tab (`docs/design/38-session-chat.md` §3.6). None are `private(set)`: every write happens
+    // in `+Chat.swift` (Swift's `private` does not span files), same rationale as `watcherItems`.
+    /// This session's chat history, already through `ChatTurnLog.fold(_:)` -- a retried answer's
+    /// superseded failure is not in here.
+    @Published var chatTurns: [ChatTurn] = []
+    /// `true` between sending a question and its answer (or failure) arriving; disables the composer.
+    @Published var isChatResponding = false
+    /// The composer's text. Bound directly by `ChatTabView`, hence not `private(set)`.
+    @Published var chatDraft: String = ""
+    /// Bumped when a chat answer is copied, keyed by turn id, to drive that row's checkmark
+    /// (`copyFeedbackRowId`'s equivalent for the chat tab).
+    @Published var chatCopyFeedbackTurnId: String?
+
     /// Source-tagged, in-progress (unconfirmed) transcript text (`docs/design/11-streaming-stt.md`
     /// section 3.6). Each stream fully replaces the previous value for its source; empty means
     /// "nothing pending" (never started, or just confirmed into `transcriptRows`). Not `private(set)`:
@@ -212,6 +227,10 @@ final class MeetingWorkspaceViewModel: ObservableObject {
     /// Watcher runner. Created once at `init` (unlike `refinementQueue`'s lazy-on-first-recording
     /// pattern) -- see `WatcherRunnerFactory`'s doc comment above.
     let watcherRunner: WatcherRunner
+    /// This session's chat engine (`docs/design/38-session-chat.md` §3.3). Built once at `init`,
+    /// like `watcherRunner` -- chat ignores the recording state entirely (CH13), so it has to work
+    /// for an Ended session. Not `private`: `+Chat.swift` owns every call into it.
+    let chatRunner: ChatRunner
     /// `docs/design/08-wiki-export.md`'s session-end Wiki raw export (kikimi.md 11 章). Not `private`:
     /// `MeetingWorkspaceViewModel+Recording.swift`'s `endMeeting()` calls this once, right after
     /// `watcherRunner.run(trigger: .onSessionEnd)`.
@@ -387,6 +406,7 @@ final class MeetingWorkspaceViewModel: ObservableObject {
         overrideEnrollmentExtractorFactory: @escaping OverrideEnrollmentExtractorFactory = MeetingWorkspaceViewModel.defaultOverrideEnrollmentExtractorFactory,
         watcherLibrary: WatcherLibrary = MeetingWorkspaceViewModel.defaultWatcherLibrary(),
         watcherRunnerFactory: @escaping WatcherRunnerFactory = MeetingWorkspaceViewModel.defaultWatcherRunnerFactory,
+        chatRunnerFactory: @escaping ChatRunnerFactory = MeetingWorkspaceViewModel.defaultChatRunnerFactory,
         wikiExporter: WikiExporting = MeetingWorkspaceViewModel.defaultWikiExporter(),
         pasteboard: PasteboardWriting = SystemPasteboard(),
         now: @escaping @Sendable () -> Date = { Date() }
@@ -406,6 +426,7 @@ final class MeetingWorkspaceViewModel: ObservableObject {
         self.overrideEnrollmentExtractorFactory = overrideEnrollmentExtractorFactory
         self.watcherLibrary = watcherLibrary
         self.watcherRunner = watcherRunnerFactory(sessionHandle)
+        self.chatRunner = chatRunnerFactory(sessionHandle)
         self.wikiExporter = wikiExporter
         self.pasteboard = pasteboard
         self.now = now
@@ -511,6 +532,10 @@ final class MeetingWorkspaceViewModel: ObservableObject {
         // session's Watchers tab isn't blank until the next trigger fires.
         await startWatchersIfNeeded()
 
+        // `docs/design/38-session-chat.md` §3.6: restore this session's chat history so reopening a
+        // window shows what was already asked.
+        await loadChatHistory()
+
         subscribeToRecordingSessionId()
     }
 
@@ -531,59 +556,9 @@ final class MeetingWorkspaceViewModel: ObservableObject {
         segmentAudioPlayer.stop()
     }
 
-    // MARK: - Private: init hydration
-
-    private static func placeholderMeta(sessionId: String) -> SessionMeta {
-        SessionMeta(
-            id: sessionId,
-            title: "",
-            titleAutoGenerated: true,
-            titleAutoNamedOnce: false,
-            titleProposal: nil,
-            state: .draft,
-            createdAt: Date(),
-            startedAt: nil,
-            endedAt: nil,
-            durationMs: 0,
-            recordings: [],
-            basedOnSession: nil,
-            segmentCount: 0,
-            refinedCount: 0,
-            appVersion: ""
-        )
-    }
-
-    /// Replaces the placeholder `meta`/empty `contextText`/`summaryTemplateText` seeded by `init`
-    /// with the real values read from `sessionHandle` (a `var` actor property, unreadable
-    /// synchronously from `init` — see `init`'s doc comment). Also derives the real initial
-    /// `recordingButtonState` from `meta.state`, but only if nothing has driven
-    /// `recordingButtonState` away from its `init`-time default yet (`startRecording()` etc. always
-    /// wins if it raced ahead of this hydration).
-    ///
-    /// Also applies `docs/design/10-audio-input-selection.md` section 4 ①'s hydrate-time
-    /// resolution via `hydrateAudioInputSelectionIfStillDefault()`
-    /// (`MeetingWorkspaceViewModel+AudioInput.swift`), guarded by the same race pattern as
-    /// `recordingButtonState` above (section 6.1).
-    private func hydrateFromSessionHandle() async {
-        let loadedMeta = await sessionHandle.meta
-        meta = loadedMeta
-        contextText = await sessionHandle.readContext()
-        summaryTemplateText = await sessionHandle.readSummaryTemplate()
-        if recordingButtonState == .startRecording {
-            recordingButtonState = Self.initialRecordingButtonState(for: loadedMeta, now: now())
-        }
-        hydrateAudioInputSelectionIfStillDefault()
-
-        // kikimi.md 4 章/8 章: a reopened Paused/Ended session must show whatever `summary.md` a
-        // prior recording segment already rendered, not just newly-arriving updates --
-        // `startSummaryUpdaterIfNeeded()` (only called when Recording actually (re)starts) is not
-        // enough on its own, since Paused/Ended sessions never call it again. Missing/unreadable is
-        // the normal case for a Draft session with no summary yet, so this is a silent no-op then.
-        if summaryMarkdown == nil, let onDisk = try? await sessionHandle.readText(.summaryMarkdown), !onDisk.isEmpty {
-            summaryMarkdown = onDisk
-        }
-    }
-
+    // `placeholderMeta(sessionId:)` and `hydrateFromSessionHandle()` moved to `+Factories.swift` and
+    // `+Hydration.swift` for the same `file_length` reason as `cumulativeElapsedSeconds(for:now:)`
+    // below.
 }
 
 // `cumulativeElapsedSeconds(for:now:)` and `initialRecordingButtonState(for:now:)` moved to

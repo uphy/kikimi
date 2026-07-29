@@ -81,6 +81,11 @@ struct ModelSettingsTab: View {
                     .help("config.yaml: summary.model")
                 TextField("Watcher 既定モデル", text: appConfig.binding(\.watchers.defaultModel))
                     .help("config.yaml: watchers.default_model")
+                // `docs/design/38-session-chat.md` §6: the one chat setting worth surfacing here.
+                // The budget/history/timeout values stay config.yaml-only -- they are tuning knobs,
+                // not choices anyone makes routinely.
+                TextField("チャットモデル", text: appConfig.binding(\.chat.model))
+                    .help("config.yaml: chat.model")
             }
             Section("バッチ整形") {
                 SettingsIntField(

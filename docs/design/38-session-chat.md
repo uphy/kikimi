@@ -10,13 +10,15 @@
 `docs/design/37-transcript-markdown-copy.md` §3.2(b)（`TranscriptMarkdownSource`）,
 `docs/design/07-session-store.md`（`SessionFile` / JSONL 追記）。
 
-**実装状況**: §8.1 の前提修正のうち (a) stdin 非同期化 / (b) `LLMRequest.messages` / (c) stub・バッジへの
-`chat` 登録は実装済み。(d) `active_tab: chat` の復元は、単体で入れるとチャットタブが空のまま表示されるため
-チャット本体と同じ変更に含める。チャット本体（§3 以降）は未実装。
+**実装状況**: 実装済み。§8.1 の前提修正 (a)〜(c) は先行 PR、(d) とチャット本体は後続 PR で入れた。
 
-実装で 1 点だけ設計から変えた: (a) の `SIGPIPE` を `SIG_IGN` にする場所を `KikimiApp` の起動処理ではなく
-`ClaudeCLIProcessRunner` 内（初回のプロセス起動前に 1 度だけ）にした。回帰テスト（64KB 超の stdin を
-読まない子に渡して SIGKILL する）はテストターゲットで走るので、`KikimiApp` に置くとテスト側が無防備になる。
+実装で設計から変えた点は 2 つ:
+
+- **`SIGPIPE` を `SIG_IGN` にする場所**（§8.1(a)）を `KikimiApp` の起動処理ではなく
+  `ClaudeCLIProcessRunner` 内（初回のプロセス起動前に 1 度だけ）にした。回帰テスト（64KB 超の stdin を
+  読まない子に渡して SIGKILL する）はテストターゲットで走るので、`KikimiApp` に置くとテスト側が無防備になる
+- **`ChatTurn` の追加フィールド**: 画面のコピー用チェックマークを出すため、ViewModel 側に
+  `chatCopyFeedbackTurnId` を持たせた（`copyFeedbackRowId` と同じ流儀）。`ChatTurn` 自体は §3.4 のまま
 
 **経緯**: ユーザー要件は「ad-hoc にチャット形式で最新の会話について質問したい」。Watcher が
 「あらかじめ決めた観点を継続的に見る」のに対し、チャットは**その場で思いついたことを 1 回聞く**ための

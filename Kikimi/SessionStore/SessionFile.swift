@@ -68,6 +68,11 @@ enum SessionFile: Sendable, Equatable {
     /// `.transcriptJSONL`/`.refinedJSONL`, with its own dedicated
     /// `appendLLMUsageRecord`/`readLLMUsageRecords` API (`SessionHandle+LLMUsage.swift`).
     case llmUsageJSONL
+    /// `chat.jsonl`: append-only log of the session chat tab's questions and answers
+    /// (`docs/design/38-session-chat.md` §3.4). Same "追記のみ・rewrite 禁止" contract as
+    /// `.transcriptJSONL`/`.llmUsageJSONL`, with its own `appendChatTurn`/`readChatTurns` API
+    /// (`SessionHandle+Chat.swift`) -- a retried answer is a new line, never an edit.
+    case chatJSONL
     case watchersEnabled
     /// `watchers/<id>.md`. `id` must be non-empty and contain only ASCII letters, digits, and
     /// hyphens (kikimi.md 9 章); `relativePath()` validates this and throws
@@ -106,6 +111,8 @@ enum SessionFile: Sendable, Equatable {
             return "summary.md"
         case .llmUsageJSONL:
             return "llm_usage.jsonl"
+        case .chatJSONL:
+            return "chat.jsonl"
         case .watchersEnabled:
             return "watchers/enabled.yaml"
         case .watcherDefinition(let id):

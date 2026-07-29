@@ -101,6 +101,7 @@ kikimi.md 13 章に準拠。主要コンポーネント:
 | `Kikimi/Refinement/` | Haiku バッチ整形（プロンプト構築・マージ・バリデーション） |
 | `Kikimi/Summary/` | サマリ state 管理・patch 適用・view レンダリング |
 | `Kikimi/Watchers/` | Watcher 定義・実行・schema/view 処理 |
+| `Kikimi/Chat/` | セッションチャット（会話への ad-hoc 質問。プロンプト構築・コンテキスト予算・履歴正規化） |
 | `Kikimi/Markdown/` | 会話ログの Markdown レンダリング・コピー |
 | `Kikimi/LLM/` | Claude CLI/API クライアント・課金集計・スタブプロバイダ |
 | `Kikimi/SessionStore/` | セッションのファイル I/O（JSONL・meta・各種 state） |
