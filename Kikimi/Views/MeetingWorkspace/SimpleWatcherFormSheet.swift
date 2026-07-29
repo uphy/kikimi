@@ -145,11 +145,18 @@ struct SimpleWatcherFormSheet: View {
                 }
             }
 
+            // The labels deliberately all start with "サマリ": `WatcherRunner` reads `summary.md` and
+            // expands `{{summary}}` on *every* run regardless of `input_scope` (`WatcherRunner.swift`'s
+            // `summaryMarkdown`, and simple Watchers' `userPromptTemplate` always contains
+            // `{{summary}}`), so the only thing this picker actually varies is how many verbatim
+            // segments are appended on top. The previous wording ("直近の会話 / サマリのみ / 会議全体")
+            // read as three mutually exclusive sources and left users unsure whether a Watcher had
+            // seen the whole meeting or only the tail.
             Section("対象") {
                 Picker("", selection: $targetKind) {
-                    Text("直近の会話").tag(TargetKind.recentConversation)
                     Text("サマリのみ").tag(TargetKind.summaryOnly)
-                    Text("会議全体").tag(TargetKind.fullMeeting)
+                    Text("サマリ + 直近の発言").tag(TargetKind.recentConversation)
+                    Text("サマリ + 全発言").tag(TargetKind.fullMeeting)
                 }
                 .labelsHidden()
                 .disabled(isReadOnly)
@@ -158,6 +165,10 @@ struct SimpleWatcherFormSheet: View {
                     SettingsIntField(label: "発言数", value: $recentCount, range: 1...200)
                         .disabled(isReadOnly)
                 }
+
+                Text("どの選択でもサマリは常に含まれます。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("実行タイミング") {

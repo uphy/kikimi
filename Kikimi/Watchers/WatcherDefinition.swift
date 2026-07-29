@@ -63,6 +63,68 @@ enum WatcherInputScope: Sendable, Equatable {
     /// parse time (§5). Kept here rather than on `WatcherRunner` so the parser doesn't depend on the
     /// runner's constants.
     static let defaultRecentCount = 30
+
+    /// This scope's `input_scope:` frontmatter text. `summaryAndRecent` always emits the explicit
+    /// `:<n>` suffix (never the bare, default-implying `summary_and_recent`) since a value in memory
+    /// always carries a concrete count. ASCII keywords/digits only, so it is always safe both as a
+    /// YAML plain scalar (`SimpleWatcherSpec.fileText()`) and as a JSON string (`WatcherRunRecord`).
+    var scalarValue: String {
+        switch self {
+        case .summary:
+            return "summary"
+        case .summaryAndRecent(let count):
+            return "summary_and_recent:\(count)"
+        case .fullRefined:
+            return "full_refined"
+        }
+    }
+
+    /// Parses `scalarValue`'s text form back, returning `nil` for anything unrecognized. Strict by
+    /// design: unlike `WatcherDefinitionParser.parseInputScope(_:)` -- which layers range clamping
+    /// and distinct `WatcherParseError` cases on top of this for hand-authored `.md` frontmatter --
+    /// this accepts the count as written, since its other caller (`WatcherRunRecord` decoding) is
+    /// reading back a value Kikimi itself wrote from an already-clamped scope.
+    init?(scalarValue: String) {
+        switch scalarValue {
+        case "summary":
+            self = .summary
+        case "summary_and_recent":
+            self = .summaryAndRecent(count: Self.defaultRecentCount)
+        case "full_refined":
+            self = .fullRefined
+        default:
+            let prefix = "summary_and_recent:"
+            guard scalarValue.hasPrefix(prefix), let count = Int(scalarValue.dropFirst(prefix.count)) else {
+                return nil
+            }
+            self = .summaryAndRecent(count: count)
+        }
+    }
+}
+
+// MARK: - WatcherInputScope + Codable
+
+/// Encoded as its `scalarValue` string (not as a Swift-synthesized enum object), so
+/// `watchers/<id>.run.json` stays readable and uses the exact same vocabulary as the `.md`
+/// frontmatter it mirrors.
+extension WatcherInputScope: Codable {
+    init(from decoder: Decoder) throws {
+        let scalarValue = try decoder.singleValueContainer().decode(String.self)
+        guard let parsed = WatcherInputScope(scalarValue: scalarValue) else {
+            throw DecodingError.dataCorrupted(
+                DecodingError.Context(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "Unrecognized input_scope \"\(scalarValue)\""
+                )
+            )
+        }
+        self = parsed
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(scalarValue)
+    }
 }
 
 // MARK: - WatcherParseError
@@ -316,30 +378,24 @@ enum WatcherDefinitionParser {
     /// which is a hard parse error for non-numeric input).
     private static let recentCountRange = 1...200
 
+    /// Adds this parser's two frontmatter-only concerns on top of `WatcherInputScope
+    /// .init?(scalarValue:)`, which owns the text vocabulary itself: distinct `WatcherParseError`
+    /// cases (so a typo'd keyword and a non-numeric count report differently) and range clamping of
+    /// a hand-authored count.
     private static func parseInputScope(_ raw: String) throws -> WatcherInputScope {
-        switch raw {
-        case "summary":
-            return .summary
-        case "summary_and_recent":
-            return .summaryAndRecent(count: WatcherInputScope.defaultRecentCount)
-        case "full_refined":
-            return .fullRefined
-        default:
-            guard raw.hasPrefix("summary_and_recent:") else {
-                throw WatcherParseError.unknownInputScope(raw)
-            }
-            let countText = raw.dropFirst("summary_and_recent:".count)
-            guard let count = Int(countText) else {
-                throw WatcherParseError.invalidRecentCount(raw)
-            }
-            let clamped = min(max(count, recentCountRange.lowerBound), recentCountRange.upperBound)
-            if clamped != count {
-                logger.warning(
-                    "summary_and_recent count \(count, privacy: .public) is out of range; clamping to \(clamped, privacy: .public)."
-                )
-            }
-            return .summaryAndRecent(count: clamped)
+        guard let parsed = WatcherInputScope(scalarValue: raw) else {
+            throw raw.hasPrefix("summary_and_recent:")
+                ? WatcherParseError.invalidRecentCount(raw)
+                : WatcherParseError.unknownInputScope(raw)
         }
+        guard case .summaryAndRecent(let count) = parsed else { return parsed }
+        let clamped = min(max(count, recentCountRange.lowerBound), recentCountRange.upperBound)
+        if clamped != count {
+            logger.warning(
+                "summary_and_recent count \(count, privacy: .public) is out of range; clamping to \(clamped, privacy: .public)."
+            )
+        }
+        return .summaryAndRecent(count: clamped)
     }
 
     // MARK: - initial_state (§4 step 2)

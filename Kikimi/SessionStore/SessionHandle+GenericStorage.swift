@@ -53,6 +53,21 @@ extension SessionHandle {
         try atomicWriteText(text, to: file.asSessionFile)
     }
 
+    // MARK: File metadata
+
+    /// `file`'s last-modified timestamp, or `nil` if it doesn't exist yet.
+    ///
+    /// Exists for one specific job: recovering a Watcher's "last run at" after the session is
+    /// reopened. `watchers/<id>.state.json` holds only the LLM's output -- no timestamp -- so a
+    /// reopened session used to render a Watcher's persisted result under a "未実行" footer
+    /// (`MeetingWorkspaceViewModel.renderExistingState(for:)`). That file is written exactly once per
+    /// successful run and never touched otherwise, so its mtime *is* the run's completion time.
+    func modificationDate(of file: GenericAccessibleFile) async throws -> Date? {
+        let url = directoryURL.appendingPathComponent(try file.relativePath())
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return try url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+    }
+
     /// Deletes `file` if it exists; a no-op (not an error) if it's already absent. Used for "local
     /// Watcher の削除" (kikimi.md 9 章 "Session-local Watcher の作り方"): removing both
     /// `watchers/<id>.md` and its `watchers/<id>.state.json` counterpart.

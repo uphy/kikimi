@@ -126,16 +126,26 @@ struct MeetingWorkspaceViewModelWatchersTests {
     }
 
     /// A minimal, always-valid Watcher definition (mirrors `WatcherRunnerTests.definitionText(id:)`).
-    private func definitionText(id: String, name: String = "Test Watcher", trigger: String = "on_manual") -> String {
-        """
+    private func definitionText(
+        id: String,
+        name: String = "Test Watcher",
+        trigger: String = "on_manual",
+        inputScope: String = "summary",
+        initialState: String? = nil
+    ) -> String {
+        // Rendered as a YAML block scalar, or collapsed to a blank line (harmless in YAML) when the
+        // caller wants no `initial_state` at all.
+        let initialStateLines = initialState.map { "initial_state: |\n  \($0)" } ?? ""
+        return """
         ---
         id: \(id)
         name: \(name)
         trigger: \(trigger)
         state_mode: cumulative
-        input_scope: summary
+        input_scope: \(inputScope)
         schema:
           note: string
+        \(initialStateLines)
         view: |
           {{note}}
         ---
@@ -445,7 +455,7 @@ struct MeetingWorkspaceViewModelWatchersTests {
         }
     }
 
-    @Test("deleteLocalWatcher(id:) removes both files and drops the id from enabled.yaml")
+    @Test("deleteLocalWatcher(id:) removes the definition, state, and run record, and drops the id from enabled.yaml")
     func deleteLocalWatcherRemovesFilesAndEnabledEntry() async throws {
         let root = makeTemporaryDirectory(prefix: "deleteLocalWatcherRemovesFilesAndEnabledEntry")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -457,6 +467,10 @@ struct MeetingWorkspaceViewModelWatchersTests {
         let viewModel = makeViewModel(handle: handle, store: store, presetsDirectory: presetsDirectory)
         try await viewModel.createLocalWatcher(id: "throwaway")
         try await handle.writeText("{\"note\":\"x\"}", to: .watcherState(id: "throwaway"))
+        try await handle.writeJSON(
+            WatcherRunRecord(finishedAt: Date(timeIntervalSince1970: 1_700_000_000), inputScope: .summary),
+            to: .watcherRunRecord(id: "throwaway")
+        )
 
         await viewModel.deleteLocalWatcher(id: "throwaway")
 
@@ -466,6 +480,10 @@ struct MeetingWorkspaceViewModelWatchersTests {
         #expect(definitionText == nil)
         let stateText = try await handle.readText(.watcherState(id: "throwaway"))
         #expect(stateText == nil)
+        // A leftover run record would later be picked up by a *newly created* Watcher reusing the
+        // same id, labelling its first render with a timestamp/scope from the deleted one.
+        let runRecord = try await handle.readJSON(.watcherRunRecord(id: "throwaway"), as: WatcherRunRecord.self)
+        #expect(runRecord == nil)
         #expect(viewModel.watcherItems.isEmpty)
     }
 
@@ -584,6 +602,37 @@ struct MeetingWorkspaceViewModelWatchersTests {
         #expect(byId["full-a"]?.isSimple == false)
         #expect(byId["ghost-a"]?.isSimple == false)
         #expect(byId["ghost-a"]?.origin == .missing)
+    }
+
+    /// Backs the Watchers-tab footer's `input_scope` badge (`WatchersTabView.inputScopeLabel(_:)`):
+    /// every resolvable definition -- simple or full -- has to carry its scope through to the panel
+    /// item, and a `.missing` id has to leave it `nil` rather than inheriting a stale value.
+    @Test("refreshWatcherItems() carries each definition's input_scope into the panel item, nil for .missing")
+    func refreshWatcherItemsSetsInputScope() async throws {
+        let root = makeTemporaryDirectory(prefix: "refreshWatcherItemsSetsInputScope")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = makeStore(root: root)
+        let created = try await store.createDraftSession()
+        let handle = try await store.openSession(created.id)
+        let presetsDirectory = makeTemporaryDirectory(prefix: "refreshWatcherItemsSetsInputScope-presets")
+
+        try await handle.writeText(
+            definitionText(id: "recent-a", inputScope: "summary_and_recent:12"), to: .watcherDefinition(id: "recent-a")
+        )
+        try await handle.writeText(
+            definitionText(id: "full-a", inputScope: "full_refined"), to: .watcherDefinition(id: "full-a")
+        )
+        try await handle.writeText(simpleDefinitionText(id: "simple-a"), to: .watcherDefinition(id: "simple-a"))
+        try await handle.writeEnabledWatchers(["recent-a", "full-a", "simple-a", "ghost-a"])
+
+        let viewModel = makeViewModel(handle: handle, store: store, presetsDirectory: presetsDirectory)
+        await viewModel.onAppear()
+
+        let byId = Dictionary(uniqueKeysWithValues: viewModel.watcherItems.map { ($0.id, $0) })
+        #expect(byId["recent-a"]?.inputScope == .summaryAndRecent(count: 12))
+        #expect(byId["full-a"]?.inputScope == .fullRefined)
+        #expect(byId["simple-a"]?.inputScope == .summary)
+        #expect(byId["ghost-a"]?.inputScope == nil)
     }
 
     @Test("createSimpleWatcher(_:) generates a simple-<6 hex> id, writes a kind: simple definition, and enables it")
@@ -905,6 +954,91 @@ struct MeetingWorkspaceViewModelWatchersTests {
 
         #expect(viewModel.watcherItems.first?.renderedMarkdown == "persisted note")
         #expect(viewModel.watcherItems.first?.status == .idle)
+    }
+
+    // MARK: - lastRunAt / lastRunInputScope recovery on reopen (§7.2)
+
+    /// A reopened session (every Ended meeting, and any window opened from the session list) used to
+    /// render a real result under a "未実行" footer, because `lastRunAt` only ever came from a live
+    /// `WatcherEvent.finished` this process had observed itself.
+    @Test("onAppear() recovers lastRunAt and lastRunInputScope from watchers/<id>.run.json")
+    func onAppearRecoversLastRunFromRunRecord() async throws {
+        let root = makeTemporaryDirectory(prefix: "onAppearRecoversLastRunFromRunRecord")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = makeStore(root: root)
+        let created = try await store.createDraftSession()
+        let handle = try await store.openSession(created.id)
+        let presetsDirectory = makeTemporaryDirectory(prefix: "onAppearRecoversLastRunFromRunRecord-presets")
+
+        try await handle.writeText(
+            definitionText(id: "watcher-a", inputScope: "full_refined"), to: .watcherDefinition(id: "watcher-a")
+        )
+        try await handle.writeEnabledWatchers(["watcher-a"])
+        try await handle.writeText("{\"note\":\"persisted note\"}", to: .watcherState(id: "watcher-a"))
+        let finishedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        // A scope that differs from the definition's current `full_refined`, i.e. the definition was
+        // edited after this run -- the case the footer renders as "X（次回: Y）".
+        try await handle.writeJSON(
+            WatcherRunRecord(finishedAt: finishedAt, inputScope: .summaryAndRecent(count: 30)),
+            to: .watcherRunRecord(id: "watcher-a")
+        )
+
+        let viewModel = makeViewModel(handle: handle, store: store, presetsDirectory: presetsDirectory)
+        await viewModel.onAppear()
+
+        #expect(viewModel.watcherItems.first?.lastRunAt == finishedAt)
+        #expect(viewModel.watcherItems.first?.lastRunInputScope == .summaryAndRecent(count: 30))
+        #expect(viewModel.watcherItems.first?.inputScope == .fullRefined)
+    }
+
+    /// The pre-`run.json` compatibility path: sessions recorded before that file existed still have
+    /// a `state.json`, whose mtime is a faithful proxy for the run's completion time (it is written
+    /// exactly once per successful run).
+    @Test("onAppear() falls back to state.json's mtime when no run.json exists, leaving the scope nil")
+    func onAppearFallsBackToStateMtimeWithoutRunRecord() async throws {
+        let root = makeTemporaryDirectory(prefix: "onAppearFallsBackToStateMtimeWithoutRunRecord")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = makeStore(root: root)
+        let created = try await store.createDraftSession()
+        let handle = try await store.openSession(created.id)
+        let presetsDirectory = makeTemporaryDirectory(prefix: "onAppearFallsBackToStateMtimeWithoutRunRecord-presets")
+
+        try await handle.writeText(definitionText(id: "watcher-a"), to: .watcherDefinition(id: "watcher-a"))
+        try await handle.writeEnabledWatchers(["watcher-a"])
+        let beforeWrite = Date()
+        try await handle.writeText("{\"note\":\"persisted note\"}", to: .watcherState(id: "watcher-a"))
+
+        let viewModel = makeViewModel(handle: handle, store: store, presetsDirectory: presetsDirectory)
+        await viewModel.onAppear()
+
+        let item = try #require(viewModel.watcherItems.first)
+        let lastRunAt = try #require(item.lastRunAt, "the footer would say 未実行 under a rendered result")
+        #expect(lastRunAt >= beforeWrite.addingTimeInterval(-1))
+        #expect(item.lastRunInputScope == nil)
+    }
+
+    /// `initial_state` is not a run: rendering it must leave the footer honestly saying 未実行.
+    @Test("onAppear() leaves lastRunAt nil when the render came from initial_state, not a real run")
+    func onAppearLeavesLastRunAtNilForInitialStateRender() async throws {
+        let root = makeTemporaryDirectory(prefix: "onAppearLeavesLastRunAtNilForInitialStateRender")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = makeStore(root: root)
+        let created = try await store.createDraftSession()
+        let handle = try await store.openSession(created.id)
+        let presetsDirectory = makeTemporaryDirectory(prefix: "onAppearLeavesLastRunAtNilForInitialStateRender-presets")
+
+        try await handle.writeText(
+            definitionText(id: "watcher-a", initialState: "{\"note\": \"initial note\"}"),
+            to: .watcherDefinition(id: "watcher-a")
+        )
+        try await handle.writeEnabledWatchers(["watcher-a"])
+
+        let viewModel = makeViewModel(handle: handle, store: store, presetsDirectory: presetsDirectory)
+        await viewModel.onAppear()
+
+        #expect(viewModel.watcherItems.first?.renderedMarkdown == "initial note")
+        #expect(viewModel.watcherItems.first?.lastRunAt == nil)
+        #expect(viewModel.watcherItems.first?.lastRunInputScope == nil)
     }
 
     @Test("onAppear() falls back to the definition's initial_state when no state.json is persisted yet")

@@ -319,6 +319,26 @@ LLM 出力（`JSONValue`、schema 検証済み）を現在 state にどう反映
   Watcher は state 無し（`{}`）から再開
 - state ファイル未存在は正常系（初回実行前）: `initialState` ?? `{}` を使う
 
+### 7.2 実行メタの永続化（`watchers/<id>.run.json`）
+
+`state.json` は **schema 検証済みの LLM 出力そのもの**しか持たない。そのためセッションを開き直すと
+「いま表示している結果がいつ・何を入力に作られたか」が失われ、実結果の下に「未実行」と出る／対象
+バッジが定義の現在値しか示せない、という 2 つの嘘が発生していた。これを埋めるのが `run.json`。
+
+- 保存先: `sessions/<id>/watchers/<id>.run.json`（`SessionFile.watcherRunRecord(id:)`）
+- 型: `WatcherRunRecord { finished_at: ISO8601, input_scope: string }`。`readJSON`/`writeJSON`
+  （キーは snake_case、動的キーを含まないので変換で壊れない）
+- 書くタイミング: **`state.json` の書き込み直後・view レンダリングの前**。view が失敗しても state は
+  更新済みで、次回オープン時にその state が描画されるため、それを説明する record も必要
+- 書き込み失敗は warning ログのみで続行（表示メタであり、実出力は既に永続化済み）
+- `input_scope` の文字列表現は `WatcherInputScope.scalarValue` / `init?(scalarValue:)` が持つ
+  （frontmatter と同じ語彙。パーサ側の clamp とエラー種別だけが `WatcherDefinitionParser` の責務）
+- **後方互換**: この機能より前の実行には `run.json` が無い。読み手は
+  `state.json` の mtime にフォールバックする（1 回の成功実行につき 1 回だけ書かれるファイルなので
+  完了時刻の忠実な代理になる）。この経路では `input_scope` は不明（`nil`）のままとする
+- Watcher 削除時は `.md` / `.state.json` と併せて `.run.json` も消す（id 再利用時に前の実行の
+  時刻・scope を引き継がないため）
+
 ## 8. view レンダリング（`WatcherViewRenderer`）
 
 `SummaryRenderer` と同じ GRMustache.swift を使うが、context 構築が動的な点だけ異なる。
@@ -476,8 +496,21 @@ func saveLocalWatcherText(id: String, text: String) async  // 保存前に parse
   status に応じて 🔄（running）/ ⚠（error）バッジを名前に添える）
 - 本文: `Markdown(item.renderedMarkdown)` を `.markdownTheme(.summary)` で表示
   （`SummaryTabView` のテーマを流用）+ `kikimi-seg:` の `OpenURLAction`
-- フッタ: 「N 分前更新」（`lastRunAt` の相対表示）+ `[今すぐ実行]` ボタン
-  （running 中は disabled）。error 時はメッセージを 1 行表示
+- フッタ: 「N 分前更新」（`lastRunAt` の相対表示）+ 「・対象: サマリのみ / サマリ + 直近N発言 /
+  サマリ + 全発言」+ `[今すぐ実行]` ボタン（running 中は disabled）。
+  error 時はメッセージのみを 1 行表示し、対象バッジは出さない
+  - 対象バッジは「結果画面から input_scope が一切見えず、`.md` を開かないと
+    全文なのか直近なのか分からない」問題への対処。ラベルは簡易フォームの Picker と揃える
+    （どの scope でも `{{summary}}` は毎回渡るため、すべて「サマリ」で始める）
+  - 表示するのは **表示中の結果を生成した scope**（`lastRunInputScope`、7.2 の `run.json` 由来）。
+    最終実行後に定義が編集されて現在値と食い違う場合は
+    `「サマリ + 直近30発言（次回: サマリ + 全発言）」` の形で両方出す
+    （実行時 scope だけだと編集が効いていないように見え、定義の現在値だけだと上の結果を誤記述する）。
+    実行時 scope が不明（run.json 以前の結果 / 未実行）なら定義の現在値のみを出す
+  - `lastRunAt` はプロセス内で観測した `.finished` だけでなく、**セッションを開き直したときも
+    7.2 の経路（`run.json` → state.json の mtime）で復元する**。結果が表示されているのに
+    「未実行」と出る状態を作らない。`initial_state` を描画しただけのときは実行していないので
+    「未実行」のままにする
 - enabled が空: 「有効な Watcher がありません。Prep タブで追加してください」
 
 ### 10.3 Watchers 管理 UI の部品仕様

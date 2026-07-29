@@ -267,10 +267,11 @@ enum SessionFile: Sendable {
     case summaryState
     case summaryMarkdown
     case watchersEnabled
-    /// `watchers/<id>.md` / `watchers/<id>.state.json`。id はファイル名の英数字・ハイフンのみ許容
-    /// （5-watcher-runner.md 側のバリデーションと合わせる）。
+    /// `watchers/<id>.md` / `watchers/<id>.state.json` / `watchers/<id>.run.json`。
+    /// id はファイル名の英数字・ハイフンのみ許容（5-watcher-runner.md 側のバリデーションと合わせる）。
     case watcherDefinition(id: String)
     case watcherState(id: String)
+    case watcherRunRecord(id: String)
 }
 
 ### 5.2.1 `GenericAccessibleFile`（汎用プリミティブの誤用防止）
@@ -661,6 +662,10 @@ kikimi.md 15章 Open Questions「セッション中のクラッシュ復旧: JSO
   `readText(.watcherDefinition(id:))`/`writeText(_:to:.watcherDefinition(id:))` で扱う。frontmatter の
   パース（YAML）・schema の JSON Schema 変換は `05-watcher-runner.md` 側の責務
 - `watchers/<id>.state.json` は通常の JSON 系ファイルとして `readJSON`/`writeJSON` を使う
+- `watchers/<id>.run.json`（`WatcherRunRecord`、`05-watcher-runner.md` §7.2）も同様に
+  `readJSON`/`writeJSON`。動的キーを含まないので `SessionJSONCoding` の snake_case 変換で壊れない
+- `modificationDate(of:)` はこの `run.json` が無い旧セッション向けのフォールバック専用
+  （`state.json` の mtime を最終実行時刻の代理に使う）
 - `createDraftSession()` は `AppConfig.shared.watchers.defaultEnabledFile`（既定
   `~/.config/kikimi/default_watchers.yaml`）を読み、`watchers/enabled.yaml` の初期値としてコピーする
   （kikimi.md 9章「新規ウィンドウ作成時は `~/.config/kikimi/default_watchers.yaml` をコピー」）。

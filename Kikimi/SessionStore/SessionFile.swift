@@ -80,6 +80,13 @@ enum SessionFile: Sendable, Equatable {
     case watcherDefinition(id: String)
     /// `watchers/<id>.state.json`. Same `id` constraints as `.watcherDefinition(id:)`.
     case watcherState(id: String)
+    /// `watchers/<id>.run.json`: the `WatcherRunRecord` describing the run that produced the current
+    /// `.watcherState(id:)` -- when it finished and which `input_scope` it actually used
+    /// (`docs/design/05-watcher-runner.md` §7.2). Kept beside the state rather than inside it
+    /// because `.watcherState` is the Watcher's schema-validated LLM output verbatim; mixing
+    /// bookkeeping into it would break that contract. Same `id` constraints as
+    /// `.watcherDefinition(id:)`.
+    case watcherRunRecord(id: String)
 
     /// Resolves this case to a path relative to the session directory root, e.g.
     /// `.watcherState(id: "pre-check")` -> `"watchers/pre-check.state.json"`. A pure function:
@@ -121,6 +128,9 @@ enum SessionFile: Sendable, Equatable {
         case .watcherState(let id):
             try Self.validateWatcherId(id)
             return "watchers/\(id).state.json"
+        case .watcherRunRecord(let id):
+            try Self.validateWatcherId(id)
+            return "watchers/\(id).run.json"
         }
     }
 
@@ -165,6 +175,8 @@ enum GenericAccessibleFile: Sendable, Equatable {
     case watcherDefinition(id: String)
     /// Same `id` constraints as `SessionFile.watcherState(id:)`.
     case watcherState(id: String)
+    /// Same `id` constraints as `SessionFile.watcherRunRecord(id:)`.
+    case watcherRunRecord(id: String)
 
     /// Bridges to the corresponding `SessionFile` case for path resolution. Intended for
     /// `SessionHandle`'s internal use only (see `SessionFile`'s doc comment for why this can't be
@@ -179,6 +191,8 @@ enum GenericAccessibleFile: Sendable, Equatable {
             return .watcherDefinition(id: id)
         case .watcherState(let id):
             return .watcherState(id: id)
+        case .watcherRunRecord(let id):
+            return .watcherRunRecord(id: id)
         }
     }
 
