@@ -115,6 +115,32 @@ struct SessionHandleChatTests {
         #expect(read.first?.usage == nil)
     }
 
+    @Test("deleteChatTurns removes the file, and a later append starts a fresh one")
+    func deleteRemovesTheLog() async throws {
+        let directory = makeTemporaryDirectory(prefix: "SessionHandleChatTests-delete")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = makeSessionHandle(directory: directory)
+        let created = Date(timeIntervalSince1970: 1_751_000_200)
+
+        try await handle.appendChatTurn(ChatTurn(id: "u1", role: .user, text: "q1", createdAt: created))
+        try await handle.deleteChatTurns()
+
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("chat.jsonl").path))
+        #expect(try await handle.readChatTurns().isEmpty)
+
+        // Clearing must not leave the session unable to chat again.
+        try await handle.appendChatTurn(ChatTurn(id: "u2", role: .user, text: "q2", createdAt: created))
+        #expect(try await handle.readChatTurns().map(\.id) == ["u2"])
+    }
+
+    @Test("deleting an already-absent log is a no-op, not an error")
+    func deletingMissingLogIsANoOp() async throws {
+        let directory = makeTemporaryDirectory(prefix: "SessionHandleChatTests-delete-missing")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await makeSessionHandle(directory: directory).deleteChatTurns()
+    }
+
     @Test("a corrupt line is skipped without losing the surrounding turns")
     func corruptLineIsSkipped() async throws {
         let directory = makeTemporaryDirectory(prefix: "SessionHandleChatTests-corrupt")

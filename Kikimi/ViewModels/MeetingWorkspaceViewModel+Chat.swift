@@ -53,6 +53,26 @@ extension MeetingWorkspaceViewModel {
         await runChatTurn(question: question, parentTurnId: parentTurnId, replacesTurnId: id)
     }
 
+    /// Discards this session's chat history, on screen and on disk.
+    ///
+    /// Refused while an answer is in flight: that call is going to append its result when it lands,
+    /// which would resurrect a history the user just cleared. The UI disables the control for the
+    /// same reason, so this guard only covers the race.
+    func clearChatHistory() async {
+        guard !isChatResponding else { return }
+
+        chatTurns = []
+        chatCopyFeedbackTurnId = nil
+        do {
+            try await sessionHandle.deleteChatTurns()
+        } catch {
+            // The screen is already cleared, which is what was asked for. A failed delete only means
+            // the history comes back on the next open -- worth logging, not worth refusing the
+            // action the user took.
+            logger.error("Failed to delete chat.jsonl for \(self.sessionId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     /// Copies one answer's Markdown, reusing design 37's injected `PasteboardWriting`.
     func copyChatAnswer(id: String) {
         guard let turn = chatTurns.first(where: { $0.id == id }), !turn.text.isEmpty else { return }

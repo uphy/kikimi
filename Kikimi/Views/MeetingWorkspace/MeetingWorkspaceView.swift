@@ -125,7 +125,8 @@ struct MeetingWorkspaceView: View {
                 copyFeedbackTurnId: viewModel.chatCopyFeedbackTurnId,
                 onSend: { Task { await viewModel.sendChatMessage() } },
                 onRetry: { id in Task { await viewModel.retryChatTurn(id: id) } },
-                onCopy: { id in viewModel.copyChatAnswer(id: id) }
+                onCopy: { id in viewModel.copyChatAnswer(id: id) },
+                onClear: { Task { await viewModel.clearChatHistory() } }
             )
         }
     }

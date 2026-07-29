@@ -36,16 +36,25 @@ struct ChatTabView: View {
     /// Re-asks the question behind a failed answer; the argument is the **failed answer's** id.
     var onRetry: (String) -> Void
     var onCopy: (String) -> Void
+    /// Discards the whole history. Invoked only after the confirmation below.
+    var onClear: () -> Void
 
     @State private var isPinnedToBottom = true
     @State private var isAutoScrolling = false
     /// When the in-flight answer was requested, for the "…秒" counter. `nil` when idle.
     @State private var respondingSince: Date?
+    @State private var isConfirmingClear = false
 
     private static let bottomAnchorID = "ChatTabView.bottomAnchor"
 
     var body: some View {
         VStack(spacing: 0) {
+            // Nothing to clear and nothing to say about an empty history, so the bar only appears
+            // once there is one.
+            if !turns.isEmpty {
+                toolbar
+                Divider()
+            }
             history
             Divider()
             composer
@@ -53,6 +62,35 @@ struct ChatTabView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onChange(of: isResponding) { _, responding in
             respondingSince = responding ? Date() : nil
+        }
+    }
+
+    // MARK: Toolbar
+
+    private var toolbar: some View {
+        HStack {
+            Spacer()
+            Button {
+                isConfirmingClear = true
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            // Disabled mid-answer: that call appends its result when it lands, which would bring
+            // back a history just cleared.
+            .disabled(isResponding)
+            .help("チャット履歴をクリア")
+            .accessibilityLabel("チャット履歴をクリア")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        // Confirmed, not undoable: the history is deleted from disk, and there is no other copy.
+        .confirmationDialog("このセッションのチャット履歴を削除しますか？", isPresented: $isConfirmingClear) {
+            Button("削除", role: .destructive) { onClear() }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("質問と回答がすべて消えます。元に戻せません。会議の書き起こしとサマリはそのまま残ります。")
         }
     }
 
