@@ -66,6 +66,22 @@ extension SessionHandle {
         return turns
     }
 
+    /// Deletes `chat.jsonl` outright, backing the chat tab's "履歴をクリア".
+    ///
+    /// The append-only contract (`docs/design/38-session-chat.md` CH8) is about never *rewriting* a
+    /// record -- a retried answer is a new line, not an edit -- and this does not violate it: the
+    /// user is discarding the whole log deliberately, and leaving a tombstone behind so the data
+    /// quietly survives a deletion they asked for would be the surprising choice. Chat is Kikimi's
+    /// own interaction history (CH14), not part of the meeting record, so nothing downstream depends
+    /// on it existing.
+    ///
+    /// A missing file is success, not an error: clearing an already-empty chat is a no-op.
+    func deleteChatTurns() async throws {
+        let fileURL = try chatFileURL()
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+        try FileManager.default.removeItem(at: fileURL)
+    }
+
     private func chatFileURL() throws -> URL {
         directoryURL.appendingPathComponent(try SessionFile.chatJSONL.relativePath())
     }

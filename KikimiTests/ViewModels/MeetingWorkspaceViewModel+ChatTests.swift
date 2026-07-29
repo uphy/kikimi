@@ -272,6 +272,63 @@ struct MeetingWorkspaceViewModelChatTests {
         #expect(viewModel.chatTurns.map(\.id) == ["u1", "a2"])
     }
 
+    // MARK: - Clear
+
+    @Test("clearChatHistory empties the list and deletes the log, leaving the tab usable")
+    func clearChatHistoryEmptiesListAndFile() async throws {
+        let sessionDir = makeTemporaryDirectory(prefix: "MeetingWorkspaceViewModelChatTests-clear")
+        defer { try? FileManager.default.removeItem(at: sessionDir) }
+        let handle = SessionHandle(directoryURL: sessionDir, meta: makeSessionMeta())
+        let viewModel = makeViewModel(
+            sessionHandle: handle,
+            chatLLM: ScriptedChatLLM(outcomes: [.answer("回答1"), .answer("回答2")])
+        )
+
+        viewModel.chatDraft = "質問1"
+        await viewModel.sendChatMessage()
+        #expect(viewModel.chatTurns.count == 2)
+
+        await viewModel.clearChatHistory()
+
+        #expect(viewModel.chatTurns.isEmpty)
+        #expect(viewModel.chatCopyFeedbackTurnId == nil)
+        #expect(try await handle.readChatTurns().isEmpty, "the log is deleted, not just hidden")
+
+        // A cleared session must still be able to chat, starting from a fresh log.
+        viewModel.chatDraft = "質問2"
+        await viewModel.sendChatMessage()
+        #expect(viewModel.chatTurns.map(\.text) == ["質問2", "回答2"])
+        #expect(try await handle.readChatTurns().count == 2)
+    }
+
+    @Test("clearing an empty history is a harmless no-op")
+    func clearingEmptyHistoryIsANoOp() async throws {
+        let sessionDir = makeTemporaryDirectory(prefix: "MeetingWorkspaceViewModelChatTests-clear2")
+        defer { try? FileManager.default.removeItem(at: sessionDir) }
+        let handle = SessionHandle(directoryURL: sessionDir, meta: makeSessionMeta())
+        let viewModel = makeViewModel(sessionHandle: handle)
+
+        await viewModel.clearChatHistory()
+
+        #expect(viewModel.chatTurns.isEmpty)
+    }
+
+    @Test("clearChatHistory reloads nothing after a reopen -- the history is gone for good")
+    func clearedHistoryStaysGoneAcrossReload() async throws {
+        let sessionDir = makeTemporaryDirectory(prefix: "MeetingWorkspaceViewModelChatTests-clear3")
+        defer { try? FileManager.default.removeItem(at: sessionDir) }
+        let handle = SessionHandle(directoryURL: sessionDir, meta: makeSessionMeta())
+        let viewModel = makeViewModel(sessionHandle: handle, chatLLM: ScriptedChatLLM(outcomes: [.answer("回答")]))
+
+        viewModel.chatDraft = "質問"
+        await viewModel.sendChatMessage()
+        await viewModel.clearChatHistory()
+
+        // Reopening the window is exactly `loadChatHistory()` -- nothing must come back.
+        await viewModel.loadChatHistory()
+        #expect(viewModel.chatTurns.isEmpty)
+    }
+
     // MARK: - Copy
 
     @Test("copyChatAnswer writes the answer's Markdown and marks that turn as copied")

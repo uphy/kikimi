@@ -36,16 +36,25 @@ struct ChatTabView: View {
     /// Re-asks the question behind a failed answer; the argument is the **failed answer's** id.
     var onRetry: (String) -> Void
     var onCopy: (String) -> Void
+    /// Discards the whole history. Invoked only after the confirmation below.
+    var onClear: () -> Void
 
     @State private var isPinnedToBottom = true
     @State private var isAutoScrolling = false
     /// When the in-flight answer was requested, for the "…秒" counter. `nil` when idle.
     @State private var respondingSince: Date?
+    @State private var isConfirmingClear = false
 
     private static let bottomAnchorID = "ChatTabView.bottomAnchor"
 
     var body: some View {
         VStack(spacing: 0) {
+            // Nothing to clear and nothing to say about an empty history, so the bar only appears
+            // once there is one.
+            if !turns.isEmpty {
+                toolbar
+                Divider()
+            }
             history
             Divider()
             composer
@@ -53,6 +62,35 @@ struct ChatTabView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onChange(of: isResponding) { _, responding in
             respondingSince = responding ? Date() : nil
+        }
+    }
+
+    // MARK: Toolbar
+
+    private var toolbar: some View {
+        HStack {
+            Spacer()
+            Button {
+                isConfirmingClear = true
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            // Disabled mid-answer: that call appends its result when it lands, which would bring
+            // back a history just cleared.
+            .disabled(isResponding)
+            .help("チャット履歴をクリア")
+            .accessibilityLabel("チャット履歴をクリア")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        // Confirmed, not undoable: the history is deleted from disk, and there is no other copy.
+        .confirmationDialog("このセッションのチャット履歴を削除しますか？", isPresented: $isConfirmingClear) {
+            Button("削除", role: .destructive) { onClear() }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("質問と回答がすべて消えます。元に戻せません。会議の書き起こしとサマリはそのまま残ります。")
         }
     }
 
@@ -222,21 +260,23 @@ struct ChatTabView: View {
 
     private var composer: some View {
         VStack(alignment: .trailing, spacing: 6) {
+            // `PlainTextEditor`, not a bare `TextEditor`: it already solves the two things this
+            // field needs. Its placeholder is positioned against the `NSTextView`'s own text origin
+            // (a hand-layered overlay has to guess that inset, and guessed wrong here -- the
+            // placeholder sat a line below the caret), and its `updateNSView` refuses to touch the
+            // string while an IME composition is in flight, which is what keeps fast Japanese input
+            // from dropping characters. A chat composer is a Japanese-input field, so that matters
+            // as much here as it does in the Prep tab.
+            //
             // Multi-line, and Return inserts a newline rather than sending: questions written during
             // a meeting are often several lines long, so ⌘⏎ is the send gesture (§3.5).
-            TextEditor(text: $draft)
-                .font(.body)
-                .frame(minHeight: 56, maxHeight: 120)
-                .overlay(alignment: .topLeading) {
-                    if draft.isEmpty {
-                        Text("質問を入力…")
-                            .foregroundStyle(.tertiary)
-                            .padding(.leading, 5)
-                            .padding(.top, 8)
-                            .allowsHitTesting(false)
-                    }
-                }
-                .disabled(isResponding)
+            PlainTextEditor(
+                text: $draft,
+                isEditable: !isResponding,
+                placeholder: "質問を入力…"
+            )
+            .frame(minHeight: 56, maxHeight: 120)
+            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.3)))
 
             Button("送信") { onSend() }
                 .keyboardShortcut(.return, modifiers: .command)

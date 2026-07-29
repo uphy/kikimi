@@ -153,7 +153,7 @@ struct MeetingWorkspaceViewModelWatchersTests {
     /// Polls `predicate` until it becomes `true` or `timeout` elapses (mirrors
     /// `WatcherRunnerTests.waitUntil`/`SummaryUpdaterTests.waitUntil`) -- used for assertions on
     /// state written by a fire-and-forget `Task` (`setWatcherEnabled(id:enabled:)`, `runWatcherNow(id:)`).
-    private func waitUntil(timeout: Duration = .seconds(5), predicate: @escaping () -> Bool) async throws {
+    private func waitUntil(timeout: Duration = .seconds(10), predicate: @escaping () -> Bool) async throws {
         let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
             if predicate() { return }

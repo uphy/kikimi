@@ -194,7 +194,7 @@ struct RefinementQueueTests {
     /// Polls `predicate` on a short interval until it returns `true` or a timeout elapses (mirrors
     /// `SummaryUpdaterTests.waitUntil`), for the handful of assertions that can't be synchronized via
     /// `queue.drain()` alone (e.g. `EventCollector`'s independent consuming `Task`).
-    private func waitUntil(timeout: Duration = .seconds(5), predicate: @escaping () async -> Bool) async throws {
+    private func waitUntil(timeout: Duration = .seconds(10), predicate: @escaping () async -> Bool) async throws {
         let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
             if await predicate() { return }

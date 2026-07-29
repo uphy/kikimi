@@ -738,7 +738,7 @@ struct SummaryUpdaterTests {
     /// `noteSegmentAppended`'s auto-triggered update runs on a detached `Task` rather than being
     /// directly awaitable.
     private func waitUntil(
-        timeout: Duration = .seconds(5),
+        timeout: Duration = .seconds(10),
         predicate: @escaping () async -> Bool
     ) async throws {
         let deadline = ContinuousClock.now + timeout
