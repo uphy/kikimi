@@ -95,6 +95,24 @@ final class DictationInserter: DictationInserting {
 
     // MARK: - Insertion (R6)
 
+    /// Where synthesized keyboard events are injected. HID -- the same entry point physical
+    /// keystrokes come from -- so WindowServer routes them by its normal rules, which honor the key
+    /// window even when its app is not the active one.
+    ///
+    /// The spike used `.cgAnnotatedSessionEventTap`, which instead delivers straight to the *active
+    /// application*. That silently targets the wrong app whenever the key window belongs to a
+    /// `.nonactivatingPanel` in a background app: clicking such a panel makes it key without
+    /// activating its app, so the annotated tap kept delivering to the previously active app while
+    /// physical `⌘V` went to the panel. Reproduced against Chirami's note window (a
+    /// `.nonactivatingPanel` that only calls `NSApp.activate` on its hotkey path, not on click)
+    /// stacked over a terminal: dictation landed in the terminal, hand-typed `⌘V` in the note.
+    ///
+    /// `FrontmostGuard` cannot detect this case -- `NSWorkspace.frontmostApplication` and the
+    /// system-wide `kAXFocusedUIElement` both report the active app, so they agree with each other
+    /// while disagreeing with the real key window. macOS exposes no API for "who actually receives
+    /// keystrokes", so the guard stays active-app-based; it under-detects here but never misfires.
+    private static let eventTap: CGEventTapLocation = .cghidEventTap
+
     /// Inserts `text` into whatever holds keyboard focus **right now**, with no `FrontmostGuard`
     /// check at all. Exposed (not `private`) for `DictationOverlayPanel`'s `[挿入]` button (D2,
     /// R5/§8): "ユーザーが `[挿入]` で『今の』frontmost へ入れ直せる（再度の検証は挟まない —
@@ -150,8 +168,8 @@ final class DictationInserter: DictationInserting {
         }
         down.flags = .maskCommand
         up.flags = .maskCommand
-        down.post(tap: .cgAnnotatedSessionEventTap)
-        up.post(tap: .cgAnnotatedSessionEventTap)
+        down.post(tap: Self.eventTap)
+        up.post(tap: Self.eventTap)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             pasteboard.clearContents()
@@ -184,8 +202,8 @@ final class DictationInserter: DictationInserting {
             up.flags = []
             down.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: &chunk)
             up.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: &chunk)
-            down.post(tap: .cgAnnotatedSessionEventTap)
-            up.post(tap: .cgAnnotatedSessionEventTap)
+            down.post(tap: Self.eventTap)
+            up.post(tap: Self.eventTap)
         }
     }
 
