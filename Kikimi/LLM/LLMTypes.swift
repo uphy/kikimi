@@ -29,8 +29,20 @@ struct LLMRequest: Sendable {
     /// Fixed system prompt, kept small (section 2.2's prompt-caching note: `--system-prompt`
     /// replaces Claude Code's own, and small system prompts are not `cache_creation`'d).
     var system: String
-    /// Per-call prompt, passed on stdin (section 2.1).
+    /// Per-call prompt, passed on stdin (section 2.1). When `messages` is non-nil this is the
+    /// *latest* turn only -- everything before it lives in `messages`.
     var user: String
+    /// Prior conversation turns, oldest first, excluding the latest one (that is `user`).
+    /// `nil` for every single-shot consumer (refinement / summary / title / watcher / dictation),
+    /// which is why those call sites need no change at all
+    /// (`docs/design/38-session-chat.md` §8.1(b)/CH15).
+    ///
+    /// Deliberately handed to the backend as a *structured* array rather than pre-flattened text:
+    /// each backend decides how to carry it (`OpenAIChatBackend` sends the array as-is;
+    /// `ClaudeCLIBackend` folds it into one stdin string because `claude -p --output-format json`
+    /// takes a single prompt). Flattening in the prompt builder instead would have to be undone the
+    /// day the CLI grows `--input-format stream-json` (§4.1).
+    var messages: [LLMMessage]?
     /// Handed to `--json-schema` verbatim.
     var schema: String
     /// Resolved model id. The caller resolves this from `AppConfig`; `LLMClient` itself never reads
@@ -40,6 +52,24 @@ struct LLMRequest: Sendable {
     /// Stub-mode dispatch key (section 5). Ignored by `ClaudeCLIProcessRunner`; only
     /// `LLMStubProvider` reads it, and only when `KIKIMI_STUB_LLM=1`.
     var stubKey: String?
+}
+
+// MARK: - LLMMessage
+
+/// One prior turn of a multi-turn conversation, carried in `LLMRequest.messages`
+/// (`docs/design/38-session-chat.md` §4.1). Only the session-chat feature produces these; every
+/// other consumer leaves `messages` nil.
+///
+/// There is no `system` role: the system prompt is `LLMRequest.system`, which every backend already
+/// places correctly (`--system-prompt` for the CLI, `messages[0]` for OpenAI-compatible endpoints).
+struct LLMMessage: Sendable, Equatable {
+    enum Role: String, Sendable, Equatable {
+        case user
+        case assistant
+    }
+
+    var role: Role
+    var text: String
 }
 
 // MARK: - LLMResult

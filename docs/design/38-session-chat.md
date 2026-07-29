@@ -10,7 +10,13 @@
 `docs/design/37-transcript-markdown-copy.md` §3.2(b)（`TranscriptMarkdownSource`）,
 `docs/design/07-session-store.md`（`SessionFile` / JSONL 追記）。
 
-**位置づけ**: 本文書は Go/No-Go 前の詳細設計段階であり、実装はしていない。
+**実装状況**: §8.1 の前提修正のうち (a) stdin 非同期化 / (b) `LLMRequest.messages` / (c) stub・バッジへの
+`chat` 登録は実装済み。(d) `active_tab: chat` の復元は、単体で入れるとチャットタブが空のまま表示されるため
+チャット本体と同じ変更に含める。チャット本体（§3 以降）は未実装。
+
+実装で 1 点だけ設計から変えた: (a) の `SIGPIPE` を `SIG_IGN` にする場所を `KikimiApp` の起動処理ではなく
+`ClaudeCLIProcessRunner` 内（初回のプロセス起動前に 1 度だけ）にした。回帰テスト（64KB 超の stdin を
+読まない子に渡して SIGKILL する）はテストターゲットで走るので、`KikimiApp` に置くとテスト側が無防備になる。
 
 **経緯**: ユーザー要件は「ad-hoc にチャット形式で最新の会話について質問したい」。Watcher が
 「あらかじめ決めた観点を継続的に見る」のに対し、チャットは**その場で思いついたことを 1 回聞く**ための

@@ -58,6 +58,23 @@ actor ClaudeCLIProcessRunner: LLMProcessRunner {
     /// a local shell startup, not a network call.
     private static let whichResolutionTimeout: Duration = .seconds(5)
 
+    /// Logger for the `static` subprocess primitive below, which has no instance to reach `logger` on.
+    private static let processLogger = Logger(subsystem: "io.github.uphy.Kikimi", category: "ClaudeCLIProcessRunner")
+
+    /// Disposes of `SIGPIPE` process-wide, exactly once, before the first subprocess launch
+    /// (`docs/design/38-session-chat.md` §8.1(a)). Writing to a pipe whose read end is gone -- which
+    /// is the *normal* outcome whenever a child exits or is killed before consuming all of stdin --
+    /// raises `SIGPIPE`, and its default disposition terminates the whole process. Ignoring it turns
+    /// the same condition into `EPIPE`, which `FileHandle.write(contentsOf:)` reports as a thrown
+    /// Swift error the stdin-writer task below can simply swallow.
+    ///
+    /// Set here rather than in `KikimiApp`'s launch (as the design doc first sketched) so the unit
+    /// test target -- where the "child never reads a >64KB stdin, then gets SIGKILLed" regression
+    /// test lives -- is covered by the same guarantee as the app.
+    private static let sigpipeIgnored: Void = {
+        signal(SIGPIPE, SIG_IGN)
+    }()
+
     private var cachedResolvedPath: String?
 
     init(
@@ -197,6 +214,10 @@ actor ClaudeCLIProcessRunner: LLMProcessRunner {
     /// returning either way (section 6.1: "必ず子プロセスを reap し、両 `Pipe` の FD を close して
     /// から").
     ///
+    /// `stdin` is written from a detached task rather than inline, so a prompt larger than the
+    /// 64KB pipe buffer cannot block this function before the timeout is armed
+    /// (`docs/design/38-session-chat.md` §8.1(a)); see the write site below.
+    ///
     /// Never calls `Process.waitUntilExit()`/`FileHandle.readDataToEndOfFile()` -- see the type doc.
     private static func runProcess(
         executableURL: URL,
@@ -204,6 +225,8 @@ actor ClaudeCLIProcessRunner: LLMProcessRunner {
         stdin: String,
         timeout: Duration
     ) async throws -> RawProcessResult {
+        _ = sigpipeIgnored
+
         let process = Process()
         process.executableURL = executableURL
         process.arguments = arguments
@@ -256,11 +279,31 @@ actor ClaudeCLIProcessRunner: LLMProcessRunner {
             )
         }
 
-        if let stdinData = stdin.data(using: .utf8), !stdinData.isEmpty {
-            stdinPipe.fileHandleForWriting.write(stdinData)
+        // Fed from a detached task so the timeout race below starts *now*, not after the write
+        // finishes (`docs/design/38-session-chat.md` §8.1(a)/CH20). A macOS pipe buffers at most
+        // 64KB, so any prompt past that -- which the chat feature's `max_context_chars: 120000`
+        // (~360KB in Japanese UTF-8) always is -- blocks until the child drains it. Writing
+        // synchronously here would (a) make a child that never reads stdin hang this call forever,
+        // with the timeout not yet even armed, and (b) block a cooperative-thread-pool thread for
+        // hundreds of milliseconds in the normal case, alongside live STT and refinement.
+        let stdinHandle = stdinPipe.fileHandleForWriting
+        let stdinData = stdin.data(using: .utf8) ?? Data()
+        Task.detached(priority: .utility) {
+            // Closing the write end is what makes the child see EOF instead of blocking on a read,
+            // so it has to happen on every exit path -- including a failed write.
+            defer { try? stdinHandle.close() }
+            guard !stdinData.isEmpty else { return }
+            do {
+                // `write(contentsOf:)`, not `write(_:)`: the latter raises an ObjC exception on
+                // EPIPE, which is not catchable in Swift and would take the app down. A child that
+                // exits early is an ordinary outcome here, not a crash.
+                try stdinHandle.write(contentsOf: stdinData)
+            } catch {
+                // Expected whenever the child exits (or is SIGKILLed after a timeout) before
+                // reading all of stdin. The real outcome is reported by the race below.
+                processLogger.debug("stdin write ended early: \(error.localizedDescription, privacy: .public)")
+            }
         }
-        // Close the write end so the child sees EOF on stdin instead of blocking on a read.
-        try? stdinPipe.fileHandleForWriting.close()
 
         let outcome = await race(termination: termination, timeout: timeout)
         switch outcome {
