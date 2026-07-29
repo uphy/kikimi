@@ -115,6 +115,11 @@ final class MeetingWorkspaceViewModel: ObservableObject {
     // `startLiveSegmentSubscription(pipeline:)` writes this from a separate file.
     @Published var transcriptRows: [TranscriptRowViewModel] = []
 
+    /// Bumped on each successful toolbar/⌘⇧C copy only, not per-row copies (design 37 §6/TC11); drives the toolbar checkmark swap. Not `private(set)`: `+Copy.swift` writes it.
+    @Published var copyFeedbackToken: Int = 0
+    /// Row id most recently copied via `copyRowMarkdown(rowId:)`, for that row's own checkmark feedback; `nil` after a toolbar copy.
+    @Published var copyFeedbackRowId: String?
+
     /// Per-row speaker label (`docs/design/13-speaker-diarization.md` sections 5.3/6.1), keyed by
     /// `TranscriptRowViewModel.id`. Populated for every row (`mic` and `system`) only while
     /// `AppConfig.shared.data.diarization.enabled`; left empty when disabled, so a lookup miss always
@@ -211,6 +216,8 @@ final class MeetingWorkspaceViewModel: ObservableObject {
     /// `MeetingWorkspaceViewModel+Recording.swift`'s `endMeeting()` calls this once, right after
     /// `watcherRunner.run(trigger: .onSessionEnd)`.
     let wikiExporter: WikiExporting
+    /// Clipboard write seam for `+Copy.swift` (`docs/design/37-transcript-markdown-copy.md` §3.3, TC10). Live copy never re-reads disk, so no `TranscriptMarkdownSource` here.
+    let pasteboard: PasteboardWriting
     /// The wall clock every `recordingButtonState` elapsed-time derivation reads (see
     /// `+RecordingInternals.swift`'s `cumulativeElapsedSeconds(for:now:)`). Injectable so tests are
     /// not at the mercy of real time: `== .recording(elapsedSeconds: 0)` assertions used to flake
@@ -381,6 +388,7 @@ final class MeetingWorkspaceViewModel: ObservableObject {
         watcherLibrary: WatcherLibrary = MeetingWorkspaceViewModel.defaultWatcherLibrary(),
         watcherRunnerFactory: @escaping WatcherRunnerFactory = MeetingWorkspaceViewModel.defaultWatcherRunnerFactory,
         wikiExporter: WikiExporting = MeetingWorkspaceViewModel.defaultWikiExporter(),
+        pasteboard: PasteboardWriting = SystemPasteboard(),
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.sessionHandle = sessionHandle
@@ -399,6 +407,7 @@ final class MeetingWorkspaceViewModel: ObservableObject {
         self.watcherLibrary = watcherLibrary
         self.watcherRunner = watcherRunnerFactory(sessionHandle)
         self.wikiExporter = wikiExporter
+        self.pasteboard = pasteboard
         self.now = now
         self.sessionId = sessionHandle.sessionId
         self.meta = Self.placeholderMeta(sessionId: sessionHandle.sessionId)

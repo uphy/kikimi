@@ -196,9 +196,10 @@ extension MeetingWorkspaceViewModel {
         // `docs/design/08-wiki-export.md` (kikimi.md 11 章 "セッション終了時に自動 export"): best-effort,
         // using whatever `refined.jsonl` already has at this point -- the trailing under-batch-size
         // remainder the `refinementQueue.flush()`/fire-and-forget `drain()` below is about to process
-        // may not be reflected yet (design §6's documented limitation). A failure here must never
-        // abort `endMeeting()`'s own confirmation processing (kikimi.md 8.5 章 "録音は絶対に止めない"
-        // extends to every `on_session_end` side effect, not just recording itself).
+        // may not be reflected yet, but that gap is closed by the re-export run once `drain()`
+        // completes (design 37 §5.1 / TC17, below). A failure here must never abort `endMeeting()`'s
+        // own confirmation processing (kikimi.md 8.5 章 "録音は絶対に止めない" extends to every
+        // `on_session_end` side effect, not just recording itself).
         do {
             try await wikiExporter.export(sessionHandle: sessionHandle)
         } catch {
@@ -212,10 +213,29 @@ extension MeetingWorkspaceViewModel {
         // backlogged Haiku call never delays `on_session_end` (kikimi.md 8.5 章 "会議終了後に自然に
         // バッチ処理が追いつく"). The queue instance itself is left alive (not nilled out) -- it may
         // still be draining when this window closes, and survives a later `reopenRecording()`.
+        //
+        // `docs/design/37-transcript-markdown-copy.md` §5.1 (TC17): once `drain()` finishes, re-run
+        // the export so the trailing batch that missed the pre-drain export above (and would
+        // otherwise be permanently stuck as `*(raw)*`) gets folded in. `WikiExporter.export` is an
+        // idempotent overwrite (kikimi.md 4 章), so re-running it is safe. The `Task` only captures
+        // `Sendable` values (`WikiExporting`, `SessionHandle`) -- never the view model -- so it keeps
+        // running even after this window closes.
         if let queue = refinementQueue {
             await queue.flush()
+            // Capture `Sendable` values only (`WikiExporting`, `SessionHandle`, `Logger`) -- never
+            // `self` -- so the detached `Task` below outlives this view model without retaining it.
+            let exporter = wikiExporter
+            let handle = sessionHandle
+            let logger = logger
             Task {
                 await queue.drain()
+                do {
+                    try await exporter.export(sessionHandle: handle)
+                } catch {
+                    logger.error(
+                        "Post-drain wiki re-export failed for session \(handle.sessionId, privacy: .public): \(String(describing: error), privacy: .public)"
+                    )
+                }
             }
         }
 

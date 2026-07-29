@@ -208,19 +208,26 @@ var body: some View {
 ### 5.3 `MeetingTabView`（新規、`Kikimi/Views/MeetingWorkspace/MeetingTabView.swift`）
 
 ```
-┌───────────────────────────────────［▤|▥|▦]──┐   ← ツールバー行（右寄せ）
+┌［📋]──────────────────────────────［▤|▥|▦]──┐   ← ツールバー行（左端コピー・右寄せ表示切替）
 │ TranscriptTabView │ SummaryTabView            │   ← HSplitView（mode == .both）
 └───────────────────┴───────────────────────────┘
 ```
 
-- ツールバー行: `Picker`（`.segmented`, labelsHidden）または 3 つの toggle ボタン群。
-  各状態のアイコン（SF Symbols）:
-  - `.transcript`: `list.bullet.rectangle`
-  - `.both`: `rectangle.split.2x1`
-  - `.summary`: `doc.text`
-- **AX 契約**（kikimi-verify 用。ヘッダのボタンラベル契約と同じ流儀で `.help` +
+- ツールバー行: 左端にコピーボタン（**改訂**: `docs/design/37-transcript-markdown-copy.md` §3.3）、
+  右寄せで 3 つの toggle ボタン群（`Picker`（`.segmented`, labelsHidden）でも可）。
+- **ボタン一覧と AX 契約**（kikimi-verify 用。ヘッダのボタンラベル契約と同じ流儀で `.help` +
   `.accessibilityLabel` を完全一致で付ける）:
-  - `書き起こしのみ表示` / `両方表示` / `サマリのみ表示`
+
+  | ボタン | 位置 | アイコン（SF Symbols） | AX 契約（`.help` = `.accessibilityLabel`） |
+  |---|---|---|---|
+  | コピー | ツールバー左端 | `doc.on.doc`（コピー成功後 1.5 秒 `checkmark` に切替、TC11） | `Markdown をコピー` |
+  | 書き起こしのみ表示 | 右寄せ | `list.bullet.rectangle` | `書き起こしのみ表示` |
+  | 両方表示 | 右寄せ | `rectangle.split.2x1` | `両方表示` |
+  | サマリのみ表示 | 右寄せ | `doc.text` | `サマリのみ表示` |
+
+  コピーボタンの primary action（クリック）は全体をコピー（⌘⇧C と同じ）。ドロップダウンで
+  「書き起こしのみ」「サマリのみ」も選べる（TC6）。
+
 - **更新ドット**: `summaryHasUnseenUpdate == true` のとき「サマリのみ表示」アイコンの右肩に
   小さな `Circle()`（accent color, 6pt）を重ねる。セグメント標準コントロールでドットを重ねられない
   場合はカスタムボタン群で実装してよい

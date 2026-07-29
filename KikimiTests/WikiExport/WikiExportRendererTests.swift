@@ -3,13 +3,18 @@ import Testing
 
 @testable import Kikimi
 
-/// Layer 1 (unit) coverage for `WikiExportRenderer` (`docs/design/08-wiki-export.md` §4/§8), the pure
-/// rendering half of the Wiki raw export feature. Every test constructs plain values directly --
-/// never a `SessionHandle`/`AppConfig` -- since `WikiExporter` (tested separately, `WikiExporterTests
-/// .swift`) owns all the I/O this type deliberately has none of.
+/// Layer 1 (unit) coverage for `WikiExportRenderer` (`docs/design/08-wiki-export.md` §4/§8,
+/// `docs/design/37-transcript-markdown-copy.md` TC1), which now only generates the export file
+/// name/slug -- `render(_:)`/`Input`/`displayText(for:)`/`wallClockDate`/`durationLabel` moved to
+/// `TranscriptMarkdownRenderer` (design §3.1's migration table): `wallClockDate`/`durationLabel`/
+/// `render(_:)` end-to-end now live in `KikimiTests/Markdown/TranscriptMarkdownRendererTests.swift`
+/// (expected values updated for design §4), and `displayText(for:)`'s coverage moves to
+/// `TranscriptMarkdownSourceTests` (the disk adapter that now owns that branching). Every test here
+/// constructs plain values directly -- never a `SessionHandle`/`AppConfig` -- since `WikiExporter`
+/// (tested separately, `WikiExporterTests.swift`) owns all the I/O this type deliberately has none of.
 ///
 /// Every `Date` fixture is built from `DateComponents` against `Calendar.current`/`TimeZone.current`
-/// (via `date(...)` below), matching `WikiExportRenderer`'s own `.current`-timezone formatters, so
+/// (via `date(...)` below), matching `WikiExportRenderer`'s own `.current`-timezone formatter, so
 /// assertions never depend on which timezone actually runs the test.
 @Suite("WikiExportRenderer")
 struct WikiExportRendererTests {
@@ -62,27 +67,6 @@ struct WikiExportRendererTests {
         )
     }
 
-    private func makeRefinedSegment(
-        id: String,
-        startMs: Int,
-        speaker: AudioSourceKind = .mic,
-        rawText: String = "raw",
-        refinedText: String?
-    ) -> RefinedSegment {
-        RefinedSegment(
-            id: id,
-            startMs: startMs,
-            endMs: startMs + 500,
-            speaker: speaker,
-            rawText: rawText,
-            refinedText: refinedText,
-            error: refinedText == nil ? "missing from LLM response" : nil,
-            refinedAt: Self.date(year: 2_026, month: 7, day: 1, hour: 14, minute: 32, second: 15),
-            model: "claude-haiku-4-5-20251001",
-            batchId: "batch_00001"
-        )
-    }
-
     // MARK: - slug(from:)
 
     @Test("slug(from:) keeps a plain Japanese title unchanged")
@@ -123,6 +107,25 @@ struct WikiExportRendererTests {
         #expect(slug == String(repeating: "あ", count: 80))
     }
 
+    @Test("slug(from:) leaves an exactly-80-character title untouched (no truncation at the boundary)")
+    func slugLeavesEightyCharacterTitleUntouched() {
+        let title = String(repeating: "あ", count: 80)
+        #expect(WikiExportRenderer.slug(from: title) == title)
+    }
+
+    @Test("slug(from:) replaces every filesystem-unsafe character in the design-doc list (§4.4), not just a subset")
+    func slugReplacesEveryUnsafeCharacterInTheDesignDocList() {
+        // Design doc §4.4 unsafe set: / \ : * ? " < > |. The existing
+        // "replacesUnsafeCharactersAndCollapsesRuns" test only exercises "/", ":", "?"; this one covers the
+        // remaining "\", "*", "\"", "<", ">", "|" so every character in the documented set has a direct test.
+        #expect(WikiExportRenderer.slug(from: "a\\b*c\"d<e>f|g") == "a-b-c-d-e-f-g")
+    }
+
+    @Test("slug(from:) treats tabs and newlines the same as spaces (CharacterSet.whitespacesAndNewlines, not just \" \")")
+    func slugTreatsTabsAndNewlinesAsWhitespace() {
+        #expect(WikiExportRenderer.slug(from: "foo\tbar\nbaz") == "foo-bar-baz")
+    }
+
     // MARK: - fileName(for:)
 
     @Test("fileName(for:) combines the startedAt date with the title slug")
@@ -138,137 +141,15 @@ struct WikiExportRendererTests {
         #expect(WikiExportRenderer.fileName(for: meta) == "2026-08-15-無題.md")
     }
 
-    // MARK: - displayText(for:)
-
-    @Test("displayText(for:) returns refinedText as-is when non-nil and non-empty")
-    func displayTextReturnsRefinedTextAsIs() {
-        let segment = makeRefinedSegment(id: "seg_00001", startMs: 0, refinedText: "整形済みテキスト")
-        #expect(WikiExportRenderer.displayText(for: segment) == "整形済みテキスト")
+    @Test("fileName(for:) applies slug(from:)'s unsafe-character replacement to the title, not just plain titles")
+    func fileNameAppliesSlugUnsafeCharacterReplacement() {
+        let meta = makeMeta(title: "顧客A / 打ち合わせ: 議事録?")
+        #expect(WikiExportRenderer.fileName(for: meta) == "2026-07-01-顧客A-打ち合わせ-議事録.md")
     }
 
-    @Test("displayText(for:) falls back to rawText + the raw-fallback marker when refinedText is nil")
-    func displayTextFallsBackToRawTextWithMarkerWhenRefinedTextIsNil() {
-        let segment = makeRefinedSegment(id: "seg_00001", startMs: 0, rawText: "生テキスト", refinedText: nil)
-        #expect(WikiExportRenderer.displayText(for: segment) == "生テキスト" + WikiExportRenderer.rawFallbackMarker)
-    }
-
-    @Test("displayText(for:) excludes the line entirely (nil) when refinedText is an empty string")
-    func displayTextExcludesEmptyRefinedText() {
-        let segment = makeRefinedSegment(id: "seg_00001", startMs: 0, refinedText: "")
-        #expect(WikiExportRenderer.displayText(for: segment) == nil)
-    }
-
-    // MARK: - wallClockDate(startMs:recordings:fallback:)
-
-    @Test("wallClockDate resolves a single-segment session's startMs directly against its startedAt")
-    func wallClockDateSingleSegment() {
-        let started = Self.date(year: 2_026, month: 7, day: 1, hour: 14, minute: 30, second: 0)
-        let recordings = [RecordingSegment(index: 0, startedAt: started, endedAt: nil, startMsOffset: 0)]
-        let result = WikiExportRenderer.wallClockDate(startMs: 5_000, recordings: recordings, fallback: started)
-        #expect(result == started.addingTimeInterval(5))
-    }
-
-    @Test("wallClockDate resolves a startMs in the second of two recording segments (a pause/resume gap)")
-    func wallClockDateAcrossTwoSegments() {
-        let firstStart = Self.date(year: 2_026, month: 7, day: 1, hour: 14, minute: 30, second: 0)
-        let secondStart = Self.date(year: 2_026, month: 7, day: 1, hour: 15, minute: 5, second: 30)
-        let recordings = [
-            RecordingSegment(index: 0, startedAt: firstStart, endedAt: firstStart.addingTimeInterval(1_330), startMsOffset: 0),
-            RecordingSegment(index: 1, startedAt: secondStart, endedAt: nil, startMsOffset: 1_330_000),
-        ]
-        // 10 seconds into the second segment.
-        let result = WikiExportRenderer.wallClockDate(startMs: 1_340_000, recordings: recordings, fallback: firstStart)
-        #expect(result == secondStart.addingTimeInterval(10))
-    }
-
-    @Test("wallClockDate at exactly a segment boundary offset resolves to that segment's startedAt")
-    func wallClockDateAtExactSegmentBoundary() {
-        let firstStart = Self.date(year: 2_026, month: 7, day: 1, hour: 14, minute: 30, second: 0)
-        let secondStart = Self.date(year: 2_026, month: 7, day: 1, hour: 15, minute: 5, second: 30)
-        let recordings = [
-            RecordingSegment(index: 0, startedAt: firstStart, endedAt: firstStart.addingTimeInterval(1_330), startMsOffset: 0),
-            RecordingSegment(index: 1, startedAt: secondStart, endedAt: nil, startMsOffset: 1_330_000),
-        ]
-        let result = WikiExportRenderer.wallClockDate(startMs: 1_330_000, recordings: recordings, fallback: firstStart)
-        #expect(result == secondStart)
-    }
-
-    @Test("wallClockDate falls back to fallback + startMs when recordings is empty")
-    func wallClockDateFallsBackWhenRecordingsIsEmpty() {
-        let fallback = Self.date(year: 2_026, month: 7, day: 1, hour: 14, minute: 30, second: 0)
-        let result = WikiExportRenderer.wallClockDate(startMs: 2_500, recordings: [], fallback: fallback)
-        #expect(result == fallback.addingTimeInterval(2.5))
-    }
-
-    // MARK: - durationLabel(durationMs:)
-
-    @Test("durationLabel rounds to the nearest whole minute")
-    func durationLabelRoundsToNearestMinute() {
-        #expect(WikiExportRenderer.durationLabel(durationMs: 2_722_000) == "45m")
-        #expect(WikiExportRenderer.durationLabel(durationMs: 90_000) == "2m") // 1.5min rounds up
-        #expect(WikiExportRenderer.durationLabel(durationMs: 89_000) == "1m") // 1.483min rounds down
-        #expect(WikiExportRenderer.durationLabel(durationMs: 0) == "0m")
-    }
-
-    // MARK: - render(_:)
-
-    @Test("render(_:) produces kikimi.md 11 章's documented shape end-to-end")
-    func renderProducesDocumentedShape() {
-        let started = Self.date(year: 2_026, month: 7, day: 1, hour: 14, minute: 30, second: 0)
-        let recordings = [RecordingSegment(index: 0, startedAt: started, endedAt: nil, startMsOffset: 0)]
-        let meta = makeMeta(title: "デイリースクラム", durationMs: 2_722_000, recordings: recordings)
-
-        let segments = [
-            makeRefinedSegment(id: "seg_00001", startMs: 5_000, speaker: .mic, rawText: "raw1", refinedText: "次のスプリントで対応します。"),
-            makeRefinedSegment(id: "seg_00002", startMs: 8_000, speaker: .system, rawText: "raw2", refinedText: "了解しました。"),
-            // Refinement failed -- falls back to raw with the traceability marker.
-            makeRefinedSegment(id: "seg_00003", startMs: 12_000, speaker: .mic, rawText: "raw fallback text", refinedText: nil),
-            // Intentionally deleted (filler-only) -- must not appear in the output at all.
-            makeRefinedSegment(id: "seg_00004", startMs: 15_000, speaker: .system, rawText: "えーと", refinedText: ""),
-        ]
-
-        let markdown = WikiExportRenderer.render(
-            WikiExportRenderer.Input(meta: meta, summaryMarkdown: "## 概要\n\n会議の概要です。", refinedSegments: segments)
-        )
-
-        let expected = """
-        ---
-        date: 2026-07-01
-        duration: 45m
-        source: kikimi
-        session_id: 2026-07-01T14-30-00_a1b2c3d4
-        tags: [meeting, transcript]
-        ---
-
-        # デイリースクラム
-
-        ## サマリ
-
-        ## 概要
-
-        会議の概要です。
-
-        ## 書き起こし
-
-        **14:30:05 (mic)** 次のスプリントで対応します。
-
-        **14:30:08 (system)** 了解しました。
-
-        **14:30:12 (mic)** raw fallback text\(WikiExportRenderer.rawFallbackMarker)
-
-        """
-        #expect(markdown == expected)
-    }
-
-    @Test("render(_:) omits the transcript section content entirely when every segment was refined away")
-    func renderOmitsTranscriptWhenEveryLineIsExcluded() {
-        let meta = makeMeta(title: "空の会議")
-        let segments = [makeRefinedSegment(id: "seg_00001", startMs: 0, refinedText: "")]
-
-        let markdown = WikiExportRenderer.render(
-            WikiExportRenderer.Input(meta: meta, summaryMarkdown: "", refinedSegments: segments)
-        )
-
-        #expect(markdown.hasSuffix("## 書き起こし\n\n"))
+    @Test("fileName(for:) falls back to \"untitled\" end-to-end when the title is empty")
+    func fileNameFallsBackToUntitledForEmptyTitle() {
+        let meta = makeMeta(title: "")
+        #expect(WikiExportRenderer.fileName(for: meta) == "2026-07-01-untitled.md")
     }
 }

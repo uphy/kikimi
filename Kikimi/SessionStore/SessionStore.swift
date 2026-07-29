@@ -473,6 +473,54 @@ actor SessionStore {
         }
     }
 
+    // MARK: Side-effect-free read entry point (design doc section 3.2(b))
+    //
+    // `readOnlySessionHandle(_:)` needs to hand back a `SessionHandle` to callers that only want to
+    // read a session (not `openSession(_:)`'s side effects: populating `handles` for the lifetime of
+    // this process, and `ensureTranscriptAndRefinedLogFilesExist()` creating empty
+    // `transcript.jsonl`/`refined.jsonl` for a session that was never actually opened this run —
+    // see `SessionStore+LLMUsage.swift`'s `readAllLLMUsageRecords()` doc comment for the same
+    // rationale). If the session is already open (recording or otherwise), the cached handle must be
+    // reused instead of building a second one: a second handle reading `transcript.jsonl` would race
+    // the cached handle's own serialized JSONL appends and could observe a partially-written line.
+
+    /// Returns a `SessionHandle` for `sessionId` without any of `openSession(_:)`'s side effects.
+    /// If `sessionId` already has a cached handle (from a prior `openSession(_:)` call — most
+    /// notably the currently-recording session), that cached handle is returned as-is so reads stay
+    /// serialized with the handle's in-flight JSONL appends and never observe a partially-written
+    /// line. Otherwise this reads `sessionsRootDirectory/{sessionId}/meta.json` directly and builds
+    /// a fresh `SessionHandle` from it, *without* registering it in `handles` or calling
+    /// `ensureTranscriptAndRefinedLogFilesExist()` — the handle is meant to be read from and
+    /// discarded. Returns `nil` (logging at `.error`) if `sessionId` fails `SessionIdValidation`,
+    /// the session directory or `meta.json` does not exist, or `meta.json` fails to decode.
+    func readOnlySessionHandle(_ sessionId: String) async -> SessionHandle? {
+        do {
+            try SessionIdValidation.validate(sessionId)
+        } catch {
+            logger.error("Rejected invalid session id for read-only access \(sessionId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+
+        if let cached = handles[sessionId] {
+            return cached
+        }
+
+        let directoryURL = sessionsRootDirectory.appendingPathComponent(sessionId, isDirectory: true)
+        let metaURL = directoryURL.appendingPathComponent((try? SessionFile.meta.relativePath()) ?? "meta.json")
+        guard fileManager.fileExists(atPath: metaURL.path) else {
+            logger.error("No meta.json found for read-only session access \(sessionId, privacy: .public)")
+            return nil
+        }
+        do {
+            let data = try Data(contentsOf: metaURL)
+            let meta = try SessionJSONCoding.makeDecoder().decode(SessionMeta.self, from: data)
+            return SessionHandle(directoryURL: directoryURL, meta: meta, metaFlushInterval: metaFlushInterval)
+        } catch {
+            logger.error("Failed to read session \(sessionId, privacy: .public) for read-only access: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+
     // MARK: Private helpers
 
     /// Shared precondition for `pauseRecording(_:)`: requires that `sessionId` is the

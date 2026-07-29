@@ -113,11 +113,16 @@ extension MeetingWorkspaceViewModel {
     }
 
     /// Production default for `wikiExporter`: a real `WikiExporter` capturing `AppConfig.shared.data
-    /// .export`'s current value (`docs/design/08-wiki-export.md`). `nonisolated`/called immediately as
-    /// `MeetingWorkspaceViewModel.init`'s own default argument expression, same shape as
-    /// `defaultWatcherLibrary()` above -- reading `AppConfig.shared` touches no main-actor-isolated
-    /// state either.
+    /// .export`'s current value (`docs/design/08-wiki-export.md`) and a `TranscriptMarkdownSource`
+    /// capturing `AppConfig.shared.data.diarization` (`docs/design/37-transcript-markdown-copy.md`
+    /// §5) so the export shares the same speaker-name resolution as the "copy transcript" feature.
+    /// `nonisolated`/called immediately as `MeetingWorkspaceViewModel.init`'s own default argument
+    /// expression, same shape as `defaultWatcherLibrary()` above -- reading `AppConfig.shared` touches
+    /// no main-actor-isolated state either.
     nonisolated static func defaultWikiExporter() -> WikiExporting {
-        WikiExporter(config: AppConfig.shared.data.export)
+        WikiExporter(
+            config: AppConfig.shared.data.export,
+            source: TranscriptMarkdownSource(diarization: AppConfig.shared.data.diarization, voiceprintStore: .shared)
+        )
     }
 }

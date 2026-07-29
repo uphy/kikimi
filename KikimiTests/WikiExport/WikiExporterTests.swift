@@ -3,10 +3,14 @@ import Testing
 
 @testable import Kikimi
 
-/// Layer 1 (unit) coverage for `WikiExporter` (`docs/design/08-wiki-export.md` §3/§6/§8), the I/O
-/// half of the Wiki raw export feature. Every test roots `ExportConfig.targetDir` at a fresh
-/// temporary directory (an absolute path, so `FileManager.expandingTildePath(_:)` passes it through
-/// unchanged) so nothing here ever touches the real `~/Documents/Kikimi/export/`.
+/// Layer 1 (unit) coverage for `WikiExporter` (`docs/design/08-wiki-export.md` §3/§6/§8,
+/// `docs/design/37-transcript-markdown-copy.md` §5), the I/O half of the Wiki raw export feature.
+/// Every test roots `ExportConfig.targetDir` at a fresh temporary directory (an absolute path, so
+/// `FileManager.expandingTildePath(_:)` passes it through unchanged) so nothing here ever touches the
+/// real `~/Documents/Kikimi/export/`. `WikiExporter`'s other dependency, `TranscriptMarkdownSource`
+/// (design 37 §5: "テストでは `WikiExporter(config:source:)` に一時ディレクトリ由来の `VoiceprintStore` と
+/// 任意の `DiarizationConfig` を渡して差し替える"), is likewise always a real value rooted at a fresh
+/// temporary `voiceprints.json` -- no separate `WikiExporting` fake is introduced for this.
 @Suite("WikiExporter")
 struct WikiExporterTests {
     private func makeTemporaryDirectory(prefix: String = "WikiExporterTests") -> URL {
@@ -18,6 +22,46 @@ struct WikiExporterTests {
 
     private func makeExportConfig(targetDir: URL, enabled: Bool = true) -> ExportConfig {
         ExportConfig(enabled: enabled, targetDir: targetDir.path)
+    }
+
+    /// `HH:mm:ss` in `.current` timezone -- the same format/timezone `TranscriptMarkdownRenderer`'s
+    /// own (private) formatter uses, so a test computing an expected label this way agrees with
+    /// production regardless of which timezone actually runs the test (mirrors
+    /// `WikiExportRendererTests`'s "every `Date` fixture built against `.current`" convention).
+    private func timeLabel(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter.string(from: date)
+    }
+
+    /// `selfName` defaults to a value distinct from the old `(mic)` physical-source label, so a test
+    /// asserting on it can never accidentally pass against the pre-design-37 output shape. `enabled:
+    /// false` keeps every `system` segment on the `.systemFallback` path (design §4.2's last row)
+    /// without needing to seed `diarization.jsonl`/`speaker_assignments.json` fixtures that no test
+    /// in this suite currently needs. `static` so it is usable as `makeSource(directory:)`'s default
+    /// argument value below.
+    private static func makeDiarizationConfig(selfName: String = "田中") -> DiarizationConfig {
+        DiarizationConfig(
+            enabled: false,
+            selfName: selfName,
+            stepMs: 500,
+            variant: "callhome",
+            minEnrollSpeechMs: 5_000,
+            speakerMatchThreshold: 0.45,
+            speakerMatchMargin: 0.05
+        )
+    }
+
+    /// A `TranscriptMarkdownSource` backed by a `VoiceprintStore` rooted at a fresh temporary
+    /// `voiceprints.json` (design 37 §5) -- never `VoiceprintStore.shared`, so no test here can touch
+    /// the real `~/.local/state/kikimi/voiceprints.json`.
+    private func makeSource(
+        directory: URL, diarization: DiarizationConfig = WikiExporterTests.makeDiarizationConfig()
+    ) -> TranscriptMarkdownSource {
+        let voiceprintStore = VoiceprintStore(fileURL: directory.appendingPathComponent("voiceprints.json"))
+        return TranscriptMarkdownSource(diarization: diarization, voiceprintStore: voiceprintStore)
     }
 
     private func makeSessionHandle(directory: URL, title: String = "デイリースクラム") -> SessionHandle {
@@ -59,7 +103,7 @@ struct WikiExporterTests {
 
         let config = makeExportConfig(targetDir: targetDir, enabled: false)
         let handle = makeSessionHandle(directory: sessionDir)
-        let exporter = WikiExporter(config: config)
+        let exporter = WikiExporter(config: config, source: makeSource(directory: sessionDir))
 
         try await exporter.export(sessionHandle: handle)
 
@@ -94,7 +138,7 @@ struct WikiExporterTests {
         )
         try await handle.writeText("# デイリースクラム\n\n## 概要\n\n...", to: .summaryMarkdown)
 
-        let exporter = WikiExporter(config: config)
+        let exporter = WikiExporter(config: config, source: makeSource(directory: sessionDir))
         try await exporter.export(sessionHandle: handle)
 
         let meta = await handle.meta
@@ -108,6 +152,74 @@ struct WikiExporterTests {
         #expect(written.contains("次のスプリントで対応します。"))
     }
 
+    @Test("export(sessionHandle:) creates ExportConfig.targetDir (including missing intermediate directories) when it doesn't exist yet")
+    func exportCreatesMissingTargetDirectory() async throws {
+        // Deliberately *not* pre-created (unlike `makeTemporaryDirectory(prefix:)`'s other callers),
+        // and nested two levels deep, so this only passes if `export(sessionHandle:)` actually creates
+        // `targetDir` (`FileManager.createDirectory(..., withIntermediateDirectories: true)`) rather
+        // than relying on it already existing.
+        let targetDirParent = makeTemporaryDirectory(prefix: "WikiExporterTests-target-parent")
+        defer { try? FileManager.default.removeItem(at: targetDirParent) }
+        let targetDir = targetDirParent.appendingPathComponent("nested", isDirectory: true).appendingPathComponent("export", isDirectory: true)
+        let sessionDir = makeTemporaryDirectory(prefix: "WikiExporterTests-session")
+        defer { try? FileManager.default.removeItem(at: sessionDir) }
+
+        #expect(!FileManager.default.fileExists(atPath: targetDir.path))
+
+        let config = makeExportConfig(targetDir: targetDir)
+        let handle = makeSessionHandle(directory: sessionDir)
+        let exporter = WikiExporter(config: config, source: makeSource(directory: sessionDir))
+
+        try await exporter.export(sessionHandle: handle)
+
+        let meta = await handle.meta
+        let expectedURL = targetDir.appendingPathComponent(WikiExportRenderer.fileName(for: meta))
+        #expect(FileManager.default.fileExists(atPath: expectedURL.path))
+    }
+
+    // MARK: - speaker names (design 37 §5: existing Wiki export behavior change, pinned here)
+
+    @Test("export(sessionHandle:) writes transcript lines with resolved speaker display names, not the old (mic)/(system) physical-source labels")
+    func exportIncludesResolvedSpeakerNames() async throws {
+        let targetDir = makeTemporaryDirectory(prefix: "WikiExporterTests-target")
+        defer { try? FileManager.default.removeItem(at: targetDir) }
+        let sessionDir = makeTemporaryDirectory(prefix: "WikiExporterTests-session")
+        defer { try? FileManager.default.removeItem(at: sessionDir) }
+
+        let config = makeExportConfig(targetDir: targetDir)
+        let handle = makeSessionHandle(directory: sessionDir)
+        try await handle.appendRefinedSegment(
+            RefinedSegment(
+                id: "seg_00001",
+                startMs: 5_000,
+                endMs: 5_500,
+                speaker: .mic,
+                rawText: "raw",
+                refinedText: "先週のリリース、影響は出ていないですか。",
+                error: nil,
+                refinedAt: Date(timeIntervalSince1970: 1_751_000_200),
+                model: "claude-haiku-4-5-20251001",
+                batchId: "batch_00001"
+            )
+        )
+
+        // `selfName: "田中"` (via `makeSource(directory:)`'s default `DiarizationConfig`, design §4.2:
+        // "mic は常に selfName") -- distinct from the pre-design-37 `(mic)` physical-source label, so
+        // this assertion can only pass once `WikiExporter` actually resolves speaker display names.
+        let exporter = WikiExporter(config: config, source: makeSource(directory: sessionDir))
+        try await exporter.export(sessionHandle: handle)
+
+        let meta = await handle.meta
+        let expectedURL = targetDir.appendingPathComponent(WikiExportRenderer.fileName(for: meta))
+        let written = try String(contentsOf: expectedURL, encoding: .utf8)
+        // The segment's wall-clock time (`meta.recordings[0].startedAt` + `startMs` == 5s in) is
+        // recomputed here via `timeLabel(_:)` rather than hardcoded, so this assertion never depends
+        // on which timezone actually runs the test (see `timeLabel(_:)`'s doc comment).
+        let expectedTime = timeLabel(meta.recordings[0].startedAt.addingTimeInterval(5))
+        #expect(written.contains("**\(expectedTime) 田中** 先週のリリース、影響は出ていないですか。"))
+        #expect(!written.contains("(mic)"), "the old (mic)/(system) physical-source label must no longer appear")
+    }
+
     @Test("export(sessionHandle:) exports with an empty summary section when summary.md doesn't exist yet")
     func exportWithMissingSummaryMarkdown() async throws {
         let targetDir = makeTemporaryDirectory(prefix: "WikiExporterTests-target")
@@ -118,7 +230,7 @@ struct WikiExporterTests {
         let config = makeExportConfig(targetDir: targetDir)
         let handle = makeSessionHandle(directory: sessionDir)
 
-        let exporter = WikiExporter(config: config)
+        let exporter = WikiExporter(config: config, source: makeSource(directory: sessionDir))
         try await exporter.export(sessionHandle: handle) // must not throw despite no summary.md
 
         let meta = await handle.meta
@@ -135,7 +247,7 @@ struct WikiExporterTests {
 
         let config = makeExportConfig(targetDir: targetDir)
         let handle = makeSessionHandle(directory: sessionDir)
-        let exporter = WikiExporter(config: config)
+        let exporter = WikiExporter(config: config, source: makeSource(directory: sessionDir))
 
         try await exporter.export(sessionHandle: handle)
         try await handle.writeText("# デイリースクラム\n\n## 概要\n\n更新後の概要", to: .summaryMarkdown)
@@ -148,5 +260,47 @@ struct WikiExporterTests {
 
         let written = try String(contentsOf: expectedURL, encoding: .utf8)
         #expect(written.contains("更新後の概要"))
+    }
+
+    // MARK: - idempotency (design 37 §5.1, TC17: the post-drain re-export must be a safe no-op overwrite)
+
+    @Test("export(sessionHandle:) called twice for the same SessionHandle with no changes in between produces byte-identical content")
+    func exportTwiceWithoutChangesIsIdempotent() async throws {
+        let targetDir = makeTemporaryDirectory(prefix: "WikiExporterTests-target")
+        defer { try? FileManager.default.removeItem(at: targetDir) }
+        let sessionDir = makeTemporaryDirectory(prefix: "WikiExporterTests-session")
+        defer { try? FileManager.default.removeItem(at: sessionDir) }
+
+        let config = makeExportConfig(targetDir: targetDir)
+        let handle = makeSessionHandle(directory: sessionDir)
+        try await handle.appendRefinedSegment(
+            RefinedSegment(
+                id: "seg_00001",
+                startMs: 5_000,
+                endMs: 5_500,
+                speaker: .mic,
+                rawText: "raw",
+                refinedText: "次のスプリントで対応します。",
+                error: nil,
+                refinedAt: Date(timeIntervalSince1970: 1_751_000_200),
+                model: "claude-haiku-4-5-20251001",
+                batchId: "batch_00001"
+            )
+        )
+        try await handle.writeText("# デイリースクラム\n\n## 概要\n\n...", to: .summaryMarkdown)
+
+        let exporter = WikiExporter(config: config, source: makeSource(directory: sessionDir))
+        try await exporter.export(sessionHandle: handle)
+        let meta = await handle.meta
+        let expectedURL = targetDir.appendingPathComponent(WikiExportRenderer.fileName(for: meta))
+        let firstWrite = try String(contentsOf: expectedURL, encoding: .utf8)
+
+        // The re-export `MeetingWorkspaceViewModel+Recording.swift` runs once `refinementQueue.drain()`
+        // completes (design §5.1) is a plain `export(sessionHandle:)` call against the same, unmodified
+        // `SessionHandle` -- nothing about this session changed between the two calls here either.
+        try await exporter.export(sessionHandle: handle)
+        let secondWrite = try String(contentsOf: expectedURL, encoding: .utf8)
+
+        #expect(firstWrite == secondWrite)
     }
 }

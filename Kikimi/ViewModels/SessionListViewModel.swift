@@ -17,6 +17,17 @@ enum SessionListToast: Equatable, Identifiable {
     /// clicks raced the disabled-state update.
     case cannotDeleteActiveRecording(sessionId: String)
 
+    /// `SessionListViewModel.copyMarkdown(sessionId:)` finished loading the session and wrote the
+    /// rendered Markdown to the pasteboard successfully (`docs/design/37-transcript-markdown-copy.md`
+    /// §3.3/TC11).
+    case markdownCopied
+
+    /// `SessionListViewModel.copyMarkdown(sessionId:)` failed -- either the session could not be
+    /// read (`readOnlySessionHandle(_:)` returned `nil` / `TranscriptMarkdownSource.load(
+    /// sessionHandle:)` threw) or the pasteboard write itself failed (`PasteboardWriting
+    /// .writeString(_:)` returned `false`). Either way the clipboard is left unchanged (design §6).
+    case markdownCopyFailed
+
     /// Stable per *case* (not per associated value), unlike `Equatable`'s synthesized
     /// implementation, which does compare `sessionId` (see `SessionListToastTests`). SwiftUI only
     /// ever holds a single `SessionListViewModel.toast` at a time (not an array keyed by id), so
@@ -27,14 +38,23 @@ enum SessionListToast: Equatable, Identifiable {
         switch self {
         case .cannotDeleteActiveRecording:
             return "cannotDeleteActiveRecording"
+        case .markdownCopied:
+            return "markdownCopied"
+        case .markdownCopyFailed:
+            return "markdownCopyFailed"
         }
     }
 
-    /// User-facing message (`docs/design/06-ui-panels.md` section 11 failure mode #5).
+    /// User-facing message (`docs/design/06-ui-panels.md` section 11 failure mode #5,
+    /// `docs/design/37-transcript-markdown-copy.md` §3.3/TC11).
     var message: String {
         switch self {
         case .cannotDeleteActiveRecording:
             return "録音中のセッションは削除できません"
+        case .markdownCopied:
+            return "Markdown をコピーしました"
+        case .markdownCopyFailed:
+            return "Markdown のコピーに失敗しました"
         }
     }
 }
@@ -164,6 +184,31 @@ final class SessionListViewModel: ObservableObject {
     /// `llmUsageObservation`/`startObservingLLMUsage()` pair in `+LLMUsage.swift`).
     private var llmUsageObservation: AnyCancellable?
 
+    /// Disk adapter used by `copyMarkdown(sessionId:)` to resolve speaker names and build a
+    /// `TranscriptMarkdownRenderer.Input` from a `SessionHandle`
+    /// (`docs/design/37-transcript-markdown-copy.md` §3.2(b)). Injected so tests can substitute a
+    /// fixture-backed `VoiceprintStore`/`DiarizationConfig` without touching `AppConfig.shared`.
+    private let markdownSource: TranscriptMarkdownSource
+    /// DI seam for the pasteboard write itself (design §3.3, TC10), swapped for a fake in tests.
+    private let pasteboard: PasteboardWriting
+
+    /// - Parameters:
+    ///   - markdownSource: Defaults to a fresh `TranscriptMarkdownSource` built from the current
+    ///     `AppConfig.shared.data.diarization` / `VoiceprintStore.shared` (design §3.2(b),
+    ///     "キャプチャ点は... `SessionListViewModel.init`（既定引数）"). Overridable for tests.
+    ///   - pasteboard: Defaults to `SystemPasteboard()`, which writes to `NSPasteboard.general`.
+    ///     Overridable for tests so a copy can be verified without touching the real clipboard.
+    init(
+        markdownSource: TranscriptMarkdownSource = TranscriptMarkdownSource(
+            diarization: AppConfig.shared.data.diarization,
+            voiceprintStore: .shared
+        ),
+        pasteboard: PasteboardWriting = SystemPasteboard()
+    ) {
+        self.markdownSource = markdownSource
+        self.pasteboard = pasteboard
+    }
+
     /// Reloads `sessions` from `SessionStore.listSessions()` and re-aggregates `llmUsageSummary`.
     func refresh() async {
         sessions = await SessionStore.shared.listSessions()
@@ -238,6 +283,38 @@ final class SessionListViewModel: ObservableObject {
         // exists until the next launch.
         incompleteSessionsBanner.removeAll { $0.id == sessionId }
         await refresh()
+    }
+
+    /// "Markdown をコピー" (`docs/design/37-transcript-markdown-copy.md` §3.3, TC9/TC11): renders
+    /// `sessionId`'s full Wiki-export-shaped Markdown (frontmatter + summary + transcript, `scope ==
+    /// .full`) and writes it to `pasteboard`.
+    ///
+    /// Uses `SessionStore.shared.readOnlySessionHandle(_:)` rather than `openSession(_:)` -- a
+    /// read-only copy must not have the side effect of creating empty `transcript.jsonl`/
+    /// `refined.jsonl` for a Draft session that was never actually opened this run (design §3.2(b)).
+    ///
+    /// On success, `toast = .markdownCopied`. On any failure -- the handle could not be read, loading
+    /// threw, or the pasteboard write itself returned `false` -- `toast = .markdownCopyFailed` and
+    /// nothing is written to the clipboard; read/load failures are additionally logged at `.error`
+    /// (design §6).
+    func copyMarkdown(sessionId: String) async {
+        guard let sessionHandle = await SessionStore.shared.readOnlySessionHandle(sessionId) else {
+            logger.error("Could not read session \(sessionId, privacy: .public) for Markdown copy")
+            toast = .markdownCopyFailed
+            return
+        }
+
+        let input: TranscriptMarkdownRenderer.Input
+        do {
+            input = try await markdownSource.load(sessionHandle: sessionHandle)
+        } catch {
+            logger.error("Failed to load Markdown source for session \(sessionId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            toast = .markdownCopyFailed
+            return
+        }
+
+        let markdown = TranscriptMarkdownRenderer.render(input, scope: .full)
+        toast = pasteboard.writeString(markdown) ? .markdownCopied : .markdownCopyFailed
     }
 
     // MARK: Crash recovery banner (design doc section 7 "起動時のクラッシュ復旧バナー")

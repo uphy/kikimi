@@ -97,6 +97,22 @@ struct TranscriptTabView: View {
     /// pass that method directly.
     var onTogglePlayback: (TranscriptRowViewModel) -> Void = { _ in }
 
+    /// Copies one row's Markdown line (`docs/design/37-transcript-markdown-copy.md` §3.3/§4.4).
+    /// Mirrors `MeetingWorkspaceViewModel.copyRowMarkdown(rowId:)` exactly so `MeetingWorkspaceView`
+    /// can pass that method directly, the same convention as `onTogglePlayback`. This view has no
+    /// compile-time dependency on the view model (top of file), so it only forwards the tap upward
+    /// rather than rendering Markdown or touching the pasteboard itself.
+    var onCopyRow: (TranscriptRowViewModel) -> Void = { _ in }
+
+    /// `MeetingWorkspaceViewModel.copyFeedbackRowId` verbatim (`docs/design/37-transcript-markdown-copy.md`
+    /// §3.3/§6/TC11(f)): the id of the row whose copy most recently *succeeded*, `nil` after a toolbar
+    /// copy or on startup. Driving the row's checkmark from this (rather than firing it unconditionally
+    /// on tap) is what makes a failed pasteboard write correctly show no feedback -- mirrors
+    /// `MeetingTabView.copyFeedbackToken`'s exact pattern for the toolbar button. A plain `String?`
+    /// value parameter, so this keeps the same "no compile-time ViewModel dependency" contract as
+    /// `playingRowId` above, not a new one.
+    var copyFeedbackRowId: String?
+
     /// A pending "scroll to this segment" request (`docs/design/05-watcher-runner.md` §10.4), verbatim
     /// from `MeetingWorkspaceViewModel.pendingTranscriptScrollTarget` -- set by a Watchers-tab seg-id
     /// link click. `MeetingWorkspaceView` passes this as a plain parameter (not a `Binding`) since this
@@ -141,7 +157,9 @@ struct TranscriptTabView: View {
                                 onRenameSlot: onRenameSlot,
                                 onOverrideSegment: onOverrideSegment,
                                 isPlaying: playingRowId == row.id,
-                                onTogglePlayback: { onTogglePlayback(row) }
+                                onTogglePlayback: { onTogglePlayback(row) },
+                                onCopyRow: onCopyRow,
+                                copyFeedbackRowId: copyFeedbackRowId
                             )
                             .id(row.id)
                         }
@@ -293,10 +311,24 @@ private struct TranscriptRowContentView: View {
     /// Play/stop toggle for this row's audio. Mirrors `MeetingWorkspaceViewModel
     /// .toggleSegmentPlayback(_:)`.
     let onTogglePlayback: () -> Void
+    /// Copies this row's Markdown line (`docs/design/37-transcript-markdown-copy.md` §3.3/§4.4).
+    /// Mirrors `MeetingWorkspaceViewModel.copyRowMarkdown(rowId:)`.
+    let onCopyRow: (TranscriptRowViewModel) -> Void
+    /// `TranscriptTabView.copyFeedbackRowId` verbatim -- `== row.id` only once the copy of *this* row
+    /// has actually succeeded (§6/TC11(f)).
+    let copyFeedbackRowId: String?
 
     /// Drives the playback button's visibility (`docs/design/15-segment-playback.md` section 6:
     /// visible on hover or while playing; always reserves its layout width so rows don't shift).
     @State private var isHovered = false
+
+    /// `true` while `copyFeedbackRowId == row.id` (`docs/design/37-transcript-markdown-copy.md`
+    /// TC11): swaps `copyButton`'s icon to `checkmark` as copy-success feedback, then reverts after
+    /// 1.5s. Driven by `copyFeedbackRowId` (set by the ViewModel only after a *successful* pasteboard
+    /// write, `.task(id:)` below) rather than firing unconditionally on tap, so a failed write
+    /// correctly shows no feedback (§6) -- mirrors `MeetingTabView.showsCopyFeedback`'s exact pattern
+    /// for the toolbar button.
+    @State private var showsCopyFeedback = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -313,6 +345,16 @@ private struct TranscriptRowContentView: View {
         // right as the pointer reaches it.
         .contentShape(Rectangle())
         .onHover { isHovered = $0 }
+        .task(id: copyFeedbackRowId) {
+            guard copyFeedbackRowId == row.id else {
+                showsCopyFeedback = false
+                return
+            }
+            showsCopyFeedback = true
+            try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled else { return }
+            showsCopyFeedback = false
+        }
     }
 
     /// The header line: timestamp + speaker icon + speaker label (natural width, design section 5.3.1
@@ -342,8 +384,28 @@ private struct TranscriptRowContentView: View {
 
             Spacer()
 
+            copyButton
             playbackButton
         }
+    }
+
+    /// This row's Markdown-line copy button (`docs/design/37-transcript-markdown-copy.md` §3.3),
+    /// placed to the left of `playbackButton` and following the exact same visibility/sizing
+    /// convention: fixed width and always laid out (just invisible when idle/unhovered/no feedback
+    /// pending) so its appearance never shifts neighboring rows.
+    private var copyButton: some View {
+        Button {
+            onCopyRow(row)
+        } label: {
+            Image(systemName: showsCopyFeedback ? "checkmark" : "doc.on.doc")
+                .font(.body)
+                .foregroundStyle(showsCopyFeedback ? Color.accentColor : Color.secondary)
+        }
+        .buttonStyle(.plain)
+        .frame(width: 20)
+        .opacity(isHovered || showsCopyFeedback ? 1 : 0)
+        .help("この発言をコピー")
+        .accessibilityLabel("この発言をコピー")
     }
 
     /// This row's audio playback toggle (`docs/design/15-segment-playback.md` section 6). Kept at a
@@ -519,60 +581,5 @@ private struct SpeakerLabelColumnView: View {
             return ""
         }
         return name
-    }
-}
-
-// MARK: - TranscriptVolatileRowContentView
-
-/// One in-progress (unconfirmed) source's trailing line (`docs/design/11-streaming-stt.md` section
-/// 3.6), rendered in the same 2-line layout as `TranscriptRowContentView`
-/// (`docs/design/17-session-window-redesign.md` section 5.3.1): a header line with the speaker icon
-/// only (no timestamp -- this text has no confirmed `startMs`/`endMs` yet, it may still grow, shrink,
-/// or be replaced entirely before ever becoming a real row) followed by a full-width dim/italic text
-/// line.
-private struct TranscriptVolatileRowContentView: View {
-    let source: AudioSourceKind
-    let text: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Image(systemName: source.sfSymbolName)
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-                .accessibilityLabel(source.accessibilityLabel)
-
-            Text(text)
-                .font(.body.italic())
-                .foregroundStyle(.tertiary)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.vertical, 4)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(source.accessibilityLabel)、書き起こし中: \(text)")
-    }
-}
-
-// MARK: - AudioSourceKind display helpers
-
-/// Shared between `TranscriptRowContentView` (confirmed rows) and `TranscriptVolatileRowContentView`
-/// (in-progress rows) so both render the same icon/label per source.
-private extension AudioSourceKind {
-    var sfSymbolName: String {
-        switch self {
-        case .mic:
-            return "mic.fill"
-        case .system:
-            return "speaker.wave.2.fill"
-        }
-    }
-
-    var accessibilityLabel: String {
-        switch self {
-        case .mic:
-            return "マイク"
-        case .system:
-            return "システム音声"
-        }
     }
 }

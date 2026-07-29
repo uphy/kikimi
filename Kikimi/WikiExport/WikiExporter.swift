@@ -22,44 +22,32 @@ protocol WikiExporting: Sendable {
 
 // MARK: - WikiExporter
 
-/// Production `WikiExporting`. Holds a plain `ExportConfig` value (captured once by
-/// `defaultWikiExporter()` at `MeetingWorkspaceViewModel.init` time), mirroring how
+/// Production `WikiExporting`. Holds a plain `ExportConfig` value and a `TranscriptMarkdownSource`
+/// (captured once by `defaultWikiExporter()` at `MeetingWorkspaceViewModel.init` time), mirroring how
 /// `defaultRefinementQueueFactory`/`defaultWatcherRunnerFactory` capture `AppConfig.shared.data.X` as
 /// a value rather than holding a live `AppConfig` reference -- `WikiExporting: Sendable` requires
 /// every conformer to be `Sendable`, and `AppConfig` (a plain `ObservableObject` class, `@MainActor`
-/// by convention but not itself `Sendable`) cannot be stored in one. A `config.yaml` `export:` edit
-/// made after a session's window opens is therefore picked up the same way `RefinementConfig`/
-/// `SummaryConfig` already are elsewhere: on the next window open, not intra-session.
+/// by convention but not itself `Sendable`) cannot be stored in one. A `config.yaml` `export:`/
+/// `diarization:` edit made after a session's window opens is therefore picked up the same way
+/// `RefinementConfig`/`SummaryConfig` already are elsewhere: on the next window open, not
+/// intra-session (`docs/design/37-transcript-markdown-copy.md` §5).
 struct WikiExporter: WikiExporting {
     var config: ExportConfig
+    /// Disk-backed speaker-name resolution + raw/refined merge (design §3.2(b), §5) -- shared with
+    /// the session list's "Markdown をコピー" so the Wiki export and the copy feature never disagree
+    /// on what a session's transcript looks like.
+    var source: TranscriptMarkdownSource
 
     private static let logger = Logger(subsystem: "io.github.uphy.Kikimi", category: "WikiExporter")
 
     func export(sessionHandle: SessionHandle) async throws {
         guard config.enabled else { return }
 
-        let meta = await sessionHandle.meta
-        let refinedSegments = try await sessionHandle.readRefinedSegments()
-
-        let summaryMarkdown: String
-        do {
-            summaryMarkdown = try await sessionHandle.readText(.summaryMarkdown) ?? ""
-        } catch {
-            // A Draft/Ended session that never produced a readable summary.md is not fatal to the
-            // whole export (design §6) -- render with an empty summary section instead.
-            Self.logger.warning(
-                """
-                Failed to read summary.md for session \(sessionHandle.sessionId, privacy: .public); \
-                exporting with an empty サマリ section: \(String(describing: error), privacy: .public)
-                """
-            )
-            summaryMarkdown = ""
-        }
-
-        let markdown = WikiExportRenderer.render(
-            WikiExportRenderer.Input(meta: meta, summaryMarkdown: summaryMarkdown, refinedSegments: refinedSegments)
-        )
-        let fileName = WikiExportRenderer.fileName(for: meta)
+        // `source.load(sessionHandle:)` already fetches `sessionHandle.meta` internally to build
+        // `Input.meta` -- reuse that instead of a second, redundant `await sessionHandle.meta` hop.
+        let input = try await source.load(sessionHandle: sessionHandle)
+        let markdown = TranscriptMarkdownRenderer.render(input, scope: .full)
+        let fileName = WikiExportRenderer.fileName(for: input.meta)
 
         let targetDirectory = FileManager.expandingTildePath(config.targetDir)
         try FileManager.default.createDirectory(at: targetDirectory, withIntermediateDirectories: true)
