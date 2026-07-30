@@ -69,7 +69,10 @@ cleanup() {
     sleep 1
   fi
   if [ -d "$APP_BUNDLE" ]; then
-    open -a "$APP_BUNDLE" >/dev/null 2>&1 || true
+    # `-g`: relaunch WITHOUT bringing Kikimi to the front. This machine is also used for real work,
+    # and the whole run is otherwise focus-neutral -- ending it by stealing the frontmost app (and
+    # with it the keyboard) undoes that at the last step.
+    open -g -a "$APP_BUNDLE" >/dev/null 2>&1 || true
   fi
   rm -rf "$WORKDIR"
 }
