@@ -97,7 +97,10 @@ struct ClaudeCLIProcessRunnerTests {
             isExecutableFile: { _ in true },
             whichResolver: { nil }
         )
-        let stdout = try await runner.run(arguments: ["hello world"], stdin: "", timeout: .seconds(5))
+        // 60s, not 5s: the timeout is incidental here -- what is under test is that stdout comes
+        // back. A loaded CI runner can take seconds just to spawn /bin/echo, and this test used to
+        // fail with `timedOut` there, which said nothing about the behaviour it was written for.
+        let stdout = try await runner.run(arguments: ["hello world"], stdin: "", timeout: .seconds(60))
         #expect(stdout == "hello world\n")
     }
 
@@ -115,7 +118,8 @@ struct ClaudeCLIProcessRunnerTests {
         let stdout = try await runner.run(
             arguments: ["-c", "yes x | head -c 200000"],
             stdin: "",
-            timeout: .seconds(10)
+            // Incidental, like above: the claim is "does not deadlock", not "finishes within 10s".
+            timeout: .seconds(60)
         )
         #expect(stdout.utf8.count == 200_000)
     }
@@ -128,7 +132,7 @@ struct ClaudeCLIProcessRunnerTests {
             whichResolver: { nil }
         )
         await #expect(throws: LLMClientError.processFailed(exitCode: 3, stderr: "boom\n")) {
-            _ = try await runner.run(arguments: ["-c", "echo boom 1>&2; exit 3"], stdin: "", timeout: .seconds(5))
+            _ = try await runner.run(arguments: ["-c", "echo boom 1>&2; exit 3"], stdin: "", timeout: .seconds(60))
         }
     }
 
@@ -164,12 +168,16 @@ struct ClaudeCLIProcessRunnerTests {
         let start = ContinuousClock.now
         await #expect(throws: LLMClientError.timedOut(.milliseconds(300))) {
             _ = try await runner.run(
-                arguments: ["30"],
+                arguments: ["120"],
                 stdin: String(repeating: "あ", count: 100_000),
                 timeout: .milliseconds(300)
             )
         }
-        #expect(ContinuousClock.now - start < .seconds(5))
+        // The child sleeps 120s; returning inside 30 proves the timeout fired rather than the sleep
+        // completing. The bound is deliberately loose -- what matters is the order of magnitude
+        // between "timed out" and "waited it out", not the exact latency of the SIGKILL escalation.
+        // A tight bound (this was 5s) only measures how loaded the machine is.
+        #expect(ContinuousClock.now - start < .seconds(30))
     }
 
     @Test("run(_:) survives a child that exits without reading its stdin (EPIPE, not SIGPIPE)")
@@ -198,12 +206,15 @@ struct ClaudeCLIProcessRunnerTests {
         )
         let start = ContinuousClock.now
         await #expect(throws: LLMClientError.timedOut(.milliseconds(200))) {
-            _ = try await runner.run(arguments: ["30"], stdin: "", timeout: .milliseconds(200))
+            _ = try await runner.run(arguments: ["120"], stdin: "", timeout: .milliseconds(200))
         }
         let elapsed = ContinuousClock.now - start
         // Must return once the SIGTERM/grace-period/SIGKILL escalation completes and the child is
-        // reaped -- nowhere near its full 30s sleep. Proves the child was actually killed, not
+        // reaped -- nowhere near its full 120s sleep. Proves the child was actually killed, not
         // merely abandoned (which would leak a zombie/orphan process).
-        #expect(elapsed < .seconds(5))
+        //
+        // 30s against a 120s sleep: a 4x margin, so the assertion still fails if the child is left
+        // to run out but survives a machine several times slower than this one.
+        #expect(elapsed < .seconds(30))
     }
 }

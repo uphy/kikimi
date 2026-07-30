@@ -89,9 +89,12 @@ struct AudioCaptureIntegrationTests {
         try await capture.start()
         #expect(capture.state == .running(activeSources: [.mic, .system]))
 
-        // Long enough for TestFileAudioSource's ~64ms-tick timer to deliver several chunks on
-        // both sources and for at least one headerFlushInterval to elapse.
-        try await Task.sleep(nanoseconds: 500_000_000)
+        // Poll until both sources have actually delivered, rather than sleeping for a span assumed to
+        // contain their timer ticks. The old fixed 500ms encoded an assumption about scheduling that a
+        // loaded runner does not honour.
+        try await waitUntil("both sources to deliver buffers") {
+            !(delegate.elapsedBySource[.mic] ?? []).isEmpty && !(delegate.elapsedBySource[.system] ?? []).isEmpty
+        }
 
         await capture.stop()
         #expect(capture.state == .stopped)
@@ -134,10 +137,13 @@ struct AudioCaptureIntegrationTests {
         // `start()` is called (see `AudioCapture.start()`): if it were instead assigned only after
         // both sources finish starting, a buffer callback that raced ahead of that assignment would
         // compute `elapsed` against the storage's stale zero initial value -- i.e. against host time
-        // 0, the machine's boot time -- producing a huge elapsed value (this test runs for well
-        // under a second). Bounding every `elapsed` sample to a small window catches that class of bug.
-        #expect(micElapsed.allSatisfy { $0 >= 0 && $0 < 5.0 })
-        #expect(systemElapsed.allSatisfy { $0 >= 0 && $0 < 5.0 })
+        // 0, the machine's boot time -- producing an elapsed value in the thousands of seconds.
+        //
+        // The bound is an hour, not the few seconds this test actually takes: the bug it guards
+        // against is off by orders of magnitude (uptime, not latency), so a loose bound catches it
+        // just as reliably while never failing because CI was slow. A 5s bound did fail there.
+        #expect(micElapsed.allSatisfy { $0 >= 0 && $0 < 3600.0 })
+        #expect(systemElapsed.allSatisfy { $0 >= 0 && $0 < 3600.0 })
     }
 
     @Test("stop() racing with in-flight buffer delivery does not crash and still closes both WAV files cleanly")
@@ -204,7 +210,9 @@ struct AudioCaptureIntegrationTests {
         try await capture.start()
         #expect(capture.state == .running(activeSources: [.mic]))
 
-        try await Task.sleep(nanoseconds: 200_000_000)
+        try await waitUntil("the mic source to deliver a buffer") {
+            !(delegate.elapsedBySource[.mic] ?? []).isEmpty
+        }
         await capture.stop()
         #expect(capture.state == .stopped)
 

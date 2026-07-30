@@ -309,6 +309,9 @@ private actor FakeRefinementLLM: LLMCompleting {
     /// `endMeeting()`'s `drain()` is truly fire-and-forget (§7) without burning a real multi-second
     /// wait on every other refinement test.
     var delay: Duration = .zero
+    /// See `closeGate()`.
+    private var isGated = false
+    private var gateWaiters: [CheckedContinuation<Void, Never>] = []
 
     func complete<T: Decodable & Sendable>(_ request: LLMRequest) async throws -> LLMResult<T> {
         let data = try await resolveData()
@@ -324,8 +327,29 @@ private actor FakeRefinementLLM: LLMCompleting {
         LLMResult(value: try await resolveData(), usage: .zero)
     }
 
+    /// Blocks every call until `openGate()` releases it.
+    ///
+    /// Exists so "did not await this" can be asserted without a stopwatch: a test can hold the
+    /// refinement call open indefinitely and then check that the code under test returned anyway.
+    /// The alternative -- a `setDelay` long enough to out-run the assertion's own ceiling -- measures
+    /// machine speed rather than behaviour, and broke on CI in both directions (too tight a ceiling
+    /// failed under load; a delay long enough to fix that then out-ran the `waitUntil` polls).
+    func closeGate() {
+        isGated = true
+    }
+
+    func openGate() {
+        isGated = false
+        let parked = gateWaiters
+        gateWaiters = []
+        for waiter in parked { waiter.resume() }
+    }
+
     private func resolveData() async throws -> Data {
         callCount += 1
+        if isGated {
+            await withCheckedContinuation { gateWaiters.append($0) }
+        }
         if delay > .zero {
             try? await Task.sleep(for: delay)
         }
@@ -4244,7 +4268,11 @@ struct MeetingWorkspaceViewModelTests {
         let pipeline = FakeTranscriptPipeline()
         let fakeLLM = FakeRefinementLLM()
         await fakeLLM.setResponse(#"{"segments":[]}"#)
-        await fakeLLM.setDelay(.milliseconds(1_500))
+        // Hold the refinement call open for the whole test instead of making it slow: what is under
+        // test is that `endMeeting()` does not await it, and a gate states that directly. The
+        // previous version slept 1.5s and asserted the call returned in under 1s -- a race between
+        // two wall-clock durations that CI load decided.
+        await fakeLLM.closeGate()
         let viewModel = makeViewModel(handle: handle, store: store, capture: capture, pipeline: pipeline, refinementLLM: fakeLLM)
 
         await viewModel.startRecording()
@@ -4256,11 +4284,19 @@ struct MeetingWorkspaceViewModelTests {
         await viewModel.endMeeting()
         let elapsed = ContinuousClock.now - start
 
+        // The gate is still shut, so `drain()` *cannot* have completed. Reaching this line at all is
+        // therefore the proof: had `endMeeting()` awaited the drain, it would still be suspended and
+        // this test would hang rather than fail. No duration is being judged.
+        let refinedAfterEnd = try await handle.readRefinedSegments()
         #expect(
-            elapsed < .seconds(1),
+            refinedAfterEnd.isEmpty,
             "endMeeting() must not await RefinementQueue.drain() -- a slow/backlogged Haiku call must never delay on_session_end (kikimi.md 8.5 章)"
         )
+        #expect(elapsed < .seconds(30), "hang guard, not a latency budget")
         #expect(viewModel.recordingButtonState == .ended)
+
+        // Release the parked call so nothing is left suspended on a continuation after the test.
+        await fakeLLM.openGate()
 
         // The queue itself is left alive (not discarded) so the slow batch still lands eventually.
         try await waitUntil(timeout: .seconds(5)) { await viewModel.transcriptRows.first(where: { $0.id == segment.id })?.state != .refining }

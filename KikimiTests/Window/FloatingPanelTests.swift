@@ -15,38 +15,38 @@ import Testing
 @Suite("FloatingPanel")
 @MainActor
 struct FloatingPanelTests {
-    private func makePanel() -> FloatingPanel {
-        FloatingPanel(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600))
+    /// Production configuration by default. `isUnobtrusive` is passed explicitly rather than left to
+    /// `HiddenTestMode`, because the suite itself runs with `KIKIMI_TEST_HIDDEN=1` (so a test run does
+    /// not flash panels over the user's work) -- reading the environment here would silently test
+    /// only the hidden branch.
+    private func makePanel(isUnobtrusive: Bool = false) -> FloatingPanel {
+        FloatingPanel(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600), isUnobtrusive: isUnobtrusive)
     }
 
     @Test("canBecomeKey/canBecomeMain are overridden to true so hosted text fields/NSTextViews can accept input")
     func canBecomeKeyAndMainAreTrue() {
         let panel = makePanel()
-        // Both follow `HiddenTestMode`: under `KIKIMI_TEST_HIDDEN` the panel must not take key status,
-        // because this machine is also used for real work and an invisible panel holding the keyboard
-        // eats the user's typing. The test suite itself does not set that variable, so the normal
-        // (production) expectation is what is asserted here.
-        #expect(panel.canBecomeKey == !HiddenTestMode.isActive)
-        #expect(panel.canBecomeMain == !HiddenTestMode.isActive)
+        #expect(panel.canBecomeKey)
+        #expect(panel.canBecomeMain)
     }
 
-    /// Only runs when the suite itself is executed with `KIKIMI_TEST_HIDDEN=1`; `.enabled(if:)`
-    /// rather than a `#require` guard, which swift-testing counts as a failure rather than a skip.
-    @Test(
-        "under KIKIMI_TEST_HIDDEN the panel is transparent and lets mouse events through",
-        .enabled(if: HiddenTestMode.isActive)
-    )
-    func hiddenTestModeIsUnobtrusive() {
-        let panel = makePanel()
-        #expect(panel.alphaValue == 0)
-        #expect(panel.ignoresMouseEvents)
-    }
-
-    @Test("outside test mode the panel is opaque and hit-testable (the production path)")
+    @Test("a panel is visible and interactive in production configuration")
     func productionPanelIsInteractive() {
         let panel = makePanel()
-        #expect(panel.alphaValue == (HiddenTestMode.isActive ? 0 : 1))
-        #expect(panel.ignoresMouseEvents == HiddenTestMode.isActive)
+        #expect(panel.alphaValue == 1)
+        #expect(!panel.ignoresMouseEvents)
+    }
+
+    @Test("an unobtrusive panel is transparent, takes no key status, and lets mouse events through")
+    func unobtrusivePanelTouchesNothing() {
+        // What `KIKIMI_TEST_HIDDEN=1` buys: a verification run (or a `swift test` run) must not appear
+        // on screen, must not swallow the user's keystrokes, and must not eat their clicks. Being
+        // invisible alone covers only the first.
+        let panel = makePanel(isUnobtrusive: true)
+        #expect(panel.alphaValue == 0)
+        #expect(panel.ignoresMouseEvents)
+        #expect(!panel.canBecomeKey)
+        #expect(!panel.canBecomeMain)
     }
 
     @Test("styleMask includes .nonactivatingPanel so the app never steals focus from whatever is in front")
