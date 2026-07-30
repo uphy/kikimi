@@ -27,8 +27,11 @@ cp -R "$app_path" ~/Applications/Kikimi.app
 echo "Installed to ~/Applications/Kikimi.app"
 
 # 起動中だったら再起動、未インストールだったら新規起動
+# `-g`: 前面化しない。Kikimi は LSUIElement（メニューバー常駐）なので前面に出す意味がなく、
+# 出すと直前のアプリからフォーカスを奪う。業務用マシンで検証を回す前提の配慮
+# （kikimi-verify SKILL.md 0 章）。
 if [ "$was_running" = true ] || [ "$is_installed" = false ]; then
-  open ~/Applications/Kikimi.app
+  open -g ~/Applications/Kikimi.app
   if [ "$was_running" = true ]; then
     echo "Restarted Kikimi"
   else
