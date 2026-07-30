@@ -1,0 +1,264 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Least privilege: nothing but read access by default. The one job that needs to publish a
+# release opts into `contents: write` explicitly. The homebrew-tap push uses a separate
+# GitHub App token, not GITHUB_TOKEN.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15
+    permissions:
+      contents: write
+    env:
+      EXPECTED_BUNDLE_ID: io.github.uphy.Kikimi
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # No step here pushes to this repo; the release is published with GITHUB_TOKEN and
+          # the tap with a GitHub App token.
+          persist-credentials: false
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+            echo "::error::tag '${GITHUB_REF_NAME}' is not of the form vMAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          {
+            echo "value=${version}"
+            echo "zip=Kikimi-${version}-macOS.zip"
+          } >> "$GITHUB_OUTPUT"
+
+      # SwiftLint's pinned version lives in `mise.toml`, so the release toolchain cannot drift
+      # from the one developers and CI use.
+      - uses: jdx/mise-action@v4
+        with:
+          experimental: true
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v6
+        with:
+          path: |
+            .build
+            ~/Library/Caches/org.swift.swiftpm
+          # `Package.resolved` is gitignored, so the cache key is the manifest itself. Every
+          # dependency in it is pinned (`exact:`) or lower-bounded (`from:`), so a stale cache
+          # can only ever be a miss on resolution, never a wrong build.
+          key: swiftpm-${{ runner.os }}-${{ hashFiles('Package.swift') }}
+          restore-keys: swiftpm-${{ runner.os }}-
+
+      # --- quality gates -------------------------------------------------------------------
+      # A tag push is the last chance to catch a regression; run the same checks CI runs on
+      # pull requests before anything is published.
+      - name: Lint
+        run: mise run lint
+
+      - name: Test
+        # Same flag CI and `mise run test` use: the window suites order real panels in, and this
+        # keeps them invisible and inert (`FloatingPanel.isUnobtrusive`).
+        run: KIKIMI_TEST_HIDDEN=1 swift test
+
+      # --- build ---------------------------------------------------------------------------
+      # `mise run build` is the single source of truth for how a .app is assembled (see
+      # .mise/tasks/build/_default). Do not reimplement the bundle layout here.
+      - name: Build Kikimi.app
+        env:
+          APP_VERSION: ${{ steps.version.outputs.value }}
+          KIKIMI_RELEASE_BUILD: '1'
+        run: mise run build
+
+      - name: Verify .app bundle
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -uo pipefail
+          app_root="build/Kikimi.app"
+          contents="$app_root/Contents"
+          status=0
+
+          fail() {
+            echo "::error::$*"
+            status=1
+          }
+
+          check_file() {
+            if [ -s "$1" ]; then
+              echo "ok        $1"
+            else
+              fail "missing or empty: $1"
+            fi
+          }
+
+          check_plist() {
+            actual="$(/usr/bin/plutil -extract "$1" raw -o - "$contents/Info.plist" 2>/dev/null)"
+            if [ "$actual" = "$2" ]; then
+              echo "ok        Info.plist $1 = $actual"
+            else
+              fail "Info.plist $1: expected '$2', got '${actual:-<missing>}'"
+            fi
+          }
+
+          check_file "$contents/MacOS/Kikimi"
+          if [ -s "$contents/MacOS/Kikimi" ] && [ ! -x "$contents/MacOS/Kikimi" ]; then
+            fail "not executable: $contents/MacOS/Kikimi"
+          fi
+          check_file "$contents/Info.plist"
+
+          # The 入力 settings tab builds a `KeyboardShortcuts.Recorder`, whose init reads a
+          # localized string through SwiftPM's generated `Bundle.module` accessor. That accessor
+          # calls `fatalError` when the bundle is absent, and for an app bundle it only looks in
+          # the .app root — so a release without this file crashes as soon as the tab is opened
+          # on a machine that is not the one it was built on.
+          check_file "$app_root/KeyboardShortcuts_KeyboardShortcuts.bundle/en.lproj/Localizable.strings"
+
+          # The Markdown renderer (docs/design/39-webview-markdown.md). `mise run build` copies
+          # these only when `Kikimi/Resources/editor` exists, so a build that skipped `build:web`
+          # produces an .app that silently falls back to plain text instead of failing.
+          check_file "$contents/Resources/editor/index.html"
+          check_file "$contents/Resources/editor/bundle.js"
+          check_file "$contents/Resources/editor/bundle.css"
+
+          check_plist CFBundleIdentifier "$EXPECTED_BUNDLE_ID"
+          check_plist CFBundleExecutable "Kikimi"
+          check_plist CFBundleShortVersionString "$EXPECTED_VERSION"
+          check_plist CFBundleVersion "$EXPECTED_VERSION"
+          # A menu-bar-only app: shipping this as false puts a Dock icon on every user's Mac.
+          check_plist LSUIElement "true"
+          # The mic and system-audio prompts are silently suppressed without these, which reads
+          # as "recording is broken" rather than "a usage string is missing".
+          check_plist NSMicrophoneUsageDescription \
+            "Kikimi needs microphone access to transcribe meetings."
+          check_plist NSAudioCaptureUsageDescription \
+            "Kikimi needs system audio access to transcribe meeting audio from other apps."
+          # `kikimi://` URLs are how the app's own views navigate (Kikimi/Window routing).
+          if /usr/bin/plutil -extract CFBundleURLTypes.0.CFBundleURLSchemes.0 raw -o - \
+              "$contents/Info.plist" 2>/dev/null | grep -qx kikimi; then
+            echo "ok        Info.plist declares the kikimi:// URL scheme"
+          else
+            fail "Info.plist does not declare the kikimi:// URL scheme"
+          fi
+
+          echo "info      architecture $(lipo -archs "$contents/MacOS/Kikimi")"
+
+          # Not fatal: the appiconset is still empty, so a release legitimately ships without
+          # one. Surfaced so it does not go unnoticed release after release.
+          if [ -s "$contents/Resources/AppIcon.icns" ]; then
+            echo "ok        $contents/Resources/AppIcon.icns"
+          else
+            echo "::warning::no AppIcon.icns — this release ships with the generic macOS icon"
+          fi
+
+          exit "$status"
+
+      - name: Create zip archive
+        env:
+          ZIP_NAME: ${{ steps.version.outputs.zip }}
+        run: ditto -c -k --keepParent build/Kikimi.app "$ZIP_NAME"
+
+      - name: Compute sha256 of zip
+        id: sha256
+        env:
+          ZIP_NAME: ${{ steps.version.outputs.zip }}
+        run: |
+          set -euo pipefail
+          echo "value=$(shasum -a 256 "$ZIP_NAME" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      # --- publish -------------------------------------------------------------------------
+      # The release is created as a draft first, the tap is updated next, and the release is
+      # only flipped to published at the very end. That way a failing tap update leaves nothing
+      # user-visible behind, rather than a shipped release that `brew upgrade` cannot see.
+      - name: Create draft GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          draft: true
+          generate_release_notes: true
+          files: ${{ steps.version.outputs.zip }}
+          fail_on_unmatched_files: true
+
+      # A pre-release tag ships a GitHub Release but must not move the cask that every
+      # `brew install kikimi` user follows.
+      - name: Generate GitHub App token
+        id: app-token
+        if: ${{ !contains(steps.version.outputs.value, '-') }}
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.HOMEBREW_TAP_APP_ID }}
+          private-key: ${{ secrets.HOMEBREW_TAP_PRIVATE_KEY }}
+          repositories: homebrew-tap
+
+      - name: Update homebrew-tap
+        if: ${{ !contains(steps.version.outputs.value, '-') }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          VERSION: ${{ steps.version.outputs.value }}
+          SHA256: ${{ steps.sha256.outputs.value }}
+        run: |
+          set -euo pipefail
+          cask="Casks/kikimi.rb"
+
+          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/uphy/homebrew-tap.git" homebrew-tap
+          cd homebrew-tap
+
+          if [ ! -f "$cask" ]; then
+            echo "::error::${cask} not found in uphy/homebrew-tap"
+            exit 1
+          fi
+
+          # The sed below only rewrites version and sha256, so a cask that names a stage the
+          # build no longer ships would be updated, published, and only fail on the user's
+          # machine. Assert the artifact this release actually contains.
+          if ! grep -q '^  app "Kikimi.app"$' "$cask"; then
+            echo "::error::${cask} does not stage Kikimi.app — has the artifact layout changed?"
+            exit 1
+          fi
+
+          sed -i '' \
+            -e "s/version \"[^\"]*\"/version \"${VERSION}\"/" \
+            -e "s/sha256 \"[^\"]*\"/sha256 \"${SHA256}\"/" \
+            "$cask"
+
+          # sed silently no-ops when the pattern does not match; assert instead.
+          grep -q "version \"${VERSION}\"" "$cask" || {
+            echo "::error::failed to set version in ${cask}"; exit 1; }
+          grep -q "sha256 \"${SHA256}\"" "$cask" || {
+            echo "::error::failed to set sha256 in ${cask}"; exit 1; }
+
+          if git diff --quiet; then
+            echo "${cask} is already up to date for v${VERSION}"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$cask"
+          git commit -m "chore: update kikimi to v${VERSION}"
+          git push
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          # A pre-release tag (v1.2.3-rc.1) must not become the "latest" release that `brew`
+          # and the download button point at.
+          case "$VERSION" in
+            *-*) gh release edit "$GITHUB_REF_NAME" --draft=false --prerelease --latest=false ;;
+            *)   gh release edit "$GITHUB_REF_NAME" --draft=false --latest ;;
+          esac

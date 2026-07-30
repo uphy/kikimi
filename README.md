@@ -2,6 +2,34 @@
 
 会議特化のリアルタイム書き起こし macOS アプリ。詳細な製品仕様は [`kikimi.md`](kikimi.md) を参照。
 
+## インストール
+
+```bash
+brew install uphy/tap/kikimi
+```
+
+macOS 14 (Sonoma) 以降が必要。メニューバー常駐アプリなので Dock にアイコンは出ない。初回起動時に
+マイクとシステム音声の録音許可を求め、オンデバイス音声認識モデルを
+`~/Library/Application Support/FluidAudio` にダウンロードする。
+
+整形・サマリは LLM を呼ぶ。既定のプロバイダは `claude` CLI（`brew install claude-code`）で、
+`~/.config/kikimi/config.yaml` に `llm.provider: openai` を書けば OpenAI API キーでも動く。
+
+配布物は Developer ID 署名・notarization を行っていないため、cask のインストール時に quarantine 属性を
+外している（詳細は `brew info --cask uphy/tap/kikimi` の caveats）。
+
+## リリース
+
+`v*` タグを push すると [`.github/workflows/release.yml`](.github/workflows/release.yml) が lint・テスト →
+`.app` ビルド → バンドル検証 → zip → draft リリース作成 → [uphy/homebrew-tap](https://github.com/uphy/homebrew-tap)
+の `Casks/kikimi.rb` 更新 → リリース公開までを行う。tap 更新が失敗しても、ユーザーから見える成果物は
+残らない（公開は最後の 1 ステップ）。`v1.2.3-rc.1` のようなプレリリースタグは GitHub Release だけを作り、
+cask は動かさない。
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
 ## セットアップ・ビルド
 
 Claude Code 向けの開発ルールは [`CLAUDE.md`](CLAUDE.md) を参照（`mise run generate`/`build`/`apply` 等の
