@@ -125,6 +125,13 @@ struct TranscriptTabView: View {
     /// jump-able to a second time (SwiftUI's `.onChange` only fires on an actual value change).
     var onScrollTargetConsumed: () -> Void = {}
 
+    /// The segment the most recent seg-id jump targeted (§10.4), verbatim from
+    /// `MeetingWorkspaceViewModel.jumpHighlightedSegmentId`. That row renders a leading accent bar for
+    /// as long as this stays set, answering "which row was the cited one?" long after the arrival flash
+    /// has faded. A `.mergedInto` covered id is resolved to its leader before matching, so the marker
+    /// lands on the row that actually renders the text.
+    var highlightedSegmentId: String?
+
     /// "上スクロールで一時停止" (kikimi.md 10 章): `true` while the view should keep following newly
     /// inserted rows; becomes `false` the moment the user scrolls away from the bottom, and returns
     /// to `true` once they scroll back down. Starts `true` so a freshly opened tab follows along.
@@ -138,6 +145,24 @@ struct TranscriptTabView: View {
     /// re-pin it, and the tab silently stopped following mid-meeting.
     @State private var isAutoScrolling = false
 
+    /// The row currently showing a jump's arrival flash (the filled background), or `nil` between
+    /// jumps. View-local rather than view-model state, unlike `highlightedSegmentId`: it belongs to one
+    /// arrival, so losing it when SwiftUI re-creates this subtree is correct -- returning to the 会議 tab
+    /// should not replay a flash for a jump that happened minutes ago.
+    @State private var flashingRowId: String?
+
+    /// `docs/design/05-watcher-runner.md` §10.4: with "動きを減らす" on, a jump cuts to its destination
+    /// instead of animating the scroll. Scoped to the scroll on purpose -- the arrival flash's fade is a
+    /// cross-fade, which that setting asks for rather than asks you to drop (see
+    /// `TranscriptRowContentView.jumpFlashAnimation`).
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// Where a seg-id jump parks the target row: a third of the way down rather than dead centre. A
+    /// long row (one grown by refinement, or a merged unit covering several segments) is tall enough
+    /// that centring its *middle* pushes the header line -- the timestamp and speaker name, which is
+    /// exactly what a reader arriving from a Watcher citation looks at first -- off the top edge.
+    private static let jumpAnchor = UnitPoint(x: 0.5, y: 0.33)
+
     /// Zero-height marker appended after the last row. Its `onAppear`/`onDisappear` firing is used
     /// as a proxy for "is the bottom of the list currently visible", since `LazyVStack` only
     /// realizes views inside (or near) the scroll view's visible region. This avoids depending on
@@ -145,6 +170,11 @@ struct TranscriptTabView: View {
     private static let bottomAnchorID = "TranscriptTabView.bottomAnchor"
 
     var body: some View {
+        // Resolved once per body evaluation, never inside `ForEach`: `resolvedScrollTargetId(_:)` scans
+        // `rows`, so doing it per row would make every render O(rows²) on a list that reaches four
+        // digits in a long meeting -- the same shape as the diarization recomputation that used to pin
+        // the CPU (see `MeetingWorkspaceView.transcriptTabView`'s note).
+        let markedRowId = highlightedSegmentId.map(resolvedScrollTargetId)
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
@@ -167,7 +197,9 @@ struct TranscriptTabView: View {
                                 isPlaying: playingRowId == row.id,
                                 onTogglePlayback: { onTogglePlayback(row) },
                                 onCopyRow: onCopyRow,
-                                copyFeedbackRowId: copyFeedbackRowId
+                                copyFeedbackRowId: copyFeedbackRowId,
+                                isJumpTarget: markedRowId == row.id,
+                                isJumpFlashing: flashingRowId == row.id
                             )
                             .id(row.id)
                         }
@@ -191,7 +223,22 @@ struct TranscriptTabView: View {
                 // Backfilled rows (`sessionHandle.readTranscriptSegments()`, section 6.3 "初期表示")
                 // arrive as the view's very first `rows` value, before any `onChange` fires, so the
                 // initial follow-to-bottom has to happen here rather than in `onChange`.
-                scrollToBottom(proxy: proxy, animated: false)
+                //
+                // A jump request that was already pending at creation time takes precedence over it
+                // -- see `TranscriptAutoFollow.initialScroll(scrollTarget:)` for why that is the
+                // *normal* path for a seg-id link, not an edge case.
+                switch TranscriptAutoFollow.initialScroll(scrollTarget: scrollTarget) {
+                case .jump(let segId):
+                    // Falls back to the normal follow-to-bottom when the request can't be honoured
+                    // (`MeetingWorkspaceViewModel.jumpToTranscriptSegment(_:)` only checks that the id
+                    // is *in* `transcriptRows`, so a refinement-dropped row still reaches here) --
+                    // otherwise the pane would open at the very top of the meeting.
+                    if !jumpToScrollTarget(segId, proxy: proxy, animated: false) {
+                        scrollToBottom(proxy: proxy, animated: false)
+                    }
+                case .followBottom:
+                    scrollToBottom(proxy: proxy, animated: false)
+                }
             }
             .onChange(of: rows) { _, _ in
                 scrollToBottomIfPinned(proxy: proxy)
@@ -205,25 +252,84 @@ struct TranscriptTabView: View {
             .onChange(of: scrollTarget) { _, newTarget in
                 handleScrollTargetChange(newTarget, proxy: proxy)
             }
+            // Re-armed by every arrival (`flashingRowId` changes), so a second jump restarts the hold
+            // instead of inheriting the previous one's remaining time.
+            .task(id: flashingRowId) {
+                guard flashingRowId != nil else { return }
+                try? await Task.sleep(for: .seconds(TranscriptAutoFollow.jumpFlashHoldDuration))
+                guard !Task.isCancelled else { return }
+                // A plain write: the fade is declared by the row itself
+                // (`TranscriptRowContentView.jumpFlashAnimation`), not by a transaction here -- see that
+                // property for why wrapping this in `withAnimation` did not animate anything.
+                flashingRowId = nil
+            }
         }
     }
 
-    /// Handles a `scrollTarget` change (§10.4): scrolls to `segId` if it (after resolving a possible
-    /// `.mergedInto` covered id to its leader, §15.2.6) names a currently-rendered row (excluding
-    /// refinement-dropped rows, which are filtered out of `body`'s `ForEach` entirely and so can
-    /// never be a valid `proxy.scrollTo(_:)` target), then always calls `onScrollTargetConsumed()` so
-    /// the caller's pending-request state doesn't get stuck non-`nil` forever -- both on a successful
-    /// jump and on a silently-ignored unresolvable id.
+    /// Handles a `scrollTarget` change (§10.4) for an already-visible pane. The pane being re-created
+    /// *with* the request already set is the other (and more common) entry point -- see `onAppear`.
     private func handleScrollTargetChange(_ segId: String?, proxy: ScrollViewProxy) {
         guard let segId else { return }
-        defer { onScrollTargetConsumed() }
+        jumpToScrollTarget(segId, proxy: proxy, animated: true)
+    }
+
+    /// Scrolls to `segId` if it (after resolving a possible `.mergedInto` covered id to its leader,
+    /// §15.2.6) names a currently-rendered row (excluding refinement-dropped rows, which are filtered
+    /// out of `body`'s `ForEach` entirely and so can never be a valid `proxy.scrollTo(_:)` target),
+    /// then always consumes the request so the caller's pending state doesn't get stuck non-`nil`
+    /// forever -- both on a successful jump and on a silently-ignored unresolvable id. Returns whether
+    /// a scroll was actually issued, so the `onAppear` caller can fall back to following the bottom.
+    @discardableResult
+    private func jumpToScrollTarget(_ segId: String, proxy: ScrollViewProxy, animated: Bool) -> Bool {
+        defer { consumeScrollTarget() }
         let resolvedId = resolvedScrollTargetId(segId)
         guard rows.contains(where: { $0.id == resolvedId && !$0.state.isDroppedByRefinement && !$0.state.isMergedAway }) else {
-            return
+            return false
         }
-        withAnimation(.easeOut(duration: 0.2)) {
-            proxy.scrollTo(resolvedId, anchor: .center)
+        // Auto-follow is released explicitly rather than relying on the bottom anchor's `onDisappear`
+        // (§10.4's "暗黙に解除される（既存機構）"): that firing is suppressed for
+        // `autoScrollSettleDuration` after `onAppear`'s own scroll, and it never happens at all when
+        // the destination is close enough to the bottom for the anchor to stay realized. In both
+        // cases the pane stayed pinned, so the very next volatile line (which arrives within a second
+        // while recording) yanked the viewport straight back to the end.
+        isPinnedToBottom = false
+        // Lit as a cut, not a fade-in: the flash exists to be noticed at the moment the viewport
+        // settles. `.task(id:)` above owns the fade-out.
+        flashingRowId = resolvedId
+        if animated && !reduceMotion {
+            withAnimation(.easeOut(duration: TranscriptAutoFollow.scrollAnimationDuration)) {
+                proxy.scrollTo(resolvedId, anchor: Self.jumpAnchor)
+            }
+        } else {
+            proxy.scrollTo(resolvedId, anchor: Self.jumpAnchor)
         }
+        // See `TranscriptAutoFollow.jumpCorrectionDelay`: one re-issue after the first pass has
+        // realized the destination row, so a long jump through an unrealized `LazyVStack` region
+        // doesn't land short.
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(TranscriptAutoFollow.jumpCorrectionDelay))
+            proxy.scrollTo(resolvedId, anchor: Self.jumpAnchor)
+        }
+        announceJumpArrival(rowId: resolvedId)
+        return true
+    }
+
+    /// Tells VoiceOver where the jump landed -- the flash and the accent bar are both purely visual, and
+    /// a scroll that moves the viewport without moving focus is otherwise silent. Deliberately an
+    /// announcement rather than an `.isSelected` trait on the row: nothing has been selected, the view
+    /// has moved.
+    private func announceJumpArrival(rowId: String) {
+        guard let row = rows.first(where: { $0.id == rowId }) else { return }
+        let timestamp = TranscriptRowContentView.formattedTimestamp(startMs: row.startMs)
+        AccessibilityNotification.Announcement("\(timestamp) の発言に移動しました").post()
+    }
+
+    /// Clears the pending request on the next runloop turn rather than inline: `jumpToScrollTarget`
+    /// also runs from `onAppear`, i.e. inside SwiftUI's own update pass, and writing the observed
+    /// view model's `@Published` there is what triggers the "Publishing changes from within view
+    /// updates is not allowed" runtime warning.
+    private func consumeScrollTarget() {
+        Task { @MainActor in onScrollTargetConsumed() }
     }
 
     /// §15.2.6: a `.mergedInto(leaderId:)` row is never rendered itself, so a jump landing on one of
@@ -293,302 +399,5 @@ struct TranscriptTabView: View {
             try? await Task.sleep(for: .seconds(TranscriptAutoFollow.autoScrollSettleDuration))
             isAutoScrolling = false
         }
-    }
-}
-
-// MARK: - TranscriptRowContentView
-
-/// One row of the transcript, rendered as a 2-line layout (`docs/design/17-session-window-redesign.md`
-/// section 5.3.1): a header line (timestamp / speaker icon / speaker label / play button) followed by
-/// a full-width text line. See also `docs/design/06-ui-panels.md` section 6.3 and
-/// `docs/design/13-speaker-diarization.md` section 6.1 (the speaker-label column and its rename
-/// popover).
-private struct TranscriptRowContentView: View {
-    let row: TranscriptRowViewModel
-    /// `TranscriptTabView.speakerLabels[row.id]`; `nil` renders like `ResolvedSpeakerLabel
-    /// .systemFallback` (design section 6.1: "diarization が無効・未稼働範囲のセグメントは従来どおり
-    /// 「system」表示").
-    let resolvedLabel: ResolvedSpeakerLabel?
-    let selfName: String
-    let knownSpeakers: [VoiceprintSpeaker]
-    let renameTargets: (TranscriptRowViewModel) -> [RenameableSlot]
-    let onRenameSlot: (_ slot: String, _ submission: SpeakerRenameSubmission?) async -> Void
-    let onOverrideSegment: (_ segmentId: String, _ submission: SpeakerRenameSubmission?) async -> Void
-    /// `true` when this row's audio is the one currently playing (`docs/design/15-segment-playback.md`
-    /// section 6).
-    let isPlaying: Bool
-    /// Play/stop toggle for this row's audio. Mirrors `MeetingWorkspaceViewModel
-    /// .toggleSegmentPlayback(_:)`.
-    let onTogglePlayback: () -> Void
-    /// Copies this row's Markdown line (`docs/design/37-transcript-markdown-copy.md` §3.3/§4.4).
-    /// Mirrors `MeetingWorkspaceViewModel.copyRowMarkdown(rowId:)`.
-    let onCopyRow: (TranscriptRowViewModel) -> Void
-    /// `TranscriptTabView.copyFeedbackRowId` verbatim -- `== row.id` only once the copy of *this* row
-    /// has actually succeeded (§6/TC11(f)).
-    let copyFeedbackRowId: String?
-
-    /// Drives the playback button's visibility (`docs/design/15-segment-playback.md` section 6:
-    /// visible on hover or while playing; always reserves its layout width so rows don't shift).
-    @State private var isHovered = false
-
-    /// `true` while `copyFeedbackRowId == row.id` (`docs/design/37-transcript-markdown-copy.md`
-    /// TC11): swaps `copyButton`'s icon to `checkmark` as copy-success feedback, then reverts after
-    /// 1.5s. Driven by `copyFeedbackRowId` (set by the ViewModel only after a *successful* pasteboard
-    /// write, `.task(id:)` below) rather than firing unconditionally on tap, so a failed write
-    /// correctly shows no feedback (§6) -- mirrors `MeetingTabView.showsCopyFeedback`'s exact pattern
-    /// for the toolbar button.
-    @State private var showsCopyFeedback = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            headerRow
-            Text(displayText)
-                .font(.body)
-                .foregroundStyle(textColor)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.vertical, 4)
-        // onHover is hit-test-shape based, so cover the whole 2-line row rect -- otherwise hover drops
-        // out over inter-column spacing and the opacity-0 button itself, making the button vanish
-        // right as the pointer reaches it.
-        .contentShape(Rectangle())
-        .onHover { isHovered = $0 }
-        .task(id: copyFeedbackRowId) {
-            guard copyFeedbackRowId == row.id else {
-                showsCopyFeedback = false
-                return
-            }
-            showsCopyFeedback = true
-            try? await Task.sleep(for: .seconds(1.5))
-            guard !Task.isCancelled else { return }
-            showsCopyFeedback = false
-        }
-    }
-
-    /// The header line: timestamp + speaker icon + speaker label (natural width, design section 5.3.1
-    /// drops the old fixed 100pt column) + play button pinned to the trailing edge via `Spacer()`.
-    private var headerRow: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(Self.formattedTimestamp(startMs: row.startMs))
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(width: 64, alignment: .leading)
-
-            Image(systemName: speakerSymbolName)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(width: 16)
-                .accessibilityLabel(speakerAccessibilityLabel)
-
-            SpeakerLabelColumnView(
-                row: row,
-                resolvedLabel: resolvedLabel,
-                selfName: selfName,
-                knownSpeakers: knownSpeakers,
-                renameTargets: renameTargets,
-                onRenameSlot: onRenameSlot,
-                onOverrideSegment: onOverrideSegment
-            )
-
-            Spacer()
-
-            copyButton
-            playbackButton
-        }
-    }
-
-    /// This row's Markdown-line copy button (`docs/design/37-transcript-markdown-copy.md` §3.3),
-    /// placed to the left of `playbackButton` and following the exact same visibility/sizing
-    /// convention: fixed width and always laid out (just invisible when idle/unhovered/no feedback
-    /// pending) so its appearance never shifts neighboring rows.
-    private var copyButton: some View {
-        Button {
-            onCopyRow(row)
-        } label: {
-            Image(systemName: showsCopyFeedback ? "checkmark" : "doc.on.doc")
-                .font(.body)
-                .foregroundStyle(showsCopyFeedback ? Color.accentColor : Color.secondary)
-        }
-        .buttonStyle(.plain)
-        .frame(width: 20)
-        .opacity(isHovered || showsCopyFeedback ? 1 : 0)
-        .help("この発言をコピー")
-        .accessibilityLabel("この発言をコピー")
-    }
-
-    /// This row's audio playback toggle (`docs/design/15-segment-playback.md` section 6). Kept at a
-    /// fixed width and always laid out (just invisible when idle/unhovered) so its appearance never
-    /// shifts neighboring rows.
-    private var playbackButton: some View {
-        Button(action: onTogglePlayback) {
-            Image(systemName: isPlaying ? "stop.circle.fill" : "play.circle")
-                .font(.body)
-                .foregroundStyle(isPlaying ? Color.accentColor : Color.secondary)
-        }
-        .buttonStyle(.plain)
-        .frame(width: 20)
-        .opacity(isPlaying || isHovered ? 1 : 0)
-        .help(isPlaying ? "再生を停止" : "この発言の音声を再生")
-        .accessibilityLabel(isPlaying ? "再生を停止" : "この発言の音声を再生")
-    }
-
-    private var speakerSymbolName: String { row.speaker.sfSymbolName }
-
-    private var speakerAccessibilityLabel: String { row.speaker.accessibilityLabel }
-
-    /// The text to render for the current `TranscriptRowState`. Phase 1 only ever reaches `.raw`
-    /// (`03-refinement-batch.md` doesn't exist yet), but the switch stays exhaustive so Phase 2's
-    /// `.refining`/`.refined`/`.refinedFailed` wiring doesn't have to touch this view's layout.
-    private var displayText: String {
-        switch row.state {
-        case .raw:
-            return row.rawText
-        case .refining:
-            return "🔄 " + row.rawText
-        case .refined(let refinedText):
-            return refinedText
-        case .refinedFailed:
-            // Falls back to raw_text (kikimi.md 8.5 章: 整形失敗のセグメントは raw_text にフォールバック).
-            return row.rawText
-        case .mergedInto:
-            // §15.2.6: unreachable in practice -- `TranscriptTabView.body`'s `ForEach` filters
-            // `.mergedInto` rows out before a `TranscriptRowContentView` is ever built for one. Kept
-            // only so this switch stays exhaustive.
-            return row.rawText
-        }
-    }
-
-    /// `.raw`/`.refining` render in light gray per kikimi.md 10 章 ("生書き起こしは薄いグレー、
-    /// 整形完了で通常色"): `.refining` is still queued/pending, not yet refined, so it stays gray
-    /// like `.raw` rather than jumping to normal color early. Only `.refined`/`.refinedFailed`
-    /// (refinement actually attempted to completion, success or failure) render in normal color.
-    private var textColor: Color {
-        switch row.state {
-        case .raw, .refining, .mergedInto:
-            return .secondary
-        case .refined, .refinedFailed:
-            return .primary
-        }
-    }
-
-    private static func formattedTimestamp(startMs: Int) -> String {
-        // `startMs` is "milliseconds elapsed since session start" (kikimi.md 5 章), not a wall-clock
-        // offset, so it's formatted directly rather than added to `meta.startedAt`
-        // (`docs/design/06-ui-panels.md` section 6.3 "座標系の注意").
-        let totalSeconds = max(0, startMs) / 1000
-        let hours = totalSeconds / 3600
-        let minutes = (totalSeconds % 3600) / 60
-        let seconds = totalSeconds % 60
-        return String(format: "%02d:%02d:%02d", hours, minutes, seconds)
-    }
-}
-
-// MARK: - SpeakerLabelColumnView
-
-/// The speaker-label column of one confirmed row (`docs/design/13-speaker-diarization.md` section
-/// 6.1). `mic` rows render `selfName` as plain, non-interactive text (design section 4.5: mic is
-/// never diarized, so there is no slot to rename through). `system` rows render the staged label
-/// ("(認識中…)" → "Speaker N" → 実名, plus the "A + B" mixed form and a trailing "⚠" overlap marker)
-/// and, whenever `resolveSlot(row)` can name a slot to act on, become a button that opens the rename
-/// popover.
-private struct SpeakerLabelColumnView: View {
-    let row: TranscriptRowViewModel
-    let resolvedLabel: ResolvedSpeakerLabel?
-    let selfName: String
-    let knownSpeakers: [VoiceprintSpeaker]
-    let renameTargets: (TranscriptRowViewModel) -> [RenameableSlot]
-    let onRenameSlot: (_ slot: String, _ submission: SpeakerRenameSubmission?) async -> Void
-    let onOverrideSegment: (_ segmentId: String, _ submission: SpeakerRenameSubmission?) async -> Void
-
-    @State private var isPopoverPresented = false
-
-    var body: some View {
-        switch row.speaker {
-        case .mic:
-            // Design section 4.5: mic's label is a fixed config value, not a `speakerLabels` lookup --
-            // there is no slot behind it to attribute or rename.
-            Text(selfName)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        case .system:
-            systemLabel
-        }
-    }
-
-    @ViewBuilder
-    private var systemLabel: some View {
-        // Always a button, slot or not (design section 6.1): "この発言だけ" (the per-segment override)
-        // is available on every system row, including slotless "Speaker ?"/"(認識中…)" ones. The
-        // slot-wide fields come one-per-attributed-slot -- two for an "A + B" mixed row, so both
-        // speakers can be renamed from the same popover.
-        let resolved = resolvedLabel ?? .systemFallback
-        let targets = renameTargets(row)
-        Button {
-            isPopoverPresented = true
-        } label: {
-            Text(Self.labelText(for: resolved))
-        }
-        .buttonStyle(.plain)
-        .font(.caption)
-        .foregroundStyle(targets.isEmpty && !resolved.isSegmentOverride ? .tertiary : .secondary)
-        .lineLimit(1)
-        .help("クリックして話者名を変更")
-        .popover(isPresented: $isPopoverPresented) {
-            RenameSpeakerPopoverView(
-                slots: targets,
-                knownSpeakers: knownSpeakers,
-                isSegmentOverride: resolved.isSegmentOverride,
-                initialSegmentName: Self.overrideName(for: resolved),
-                // Design section 6.3: hint only when the row's primary (first-attributed) slot is
-                // still an unconfirmed `.auto` match -- a `.user` slot (explicit rename) or no slot at
-                // all has nothing to hint at applying "すべての発言に適用" over.
-                showsAutoHint: targets.first?.assignedBy == .auto,
-                onSubmitSlot: { slot, submission in
-                    isPopoverPresented = false
-                    Task { await onRenameSlot(slot, submission) }
-                },
-                onSubmitSegment: { submission in
-                    isPopoverPresented = false
-                    Task { await onOverrideSegment(row.id, submission) }
-                }
-            )
-        }
-    }
-
-    /// Design section 6.1's staged text, in the same order the design lists it: "(認識中…) → Speaker N
-    /// → 実名", plus "Speaker ?" (section 5.3 rule 1's post-grace-period fallback), "A + B" mixed
-    /// (section 5.3 rule 2), and a trailing "⚠" whenever `hasOverlapMarker` (section 5.3, "上記と直交
-    /// する付加マーカー").
-    private static func labelText(for resolved: ResolvedSpeakerLabel) -> String {
-        var text: String
-        switch resolved.label {
-        case .systemFallback:
-            text = "system"
-        case .recognizing:
-            text = "(認識中…)"
-        case .unknown:
-            text = "Speaker ?"
-        case .anonymous(let slotNumber):
-            text = "Speaker \(slotNumber)"
-        case .named(let name):
-            text = name
-        case .mixed(let primary, let secondary):
-            text = "\(primary) + \(secondary)"
-        }
-        if resolved.hasOverlapMarker {
-            text += " ⚠"
-        }
-        return text
-    }
-
-    /// The "この発言だけ" field's initial draft: the active override's name when one is applied
-    /// (so editing starts from the current value), otherwise empty.
-    private static func overrideName(for resolved: ResolvedSpeakerLabel) -> String {
-        guard resolved.isSegmentOverride, case .named(let name) = resolved.label else {
-            return ""
-        }
-        return name
     }
 }

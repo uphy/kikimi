@@ -159,6 +159,17 @@ final class MeetingWorkspaceViewModel: ObservableObject {
     /// A pending "jump to this segment" request from the Watchers tab's seg-id links (§10.4), consumed
     /// by `MeetingWorkspaceView`'s `TranscriptTabView` wiring (`scrollTarget`/`onScrollTargetConsumed`).
     @Published var pendingTranscriptScrollTarget: String?
+    /// The segment id the most recent seg-id jump landed on (§10.4), marked in the transcript with a
+    /// leading accent bar until the next jump replaces it. Unlike `pendingTranscriptScrollTarget` this
+    /// is *not* consumed on arrival: the point is to still answer "which row was the one the Watcher
+    /// cited?" after the reader has spent half a minute reading the rows around it.
+    ///
+    /// Held here rather than as `TranscriptTabView` `@State` precisely because it has to outlive that
+    /// view: SwiftUI re-creates the 会議 tab's subtree on every tab and pane switch
+    /// (`docs/design/39-webview-markdown.md` MD2), so a 会議 → Watchers → 会議 round trip would
+    /// otherwise erase the marker. The short attention-grabbing flash *is* view-local state, since it
+    /// is tied to one arrival rather than to the session.
+    @Published var jumpHighlightedSegmentId: String?
 
     // Chat tab (`docs/design/38-session-chat.md` §3.6). None are `private(set)`: every write happens
     // in `+Chat.swift` (Swift's `private` does not span files), same rationale as `watcherItems`.
