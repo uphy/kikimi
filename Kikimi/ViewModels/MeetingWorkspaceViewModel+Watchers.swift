@@ -218,6 +218,10 @@ extension MeetingWorkspaceViewModel {
             meetingPaneMode = .both
         }
         pendingTranscriptScrollTarget = segId
+        // Set together with the scroll request rather than when the scroll lands: the marker means
+        // "this is the segment the Watcher cited", which is true from the moment the link was clicked.
+        // The attention-grabbing flash is what `TranscriptTabView` adds on arrival.
+        jumpHighlightedSegmentId = segId
     }
 
     // MARK: - Prep tab management (§10.3)

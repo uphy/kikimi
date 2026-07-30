@@ -291,6 +291,30 @@ struct MeetingWorkspaceViewModelWatchersTests {
 
         #expect(viewModel.activeTab == .meeting)
         #expect(viewModel.pendingTranscriptScrollTarget == "seg_00001")
+        // Unlike the scroll request, the marker is not consumed on arrival -- it is what still answers
+        // "which row did the Watcher cite?" after the arrival flash has faded.
+        #expect(viewModel.jumpHighlightedSegmentId == "seg_00001")
+    }
+
+    @Test("a second jump moves jumpHighlightedSegmentId to the new segment")
+    func jumpToTranscriptSegmentReplacesPreviousHighlight() async throws {
+        let root = makeTemporaryDirectory(prefix: "jumpToTranscriptSegmentReplacesPreviousHighlight")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = makeStore(root: root)
+        let created = try await store.createDraftSession()
+        let handle = try await store.openSession(created.id)
+        let presetsDirectory = makeTemporaryDirectory(prefix: "jumpToTranscriptSegmentReplacesPreviousHighlight-presets")
+
+        let viewModel = makeViewModel(handle: handle, store: store, presetsDirectory: presetsDirectory)
+        viewModel.transcriptRows = [
+            TranscriptRowViewModel(id: "seg_00001", startMs: 0, endMs: 1_000, speaker: .mic, rawText: "hello", state: .raw),
+            TranscriptRowViewModel(id: "seg_00002", startMs: 1_000, endMs: 2_000, speaker: .mic, rawText: "world", state: .raw)
+        ]
+
+        viewModel.jumpToTranscriptSegment("seg_00001")
+        viewModel.jumpToTranscriptSegment("seg_00002")
+
+        #expect(viewModel.jumpHighlightedSegmentId == "seg_00002", "Only the most recent citation is marked")
     }
 
     @Test("jumpToTranscriptSegment(_:) widens meetingPaneMode from .summary to .both so the transcript pane is visible")
@@ -353,6 +377,7 @@ struct MeetingWorkspaceViewModelWatchersTests {
 
         #expect(viewModel.activeTab == .prep)
         #expect(viewModel.pendingTranscriptScrollTarget == nil)
+        #expect(viewModel.jumpHighlightedSegmentId == nil, "An ignored jump must not mark any row")
     }
 
     // MARK: - Event reflection (§9/§10.1)

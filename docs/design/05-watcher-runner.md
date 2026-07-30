@@ -538,8 +538,53 @@ kikimi.md 10章のレイアウトどおり、Context / Summary Template エデ�
 - `TranscriptTabView` は ViewModel 非依存（素のパラメータで構成）なので、
   `pendingTranscriptScrollTarget` は **`MeetingWorkspaceView` からパラメータ + 消費コールバック**
   （`scrollTarget: String?` + `onScrollTargetConsumed: () -> Void`）で渡す
-- `onChange` で非 nil なら `proxy.scrollTo(segId, anchor: .center)` → コールバックで nil に戻す。
-  自動追従はボトムアンカーの `onDisappear` で暗黙に解除される（既存機構。明示操作は不要）
+- 非 nil なら `proxy.scrollTo(segId, anchor: UnitPoint(x: 0.5, y: 0.33))` → コールバックで nil に戻す。
+  **anchor は `.center` ではなく上から 1/3**: 整形で伸びた行やマージ済みの行は背が高く、中央合わせだと
+  ヘッダ行（時刻・話者名 = 引用から飛んできた読み手が最初に見る情報）が上端の外に出る
+  **入口は `onChange` だけでは足りず、`onAppear` も要る**（`TranscriptAutoFollow.initialScroll(scrollTarget:)`）。
+  seg リンクは Watchers / Chat タブにしかないので、クリックは必ず 会議 タブへの切替（サマリのみなら
+  ペインの `.both` 復帰）を伴い、SwiftUI はその subtree を作り直す（design 39 MD2）。作り直された
+  ペインの**最初の** `scrollTarget` は既に目的の id なので `onChange` は発火せず、`onAppear` の
+  末尾追従が実行される — 「クリックしても常に末尾に飛ぶ」症状の原因
+- **自動追従はジャンプ時に明示的に解除する**（`isPinnedToBottom = false`）。ボトムアンカーの
+  `onDisappear` に任せるのは不十分: `onAppear` 直後は `autoScrollSettleDuration` の間 抑止されており、
+  ジャンプ先が末尾に近いとアンカーが実体化したままで発火しない。解除しないと次の volatile 行
+  （録音中は 1 秒以内に来る）で末尾へ引き戻される
+- ジャンプは `jumpCorrectionDelay` 後に同じ `scrollTo` を 1 回だけ再送する（未実体化行への不発対策。
+  既に所定位置にある行なら見た目の変化なし）
+
+**着地先を示す表示（ハイライト）**
+
+飛んだだけでは「どの行が対象か」が分からないので、2 段構えにする。行の背景は他のどの機能も使っていない
+（再生中 = アイコンの色、コピー成功 = アイコン差し替え、話者 = ラベルの色、raw/refined = 本文の文字色）
+唯一空いた視覚チャネルなので、既存表示と意味が衝突しない。
+
+| | 表示 | 寿命 | state の置き場 |
+|---|---|---|---|
+| 到着フラッシュ | 行背景を `Color.accentColor.opacity(0.18)`・角丸 6pt で塗る | 即時点灯 → `jumpFlashHoldDuration`(1.8s) → `jumpFlashFadeDuration`(0.7s) でフェード | `TranscriptTabView` の `@State flashingRowId`（1 回の着地に属する） |
+| 引用マーカー | leading に幅 3pt のアクセント色バー | 次のジャンプまで持続 | `MeetingWorkspaceViewModel.jumpHighlightedSegmentId` |
+
+- **マーカーを ViewModel に置く理由**: タブ・ペイン切替でこの subtree は作り直される（design 39 MD2）ので、
+  `@State` だと 会議 → Watchers → 会議 の往復で消える。引用元を 30 秒読んだあとに
+  「どれが引用された行だっけ」に答えるのが目的なので、view より長生きしなければならない
+- **持続させるのはバーだけ**にする。背景を残すと事実上の「行選択」状態になり、将来の行選択と意味が衝突する
+- 解除条件は「次のジャンプ」のみ。対象行が merge / 削除で消えた場合は `ForEach` のフィルタで自然に消滅する
+  ので、無効化ルールは要らない
+- フラッシュは**点灯が cut・消灯が fade**（注意を引くのが目的なのでフェードインさせない）。
+  実装上の注意: 透明度は `fill(Color.accentColor.opacity(...))` ではなく `fill` + `.opacity(_:)` で与え、
+  アニメーションは行側の `.animation(_:value:)` で宣言する。**`fill(_:)` に渡す `ShapeStyle` は
+  animatable data ではないので、色→色の変化は `withAnimation` で括っても補間されず瞬時に切り替わる**。
+  cut / fade の非対称は「新しい `isJumpFlashing` の値からアニメーションを決める」（点灯時は nil を返す）
+  ことで 1 つの `.animation(_:value:)` に収める
+- 「動きを減らす」（`accessibilityReduceMotion`）が有効なとき、**止めるのはスクロールのアニメーションだけ**。
+  フラッシュのフェードは止めない — クロスフェードはこの設定が求める「動きの代替表現」であって、
+  取り除く対象ではない（Apple の HIG）。ここを一緒に止めると、この設定を入れている環境ではフェードが
+  一切見えない
+- 色相に依存しない手がかりとして 3pt バー（形状）を併用する。VoiceOver には着地時に
+  `AccessibilityNotification.Announcement("HH:MM:SS の発言に移動しました")` を投げる（行に `.isSelected`
+  trait は付けない — 選択したわけではなく、視点が移動しただけ）
+- `jumpHighlightedSegmentId` の `.mergedInto` 解決（§15.2.6）は **`body` 内で 1 回だけ**行う。
+  `ForEach` の中で行ごとに解決すると `rows` の全走査 × 行数で O(rows²) になり、長い会議で CPU を焼く
 - 注意: refinement で削除された行（`isDroppedByRefinement`）は rows から除外済み、また LazyVStack の
   未実体化行への `scrollTo` は不発になり得る。ジャンプ前に rows に対象 id があるか照合し、
   無ければ何もしない（warning ログ）。遠距離ジャンプの信頼性は kikimi-verify で検証する

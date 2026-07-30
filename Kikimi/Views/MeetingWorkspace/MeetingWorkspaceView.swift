@@ -233,7 +233,8 @@ struct MeetingWorkspaceView: View {
             onCopyRow: { row in Task { await viewModel.copyRowMarkdown(rowId: row.id) } },
             copyFeedbackRowId: viewModel.copyFeedbackRowId,
             scrollTarget: viewModel.pendingTranscriptScrollTarget,
-            onScrollTargetConsumed: { viewModel.pendingTranscriptScrollTarget = nil }
+            onScrollTargetConsumed: { viewModel.pendingTranscriptScrollTarget = nil },
+            highlightedSegmentId: viewModel.jumpHighlightedSegmentId
         )
     }
 
