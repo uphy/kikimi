@@ -74,6 +74,22 @@ struct WavFileWriterTests {
         #expect(try readDataChunkSize(at: url) == expected, "the header never reached \(expected) within \(timeout)")
     }
 
+    /// Polls the file's total size, for the same reason `waitForDataChunkSize` polls the header: the
+    /// serial writer queue commits appends whenever it gets scheduled, and a fixed sleep either
+    /// flakes or wastes time.
+    private func waitForFileSize(
+        _ expected: Int,
+        at url: URL,
+        timeout: Duration = .seconds(10)
+    ) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if (try? Data(contentsOf: url).count) == expected { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(try Data(contentsOf: url).count == expected, "the file never reached \(expected) bytes within \(timeout)")
+    }
+
     @Test("init creates the file with a 44-byte placeholder header of size 0")
     func initWritesPlaceholderHeader() throws {
         let fileURL = makeTemporaryFileURL()
@@ -87,49 +103,63 @@ struct WavFileWriterTests {
         #expect(try readDataChunkSize(at: fileURL) == 0)
     }
 
-    @Test("in-progress header reflects only data flushed so far; close() writes the final total")
-    func inProgressHeaderThenFinalHeaderOnClose() async throws {
+    @Test("append() alone never rewrites the header; close() writes the final total")
+    func appendDoesNotRewriteHeaderUntilClose() async throws {
         let fileURL = makeTemporaryFileURL()
         defer { try? FileManager.default.removeItem(at: fileURL) }
 
-        // A 2-second period, not a fraction of one: the stale-header assertion below has to happen
-        // between two flushes, and the headroom it gets is the whole interval minus the poll's own
-        // granularity. The previous 0.3s interval plus a fixed `sleep(interval + 0.4)` failed on CI
-        // for exactly this reason -- an overrun sleep landed just before a flush boundary, so the
-        // "still stale" read raced the very next flush and saw both chunks.
-        let flushInterval: TimeInterval = 2
-        let writer = try WavFileWriter(fileURL: fileURL, sampleRate: sampleRate, channels: channels, headerFlushInterval: flushInterval)
+        // An hour-long flush period, i.e. the periodic timer provably never fires during this test.
+        // That is the point: this test is about `append()` *not* touching the header, and mixing that
+        // with "the periodic flush does touch it" is what made the old single test unstable -- it had
+        // to read the header in the gap between two flushes, and a `DispatchSourceTimer` on a loaded
+        // runner does not honour gaps (it coalesces the overdue tick with the next one). The periodic
+        // behaviour is covered on its own by `periodicFlushUpdatesInProgressHeader` below, which polls
+        // and so does not care when the tick lands.
+        let writer = try WavFileWriter(fileURL: fileURL, sampleRate: sampleRate, channels: channels, headerFlushInterval: 3_600)
         let failures = FailureRecorder()
 
-        // First chunk: 100 frames of mono Int16 == 200 bytes.
         let firstFrameCount: AVAudioFrameCount = 100
         let firstByteCount = UInt32(firstFrameCount) * UInt32(channels) * UInt32(MemoryLayout<Int16>.size)
         writer.append(makeBuffer(frameCount: firstFrameCount)) { failures.record($0) }
 
-        // Wait for the first scheduled header flush, rather than for a fixed span assumed to
-        // contain it, so the in-progress header on disk provably reflects the first chunk.
-        try await waitForDataChunkSize(firstByteCount, at: fileURL)
-
-        // Second chunk, appended immediately after that flush was observed -- which puts the next
-        // one a full `flushInterval` away, so the read below cannot straddle it. The on-disk header
-        // must still be stale (first chunk only) until the writer is explicitly closed.
         let secondFrameCount: AVAudioFrameCount = 50
         let secondByteCount = UInt32(secondFrameCount) * UInt32(channels) * UInt32(MemoryLayout<Int16>.size)
         writer.append(makeBuffer(frameCount: secondFrameCount)) { failures.record($0) }
-        try await Task.sleep(for: .milliseconds(50)) // long enough to be enqueued, far short of the next flush
 
-        let staleDataSize = try readDataChunkSize(at: fileURL)
-        #expect(staleDataSize == firstByteCount)
+        // Both appends have been through the serial queue by the time the audio data is on disk, so
+        // waiting on the file's size (not on a fixed span) is what makes the header read below
+        // meaningful: the samples are written, and the header still is not.
+        try await waitForFileSize(44 + Int(firstByteCount + secondByteCount), at: fileURL)
+        #expect(try readDataChunkSize(at: fileURL) == 0)
 
         writer.close()
 
         let finalByteCount = firstByteCount + secondByteCount
-        let finalDataSize = try readDataChunkSize(at: fileURL)
-        #expect(finalDataSize == finalByteCount)
+        #expect(try readDataChunkSize(at: fileURL) == finalByteCount)
 
         let finalFileData = try Data(contentsOf: fileURL)
         #expect(finalFileData.count == 44 + Int(finalByteCount))
 
+        #expect(failures.count == 0)
+    }
+
+    @Test("the periodic flush rewrites the in-progress header while recording continues")
+    func periodicFlushUpdatesInProgressHeader() async throws {
+        let fileURL = makeTemporaryFileURL()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        // Short period so the tick comes quickly, and a polled wait so it does not matter *when* it
+        // comes. Nothing here depends on the timer being punctual -- only on it happening at all,
+        // which is the property under test (a crashed session must leave a readable WAV).
+        let writer = try WavFileWriter(fileURL: fileURL, sampleRate: sampleRate, channels: channels, headerFlushInterval: 0.1)
+        let failures = FailureRecorder()
+        defer { writer.close() }
+
+        let frameCount: AVAudioFrameCount = 100
+        let byteCount = UInt32(frameCount) * UInt32(channels) * UInt32(MemoryLayout<Int16>.size)
+        writer.append(makeBuffer(frameCount: frameCount)) { failures.record($0) }
+
+        try await waitForDataChunkSize(byteCount, at: fileURL)
         #expect(failures.count == 0)
     }
 

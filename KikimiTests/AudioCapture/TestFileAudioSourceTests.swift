@@ -19,9 +19,10 @@ struct TestFileAudioSourceTests {
             collector.record(Int(buffer.frameLength))
         }
 
-        // 2_500 frames / 1_000-frame chunks => one loop is [1000, 1000, 500].
-        // Wait long enough (~20 ticks @ 10ms) to observe at least two full loops.
-        try await Task.sleep(nanoseconds: 220_000_000)
+        // 2_500 frames / 1_000-frame chunks => one loop is [1000, 1000, 500]. Poll until two full
+        // loops have been delivered rather than sleeping for a span assumed to contain them: the
+        // source ticks on a timer, and a loaded machine delays ticks arbitrarily.
+        try await waitUntil("two full loops of chunks to arrive") { collector.counts.count >= 6 }
         source.stop()
 
         let counts = collector.counts

@@ -209,22 +209,19 @@ struct RefinementQueueTests {
     func batchSizeTriggerFlushesImmediately() async throws {
         let handle = makeHandle()
         let fakeLLM = FakeLLM()
-        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 3, batchTimeoutMs: 5_000))
+        // A 10-minute batch timeout, so "did not wait for the timeout" needs no stopwatch: if the
+        // batch-size trigger did not fire, `drain()` below would still be waiting when the test
+        // times out. Measuring elapsed time instead (this asserted < 2.5s) only ever measured how
+        // loaded the machine was -- it failed on CI at 5.2s while the behaviour was correct.
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 3, batchTimeoutMs: 600_000))
         await queue.start()
         let segments = try await appendSegments(3, to: handle)
 
-        let clock = ContinuousClock()
-        let elapsed = await clock.measure {
-            for segment in segments {
-                await queue.enqueue(segment)
-            }
-            await queue.drain()
+        for segment in segments {
+            await queue.enqueue(segment)
         }
+        await queue.drain()
 
-        // Bounded at half the configured 5s timeout, not at a tight 1s: the claim under test is
-        // "this did not wait out the timeout", and a busy machine can add most of a second of pure
-        // scheduling delay to the same non-waiting path (observed at 1.0-2.2s under load).
-        #expect(elapsed < .milliseconds(2_500), "should not have waited anywhere near the 5s timeout")
         let refined = try await handle.readRefinedSegments()
         #expect(refined.count == 3)
     }
@@ -250,7 +247,9 @@ struct RefinementQueueTests {
     func explicitFlushCutsPartialBatch() async throws {
         let handle = makeHandle()
         let fakeLLM = FakeLLM()
-        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 10, batchTimeoutMs: 5_000))
+        // Same reasoning as `batchSizeTriggerFlushesImmediately`: with a 10-minute timeout, the only
+        // way `drain()` returns is `flush()` having cut the batch itself.
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 10, batchTimeoutMs: 600_000))
         await queue.start()
         let segments = try await appendSegments(2, to: handle)
 
@@ -258,13 +257,9 @@ struct RefinementQueueTests {
             await queue.enqueue(segment)
         }
 
-        let clock = ContinuousClock()
-        let elapsed = await clock.measure {
-            await queue.flush()
-            await queue.drain()
-        }
+        await queue.flush()
+        await queue.drain()
 
-        #expect(elapsed < .milliseconds(2_500), "flush() must not wait for the 5s timeout")
         let refined = try await handle.readRefinedSegments()
         #expect(refined.count == 2)
     }
