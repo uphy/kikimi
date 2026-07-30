@@ -139,7 +139,8 @@ Chirami と同じ流儀（YAMLStore パターン参照）。
 ## テスト方式（docs/development-process.md 2.9）
 
 - **レイヤ 1: XCTest / swift-testing** — 各機能の入出力を対象。実装フェーズと同時に書く
-- **レイヤ 2: `kikimi-verify` skill** — 起動 → 録音開始 → ダミー音源投入（`KIKIMI_TEST_INPUT`）→ 停止 →
+- **レイヤ 2: `kikimi-verify` skill**（`.claude/skills/kikimi-verify/`。Kikimi 専用なのでリポジトリに同梱し、
+  `mise run verify-smoke` と同じライフサイクルで管理する） — 起動 → 録音開始 → ダミー音源投入（`KIKIMI_TEST_INPUT`）→ 停止 →
   セッションフォルダ確認。整形は `KIKIMI_STUB_LLM=1` でスタブ化
 - **レイヤ 3: 実戦テスト** — Phase 4 でリアル会議 3 本以上
 
