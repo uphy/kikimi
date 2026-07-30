@@ -16,7 +16,12 @@ set -uo pipefail
 # mode on exit, regardless of pass/fail -- never leaves the dummy-input /
 # stub-LLM test process behind (see cleanup()).
 
-SKILL_DIR="$HOME/.claude/skills/kikimi-verify"
+# The skill lives in this repository (`.claude/skills/`), not under `$HOME`: it is Kikimi-specific,
+# this task depends on its scripts, and the two therefore have to be versioned together -- a clone
+# has to be able to run `mise run verify-smoke` without a separate dotfiles step. Claude Code reads
+# project-scoped skills from the same path, so nothing about invoking the skill changes.
+REPO_ROOT="${MISE_PROJECT_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+SKILL_DIR="$REPO_ROOT/.claude/skills/kikimi-verify"
 SCRIPTS="$SKILL_DIR/scripts"
 SESSIONS_DIR="$HOME/.local/state/kikimi/sessions"
 APP_BIN="$HOME/Applications/Kikimi.app/Contents/MacOS/Kikimi"
