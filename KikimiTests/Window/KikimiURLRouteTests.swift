@@ -79,4 +79,53 @@ struct KikimiURLRouteTests {
     func recordHostWithWrongPathReturnsNil() {
         #expect(KikimiURLRoute.parse(url("kikimi://record/slow")) == nil)
     }
+
+    // MARK: - kikimi://debug/webview (design 39 MD12)
+
+    @Test("a dump request parses its target and output path")
+    func debugWebViewDump() {
+        let route = KikimiURLRoute.parse(URL(string: "kikimi://debug/webview?target=summary&action=dump&out=/tmp/x.txt")!)
+        #expect(route == .debugWebView(target: .summary, action: .dump(out: "/tmp/x.txt")))
+    }
+
+    @Test("action defaults to dump, and an empty out is normalized to nil (log instead of a file)")
+    func debugWebViewDumpDefaults() {
+        #expect(KikimiURLRoute.parse(URL(string: "kikimi://debug/webview?target=chat")!)
+            == .debugWebView(target: .chat, action: .dump(out: nil)))
+        #expect(KikimiURLRoute.parse(URL(string: "kikimi://debug/webview?target=chat&out=")!)
+            == .debugWebView(target: .chat, action: .dump(out: nil)))
+    }
+
+    @Test("a click request carries the data-testid to press")
+    func debugWebViewClick() {
+        let route = KikimiURLRoute.parse(URL(string: "kikimi://debug/webview?target=chat&action=click&testid=chat-copy-a1")!)
+        #expect(route == .debugWebView(target: .chat, action: .click(testId: "chat-copy-a1", out: nil)))
+
+        // `out` lets a script read the outcome instead of scraping the log.
+        let withOut = KikimiURLRoute.parse(
+            URL(string: "kikimi://debug/webview?target=chat&action=click&testid=chat-copy-a1&out=/tmp/r.txt")!
+        )
+        #expect(withOut == .debugWebView(target: .chat, action: .click(testId: "chat-copy-a1", out: "/tmp/r.txt")))
+    }
+
+    @Test("every surface is addressable, including the zoom overlay (design 40)")
+    func debugWebViewTargets() {
+        for target in ["summary", "watchers", "chat", "diagram"] {
+            let route = KikimiURLRoute.parse(URL(string: "kikimi://debug/webview?target=\(target)")!)
+            #expect(route != nil, "target \(target) should parse")
+        }
+    }
+
+    @Test("a malformed debug URL is rejected rather than guessed at")
+    func debugWebViewRejections() {
+        // A mistyped target must fail loudly: silently checking the wrong surface is worse than
+        // failing.
+        #expect(KikimiURLRoute.parse(URL(string: "kikimi://debug/webview?target=nope")!) == nil)
+        #expect(KikimiURLRoute.parse(URL(string: "kikimi://debug/webview")!) == nil)
+        #expect(KikimiURLRoute.parse(URL(string: "kikimi://debug/webview?target=chat&action=shout")!) == nil)
+        // click with no id has nothing to press.
+        #expect(KikimiURLRoute.parse(URL(string: "kikimi://debug/webview?target=chat&action=click")!) == nil)
+        #expect(KikimiURLRoute.parse(URL(string: "kikimi://debug/webview?target=chat&action=click&testid=")!) == nil)
+        #expect(KikimiURLRoute.parse(URL(string: "kikimi://debug/other?target=chat")!) == nil)
+    }
 }

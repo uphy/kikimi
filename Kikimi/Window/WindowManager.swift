@@ -79,6 +79,10 @@ final class WindowManager: ObservableObject {
     /// Single cached instance, lazily created on first use, matching the pattern above -- the
     /// メニューバー "用語を登録…" quick-add form (`GlossaryQuickAddWindowController`).
     private var glossaryQuickAddController: GlossaryQuickAddWindowController?
+
+    /// `docs/design/40-diagram-zoom.md` DZ5: one instance for the whole app, created on first zoom
+    /// and kept afterwards so the 3.3MB mermaid bundle is not reloaded every time.
+    private var diagramZoomController: DiagramZoomWindowController?
     /// The long-lived subscription started once by `launch()`; see `startRecordingSubscription()`.
     private var recordingSubscriptionTask: Task<Void, Never>?
 
@@ -319,6 +323,40 @@ final class WindowManager: ObservableObject {
             glossaryQuickAddController = GlossaryQuickAddWindowController()
         }
         glossaryQuickAddController?.show()
+    }
+
+    /// The zoom button on a rendered mermaid diagram (`docs/design/40-diagram-zoom.md`). `anchor` is
+    /// the window the diagram was clicked in, which decides the screen the overlay covers (DZ2).
+    func showDiagramZoom(source: String, anchoredTo anchor: NSWindow?) {
+        if diagramZoomController == nil {
+            diagramZoomController = DiagramZoomWindowController()
+        }
+        diagramZoomController?.show(source: source, anchoredTo: anchor)
+    }
+
+    /// Resolves a `kikimi://debug/webview` target to the host that can answer it
+    /// (`docs/design/39-webview-markdown.md` MD12). `nil` when no such web view exists yet — the
+    /// tab was never opened, or the overlay has never been shown.
+    ///
+    /// For the three in-window surfaces, the key window wins so that a verification run driving two
+    /// sessions talks to the one it just brought forward; with no key window it falls back to the only
+    /// open workspace (the usual case under `kikimi-verify`).
+    func debugWebViewHost(target: KikimiURLRoute.DebugWebViewTarget) -> MarkdownWebViewHost? {
+        if case .diagram = target {
+            return diagramZoomController?.host
+        }
+
+        let slot: MarkdownWebViewStore.Slot
+        switch target {
+        case .summary: slot = .summary
+        case .watchers: slot = .watchers
+        case .chat: slot = .chat
+        case .diagram: return nil
+        }
+
+        let controller = workspaceControllers.values.first { $0.window?.isKeyWindow == true }
+            ?? workspaceControllers.values.first
+        return controller?.markdownWebViewStore.existingHost(for: slot)
     }
 
     /// "削除" (section 5.2/7, failure mode #5). Closes the session's Session Window window if it

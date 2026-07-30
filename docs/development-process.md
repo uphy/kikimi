@@ -66,8 +66,8 @@ Chirami と同じスタックを踏襲。理由: sherpa-onnx / AVAudioEngine / S
 | STT | sherpa-onnx（SPM）|
 | 音声取込 | AVAudioEngine（マイク）+ ScreenCaptureKit（システム音声）|
 | Claude API | 公式 Anthropic Swift SDK（あれば）or `URLSession` ベースの薄いクライアント |
-| Markdown プレビュー | MarkdownUI or `AttributedString`。WKWebView は MVP では回避（実装コスト削減）|
-| テスト | XCTest（単体）+ `kikimi-verify` skill（UI 動作確認）|
+| Markdown 表示 | WKWebView + `markdown-it` + mermaid（`web/`、`docs/design/39-webview-markdown.md`）。MVP では MarkdownUI を使い WKWebView を回避していたが、mermaid とコードハイライトのために置き換えた。**編集**は `NSTextView` のまま |
+| テスト | XCTest（Swift 単体）+ vitest（`web/` 単体）+ `kikimi-verify` skill（UI 動作確認）|
 
 ### 2.3 参考リポジトリ（Chirami）
 
@@ -277,9 +277,10 @@ Claude Code の subagent を目的別に使い分ける。
 
 3層で構成する。
 
-#### レイヤ 1: 単体テスト（XCTest）
+#### レイヤ 1: 単体テスト（XCTest / vitest）
 
-各機能の入出力を対象。実装フェーズと同時に書く。
+各機能の入出力を対象。実装フェーズと同時に書く。Swift は `swift test`、描画層（`web/`）は vitest で、
+`mise run test` が両方を回す。
 
 - 対象例
   - JSONL 追記が atomic であること
@@ -287,6 +288,8 @@ Claude Code の subagent を目的別に使い分ける。
   - Config YAML の読み書きが等冪
   - Batch の flush 条件（N 件 or T 秒）が正しくトリガされる
   - Summary Updater の incremental マージが構造を破壊しない
+  - Markdown 描画（`web/`）: LLM 出力の生 HTML がエスケープされること、mermaid の構文エラーで
+    ソースが残ること、質問の吹き出しが Markdown として解釈されないこと
 
 #### レイヤ 2: 統合テスト（`kikimi-verify` skill）
 
@@ -295,6 +298,8 @@ Claude Code の subagent を目的別に使い分ける。
 - 起動 → 録音開始 → ダミー音源投入 → 停止 → セッションフォルダ確認
 - 整形は LLM スタブでスキップ、または固定応答モックで検証
 - 各テストは独立に再現できるように環境変数で状態を制御
+- **WebView の中身は AX ツリーだけでは確かめきれない**。`window.__kikimiDumpText()` /
+  `__kikimiClick()` を通す経路が要る（`docs/design/39-webview-markdown.md` MD12 / §8.3）
 
 #### レイヤ 3: 実戦テスト（リアル会議）
 

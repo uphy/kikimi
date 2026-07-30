@@ -14,7 +14,6 @@ let package = Package(
         .package(url: "https://github.com/swiftlang/swift-testing", from: "0.12.0"),
         .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.15.4"),
         .package(url: "https://github.com/groue/GRMustache.swift", from: "7.0.0"),
-        .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", exact: "2.4.1"),
         // Global hotkey registration + a SwiftUI shortcut Recorder for the dictation feature
         // (docs/design/25-dictation-mode.md R7). Carbon-based under the hood -- no Input
         // Monitoring permission needed, and key-up is supported (required for the
@@ -32,14 +31,17 @@ let package = Package(
                 .product(name: "Yams", package: "Yams"),
                 .product(name: "FluidAudio", package: "FluidAudio"),
                 .product(name: "Mustache", package: "GRMustache.swift"),
-                .product(name: "MarkdownUI", package: "swift-markdown-ui"),
                 .product(name: "KeyboardShortcuts", package: "KeyboardShortcuts")
             ],
             path: "Kikimi",
             exclude: [
                 "Info.plist",
                 "Kikimi.entitlements",
-                "Resources/Assets.xcassets"
+                "Resources/Assets.xcassets",
+                // Web assets are copied into the .app by `.mise/tasks/build/_default` (Kikimi does
+                // not use SPM resource bundles); excluded here so `swift build` does not warn about
+                // unhandled files. See `docs/design/39-webview-markdown.md` §9.
+                "Resources/editor"
             ]
         ),
         .testTarget(

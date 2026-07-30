@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#MISE description="web/ の単体テスト (vitest)"
+set -euo pipefail
+
+if [ ! -d web/node_modules ]; then
+  echo "web/node_modules not found; skipping (run 'mise run build:web' first)."
+  exit 0
+fi
+
+npm test --prefix web

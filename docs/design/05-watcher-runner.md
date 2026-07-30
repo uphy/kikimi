@@ -360,9 +360,11 @@ LLM 出力（`JSONValue`、schema 検証済み）を現在 state にどう反映
      コードスパン内はリンク化されないため、**バッククォートごと**リンクに置き換える
   2. 裸の `seg_[0-9]{5}` → 同上（既にリンク内にある場合を壊さないよう、`](` 直後や
      `(kikimi-seg:` 直後の出現はスキップする素朴なガードで足りる）
-- `WatchersTabView` 側で `.environment(\.openURL, OpenURLAction { ... })` を仕込み、
-  `kikimi-seg:` スキームを受けたら `viewModel.jumpToTranscriptSegment(id)` を呼んで
-  `.handled` を返す（アプリ全体の URL scheme `KikimiURLRoute` には乗せない。ビュー内で完結する）
+- リンクのクリックは描画側の WebView が横取りし（`preventDefault` + ブリッジ）、
+  `MarkdownLinkRouter`（`docs/design/39-webview-markdown.md` MD6）が `kikimi-seg:` と判定したら
+  `viewModel.jumpToTranscriptSegment(id)` を呼ぶ（アプリ全体の URL scheme `KikimiURLRoute` には
+  乗せない。ウィンドウ内で完結する）。**design 39 以前は `.environment(\.openURL, OpenURLAction { ... })`
+  で傍受していた**
 
 ## 9. `WatcherRunner`（actor）
 
@@ -494,8 +496,9 @@ func saveLocalWatcherText(id: String, text: String) async  // 保存前に parse
 
 - 上部にサブタブバー（enabled Watcher の name を横並びボタン。選択中を強調、
   status に応じて 🔄（running）/ ⚠（error）バッジを名前に添える）
-- 本文: `Markdown(item.renderedMarkdown)` を `.markdownTheme(.summary)` で表示
-  （`SummaryTabView` のテーマを流用）+ `kikimi-seg:` の `OpenURLAction`
+- 本文: `MarkdownWebView`（`docs/design/39-webview-markdown.md`）で表示。`docKey` は
+  `"watcher:<id>"` — サブタブは 1 つの WebView を共有するので、これが無いと別の Watcher の
+  スクロール位置が復元される。`kikimi-seg:` は `MarkdownLinkRouter` 経由
 - フッタ: 「N 分前更新」（`lastRunAt` の相対表示）+ 「・対象: サマリのみ / サマリ + 直近N発言 /
   サマリ + 全発言」+ `[今すぐ実行]` ボタン（running 中は disabled）。
   error 時はメッセージのみを 1 行表示し、対象バッジは出さない

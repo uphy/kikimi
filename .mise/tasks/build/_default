@@ -19,6 +19,18 @@ if [ -d "$menu_icon_src" ] && [ -f "$menu_icon_src/MenuBarIcon.png" ]; then
   echo "Icon: MenuBarIcon copied"
 fi
 
+# Web assets (docs/design/39-webview-markdown.md §9). Copied the same way the menu bar icon is:
+# Kikimi does not use SPM resource bundles, so `Bundle.main.resourceURL` is the only lookup that
+# works for both `mise run build` output and an installed ~/Applications/Kikimi.app.
+for web_dir in editor-spike editor; do
+  web_src="Kikimi/Resources/$web_dir"
+  if [ -d "$web_src" ]; then
+    rm -rf "$app_dir/Resources/$web_dir"
+    cp -R "$web_src" "$app_dir/Resources/$web_dir"
+    echo "Web: $web_dir copied"
+  fi
+done
+
 # アイコン (icns) 生成
 src_png="Kikimi/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png"
 if [ -f "$src_png" ]; then

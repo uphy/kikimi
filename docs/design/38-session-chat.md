@@ -48,10 +48,10 @@
   （`Kikimi/Config/AppState.swift:19`）に 1 ケース足し、**`WorkspaceWindowState.init(from:)` の
   手書き `switch` にも 1 ケース足す**（足さないと `chat` が復元されない。CH1）
 - **履歴は `chat.jsonl` としてセッションに保存**する。開き直しても残り、会議終了後も続きを聞ける
-- **図（mermaid）は初版では出させない**。MarkdownUI は CommonMark レンダラで mermaid を描けず、
-  `docs/design/06-ui-panels.md:71` が WKWebView を使わないと決めている。**WebView ベースの
-  Markdown 描画は summary / Watchers / チャットを横断する別設計**として切り出す（§9）。
-  それが入るまでは、システムプロンプトで表と箇条書きに誘導する
+- ~~**図（mermaid）は初版では出させない**~~ → 初版はそうしたが、`docs/design/39-webview-markdown.md`
+  （サマリ / Watchers / チャットを横断する WebView 描画）が入って**撤回**した。当時の理由は MarkdownUI が
+  CommonMark レンダラで mermaid を描けず、`docs/design/06-ui-panels.md:71` が WKWebView を使わないと
+  決めていたこと
 - **ストリーミングはしない**。`LLMBackend`（`Kikimi/LLM/LLMBackend.swift:10`）は 1 発の
   `complete` しか持たない。回答が出るまでスピナーを出す（§9 の将来拡張）
 
@@ -71,7 +71,7 @@
 
 **やらないこと（§9 も参照）**:
 
-- mermaid をはじめとする図の描画（別設計。WebView 対応として summary / Watchers と一括で扱う）
+- ~~mermaid をはじめとする図の描画~~ → `docs/design/39-webview-markdown.md` で実装済み
 - ストリーミング表示
 - 複数セッション横断の質問（「先週の A 社との会議では何と言っていたか」）
 - チャットからの編集操作（話者リネーム・サマリ書き換え・Watcher 生成などの副作用）
@@ -87,7 +87,7 @@
 | CH3 | **既定スコープはセッション全体**、`maxContextChars` を超えたら**サマリ + 直近セグメント**へ自動降格する。**予算は書き起こしだけでなく、サマリ・質問文・プロンプトに載せる会話履歴の合計で測る**（§3.2 の `resolve`）。降格したことは回答の上に控えめなラベル（「会議が長いため、サマリと直近の会話をもとに回答しています」）で示す — 黙って範囲を狭めると、答えが薄い理由がユーザーに分からない。閾値は文字数ベース（トークン数はクライアント側で測れない） |
 | CH4 | **マルチターンは直近 6 ターン（3 往復）まで**。全履歴を毎回積むと、長い会議のコンテキストと合わさってコストが線形に膨らむ。6 ターンを超える履歴は画面には残るがプロンプトには載せない（画面とプロンプトの食い違いは §4.2 のラベルで示さない — 追い質問の文脈が切れるのは体感で分かるため過剰）。切り出しは**件数ではなく往復ペア単位**で行う（CH22） |
 | CH5 | **出力は JSON schema 経由で受け取る**。`LLMRequest.schema`（`Kikimi/LLM/LLMTypes.swift:35`）は必須で、既存の全経路が `--json-schema` を通る。チャットの回答は自由記述の Markdown なので `{"answer": "<markdown>"}` の 1 フィールドスキーマで包む。新しい非構造化経路（`completeRaw` の直叩き）は作らない |
-| CH6 | **図は初版では出させない**。システムプロンプトに「図表は mermaid ではなく表と箇条書きで表現する」と書く。WebView 対応（§9）が入ったらこの 1 文を外すだけで mermaid が使えるようになる — プロンプト側に閉じ込めておくことで、描画側の対応と独立に切り替えられる |
+| CH6 | ~~**図は初版では出させない**~~ → **撤回**（`docs/design/39-webview-markdown.md` Phase C）。当初はシステムプロンプトに「図表は mermaid ではなく表と箇条書きで表現する」と書いていた。描画側の対応と独立に切り替えられるようプロンプト側に閉じ込めておいた判断は狙いどおり機能し、WebView 化が入った時点で 1 行の削除で済んだ |
 | CH7 | **ストリーミングしない**。`LLMBackend` は `complete` 1 発で、Claude CLI バックエンドは 1 プロセス 1 応答。送信中は入力欄を disabled にし、回答枠にスピナーと経過秒数を出す |
 | CH8 | **履歴は `chat.jsonl`**（`SessionFile.chatJSONL` を追加）。1 行 = 1 ターン（§3.4）。追記のみで、既存の `transcript.jsonl` / `llm_usage.jsonl` と同じ流儀（`SessionHandle` の JSONL 追記 API を使う）。**usage は `LLMUsage` ではなく `LLMUsageRecord` として持つ** — `LLMUsage` は `Codable` ですらなく、素朴に `Codable` を足しても `totalCostUSD` が `SessionJSONCoding` の `.convertToSnakeCase` / `.convertFromSnakeCase` で非可逆（encode `total_cost_usd` → decode 候補 `totalCostUsd`）で、非 optional なため decode が throw して行ごと壊れる。`LLMUsageRecord` は明示 `CodingKeys` でこの罠を回避済みで、`DictationHistoryEntry.llmUsage`（design 29）が同じ理由で同じ型を永続化している |
 | CH9 | **質問と回答を別の行として書く**。1 行に往復をまとめない — 回答が失敗したとき、質問だけが残って再送できる形が自然（失敗は `role: assistant` + `error` の行として残す。§6） |
@@ -169,7 +169,7 @@ enum ChatPromptBuilder {
 - **書き起こしは音声認識と LLM 整形を経ており、誤変換や話者の取り違えがあり得る**こと。断定できない
   ときは「書き起こしからは読み取れない」と答えること（推測で埋めない）
 - `*(raw)*` が付いた行は未整形の生テキストであること
-- 回答は Markdown。**図表は mermaid ではなく表と箇条書きで**（CH6）
+- 回答は Markdown。**図は mermaid のコードブロックで**（CH6 は `docs/design/39-webview-markdown.md` で撤回済み）
 - 引用するときは `HH:MM:SS` と話者名を添えること
 
 ### 3.2 `ChatContextScope` / `ChatContextBuilder`（CH2 / CH3）
@@ -402,7 +402,7 @@ enum ChatTurnLog {
 │                    │ 決まったことは？││  ← user（右寄せ）
 │                    └──────────────┘│
 │ ┌────────────────────────────────┐ │
-│ │ ## 決定事項                     │ │  ← assistant（MarkdownUI）
+│ │ ## 決定事項                     │ │  ← assistant（`ChatWebView`）
 │ │ - リリースは来週火曜            │ │
 │ │             [コピー] [00:12:03]│ │
 │ └────────────────────────────────┘ │
@@ -418,7 +418,9 @@ enum ChatTurnLog {
   `TranscriptAutoFollow`（`Kikimi/Views/MeetingWorkspace/TranscriptAutoFollow.swift`）の
   ピン留め規則をそのまま使う — 同じ「末尾に張り付いている間は追従する」問題であり、
   同じ解を 2 つ実装しない
-- 回答は `Markdown(...)`（MarkdownUI）で描画し、テーマは `SummaryTabView` の `.summary` を共有する
+- 回答の描画は `ChatWebView`（`docs/design/39-webview-markdown.md` §3.6）。履歴全体を 1 つの WebView で
+  描き、吹き出し・コピー/再送ボタン・自動追従は `web/src/chat.ts` が持つ。**質問の吹き出しは Markdown として
+  解釈しない**（`# 確認` が見出しに化けるため）
 - 各回答に「コピー」ボタン。37 の `PasteboardWriting` を注入して使う
 - 入力欄は複数行。**⌘⏎ で送信**（⏎ は改行 — 会議中に長い質問を書くことがあるため）
 - 送信中は入力欄と送信ボタンを disabled にし、回答枠にスピナーと経過秒数を出す（CH7）
@@ -620,7 +622,7 @@ claude CLI の起動）を測って調整する。
 - `ChatPromptBuilderTests`（純粋）: (a) `buildUser` が**質問だけ**を返し、コンテキストも履歴も
   含まないこと、(b) `buildMessages` が `[user(context), assistant(ack)] + 履歴` を返し、
   **偶数長・role 交互・先頭 `.user`** であること（履歴なし/ありの両方）、(c) スキーマの妥当性、
-  (d) システムプロンプトに mermaid 禁止と「推測しない」規則が含まれること
+  (d) システムプロンプトが図の書き方（mermaid）と「推測しない」規則に触れていること
 - `ChatContextScopeTests`（純粋）: (a) 閾値の境界で `.full` / `.summaryAndRecent` が切り替わること、
   (b) **質問長・履歴長・サマリ長が予算に算入される**こと（書き起こしが閾値以下でも合計超過なら降格）、
   (c) 固定部分だけで予算を使い切ると `transcriptBudget == 0` になること
@@ -713,10 +715,9 @@ let outcome = await race(termination: termination, timeout: timeout)   // ← �
 
 ## 9. やらないこと・将来拡張
 
-- **WebView ベースの Markdown 描画（mermaid 対応）**: サマリ・Watchers・チャットの 3 箇所が同じ
-  MarkdownUI 描画を共有しているので、**この 3 つを横断する別設計**として起こす。`docs/design/06-ui-panels.md:71`
-  の「WKWebView は使わない」を、コードブロック描画に限って覆すかどうかがその設計の主題になる。
-  入ったら CH6 のプロンプト 1 文を外す
+- ~~**WebView ベースの Markdown 描画（mermaid 対応）**~~ → `docs/design/39-webview-markdown.md` で実装済み。
+  サマリ・Watchers・チャットの 3 箇所すべてが WKWebView + `markdown-it` で描画され、CH6 のプロンプト 1 文は
+  撤回、MarkdownUI 依存は削除された
 - **ストリーミング表示**: `LLMBackend` に streaming の口を足す必要がある（Claude CLI は
   `--output-format stream-json`、OpenAI 互換は SSE）。バックエンド 3 種すべてに影響するので別設計
 - **複数セッション横断の質問**: セッションをまたぐ検索・埋め込みが要る。Wiki 側の役割との
