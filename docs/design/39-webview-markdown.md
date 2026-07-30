@@ -475,12 +475,23 @@ Swift 側で担っている役割は足りている。設定ファイルと依�
 更新でも位置が飛ばず、ダークモードに追従し、書き起こしペインと並べても違和感がない。テーブルと
 コードブロックも崩れない。Swift 2105 / vitest 18 テストが通っている。
 
-**未計測**（Phase B / C と並行して確かめる）:
+### 検証経路と `KIKIMI_TEST_HIDDEN` の実測（2026-07-30）
 
-- 5. AX ツリーから WebView 内テキストが読めるか — 読めれば MD12 の `kikimi://debug/webview` 経路は
-  作らずに済む。MD12 の実装量だけを左右し、基盤・レンダラ・ストアには影響しない
-- 8. `KIKIMI_TEST_HIDDEN=1`（alpha 0）下で描画と JS が動くか — A1 完了後に
-  `mise run verify-smoke` を回せば分かる
+Phase A で持ち越した 2 項目を解消した。
+
+| 条件 | 結果 |
+|---|---|
+| 8. `KIKIMI_TEST_HIDDEN=1`（alpha 0）下で描画と JS が動くか | **動く**。AX は alpha を見ないので、不可視ウィンドウでもタブ切替と `evaluateJavaScript` は通る |
+| 5. AX ツリーから WebView 内テキストが読めるか | **確認不要になった**。操作側（コピー / 再送 / 拡大ボタン）が AX では特定できないので、どちらにせよ `kikimi://debug/webview` 経路が必要だった |
+
+**タブバーの AX 経路が最後の関門だった**。`ax_click.py` が走査するヘッダーの group 1 にはおらず、
+`AXTabGroup` としても現れない。実際は `window 1 > toolbar 1 > group 1 > radio group 1`
+（"Navigation Tab Bar"）で、タブは radio button、**ラベルは `description` にしか入っていない**
+（`name` / `title` は `missing value`）。これを `scripts/tab_click.py` に固定した。
+
+`mise run verify-smoke` に**ステップ 8「WebView が描画されたか」**を追加した。チャットタブを開いて
+空状態のプレースホルダを `webview.sh wait` で読む — ここまでの 7 ステップはページが 1 枚も
+描画されなくても全部緑になるので、この 1 ステップが「WebView が生きているか」の唯一の砦になる。
 
 **混在期間について**: Phase A 完了から C 完了までの間、`MeetingTabView` の分割表示では
 CoreText 描画の書き起こしと WebKit 描画のサマリが同一画面の左右に並ぶ。完了条件 10 を満たす
