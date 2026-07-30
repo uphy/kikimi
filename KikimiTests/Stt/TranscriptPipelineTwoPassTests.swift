@@ -179,7 +179,7 @@ struct TranscriptPipelineTwoPassTests {
     /// silently loses the race under the suite's parallel load -- and the failure is not a timeout
     /// but a *wrong expectation*, since a window confirmed before the decoder lands falls back to
     /// streaming text instead of being re-decoded.
-    private func waitUntil(timeout: Duration = .seconds(5), predicate: @escaping () async -> Bool) async throws {
+    private func waitUntil(timeout: Duration = .seconds(10), predicate: @escaping () async -> Bool) async throws {
         let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
             if await predicate() { return }

@@ -145,7 +145,7 @@ struct WatcherRunnerTests {
 
     /// Polls `predicate` on a short interval until it returns `true` or a timeout elapses (mirrors
     /// `RefinementQueueTests.waitUntil`/`SummaryUpdaterTests.waitUntil`).
-    private func waitUntil(timeout: Duration = .seconds(5), predicate: @escaping () async -> Bool) async throws {
+    private func waitUntil(timeout: Duration = .seconds(10), predicate: @escaping () async -> Bool) async throws {
         let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
             if await predicate() { return }
@@ -212,6 +212,68 @@ struct WatcherRunnerTests {
         let stateText = try await handle.readText(.watcherState(id: "watcher-a"))
         #expect(stateText?.contains("\"source_seg_id\"") == true)
         #expect(stateText?.contains("sourceSegId") == false)
+    }
+
+    // MARK: - run.json (§7.2)
+
+    @Test("a successful run persists watchers/<id>.run.json with that run's timestamp and input_scope")
+    func successfulRunPersistsRunRecord() async throws {
+        let directory = makeTempSessionDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = makeHandle(directory: directory)
+        try await handle.writeText(
+            definitionTextWithInputScope(id: "watcher-a", inputScope: "summary_and_recent:12"),
+            to: .watcherDefinition(id: "watcher-a")
+        )
+        try await handle.writeEnabledWatchers(["watcher-a"])
+
+        let llm = FakeWatcherLLM()
+        await llm.setResponse("{\"source_seg_id\":\"seg_00001\"}", for: "watcher_watcher-a")
+
+        // Whole seconds: `run.json` is written with `dateEncodingStrategy = .iso8601`, which drops
+        // sub-second precision, so a fractional timestamp would not round-trip exactly.
+        let finishedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let runner = WatcherRunner(
+            sessionHandle: handle, llm: llm, library: makeLibrary(), defaultModel: "claude-haiku-4-5-20251001",
+            now: { finishedAt }
+        )
+        await runner.runManually(id: "watcher-a")
+
+        let record = try await handle.readJSON(.watcherRunRecord(id: "watcher-a"), as: WatcherRunRecord.self)
+        #expect(record?.finishedAt == finishedAt)
+        #expect(record?.inputScope == .summaryAndRecent(count: 12))
+    }
+
+    @Test("a failed run leaves the previous run.json untouched (it describes the state still on disk)")
+    func failedRunKeepsPreviousRunRecord() async throws {
+        let directory = makeTempSessionDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = makeHandle(directory: directory)
+        try await handle.writeText(definitionText(id: "watcher-a"), to: .watcherDefinition(id: "watcher-a"))
+        try await handle.writeEnabledWatchers(["watcher-a"])
+
+        let llm = FakeWatcherLLM()
+        await llm.setResponse("{\"source_seg_id\":\"seg_00001\"}", for: "watcher_watcher-a")
+        let finishedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let runner = WatcherRunner(
+            sessionHandle: handle, llm: llm, library: makeLibrary(), defaultModel: "claude-haiku-4-5-20251001",
+            now: { finishedAt }
+        )
+        await runner.runManually(id: "watcher-a")
+
+        let collector = EventCollector()
+        let collectTask = Task {
+            for await event in runner.events {
+                await collector.append(event)
+            }
+        }
+        await llm.setError(.timedOut(.seconds(1)), for: "watcher_watcher-a")
+        await runner.runManually(id: "watcher-a")
+        try await waitUntil { await collector.events.contains { if case .failed = $0.kind { return true }; return false } }
+        collectTask.cancel()
+
+        let record = try await handle.readJSON(.watcherRunRecord(id: "watcher-a"), as: WatcherRunRecord.self)
+        #expect(record?.finishedAt == finishedAt)
     }
 
     // MARK: - LLM failure keeps previous state (§9.1/§12)

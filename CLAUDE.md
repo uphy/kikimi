@@ -43,7 +43,7 @@ phase-cycle / fix-cycle workflow には UI 検証ステップを含めない。
 ## Build
 
 ```bash
-# Initial setup (requires xcodegen, cmake)
+# Initial setup (xcodegen / cmake / node は mise が入れる)
 mise install
 mise run generate
 mise run signing-identity   # 初回のみ。TCC 権限を再ビルドで失わないため（下記）
@@ -59,13 +59,15 @@ Command Line Tools のみのため、**実際のビルド経路は `xcodebuild` 
 ### mise Tasks
 
 - `mise run generate` — xcodegen でプロジェクトファイルを生成
-- `mise run build` — Release ビルド（`.build/release/Kikimi` → `build/Kikimi.app` バンドル化 → 署名）
+- `mise run build` — Release ビルド（`build:web` → `build:swift` → `build/Kikimi.app` バンドル化 → 署名）
+- `mise run build:web` — `web/` の Markdown レンダラを `Kikimi/Resources/editor/` に出力（npm + esbuild）
 - `mise run apply` — `~/Applications/Kikimi.app` にインストール（実行中なら再起動）
+- `mise run test` — 単体テスト（vitest → `swift test`）
 - `mise run signing-identity` — ローカル開発用のコード署名 identity を作成（初回のみ・冪等）
 - `mise run reset-permissions` — Kikimi の TCC 許可をリセット（署名方式を変えた直後のみ）
 - `mise run clean` — ビルド成果物を削除
 - `mise run purge` — アプリ・config・state を全削除
-- `mise run lint` / `mise run lint-fix` — SwiftLint
+- `mise run lint` / `mise run lint-fix` — SwiftLint（`lint` は `web/` の `tsc --noEmit` も走らせる）
 - `mise run verify-smoke` — `kikimi-verify` のスモークテスト
 
 ### 配布ビルド（`KIKIMI_RELEASE_BUILD=1`）
@@ -76,6 +78,14 @@ Command Line Tools のみのため、**実際のビルド経路は `xcodebuild` 
 見ないが、`codesign` はルート直下に `Contents` 以外を置くと "unsealed contents present in the bundle root"
 で失敗する。理由は `.mise/tasks/build/_default` の "Resource bundles" コメントに詳しく書いてある。
 配布ビルドは `.github/workflows/release.yml` からのみ呼ばれる。
+
+### Markdown 描画（WebView）
+
+サマリの Markdown 表示は WKWebView + `markdown-it`（`docs/design/39-webview-markdown.md`）。
+描画層のソースは `web/`、ビルド成果物は `Kikimi/Resources/editor/`（git 管理外）。
+
+**`swift build` 単体では web 資産が更新されない**。`mise run build` を使う。資産が無いと画面は
+プレーンテキストにフォールバックし、その旨が本文の上に出る。
 
 ### コード署名と TCC 権限
 
@@ -110,12 +120,16 @@ kikimi.md 13 章に準拠。主要コンポーネント:
 | `Kikimi/Refinement/` | Haiku バッチ整形（プロンプト構築・マージ・バリデーション） |
 | `Kikimi/Summary/` | サマリ state 管理・patch 適用・view レンダリング |
 | `Kikimi/Watchers/` | Watcher 定義・実行・schema/view 処理 |
+| `Kikimi/Chat/` | セッションチャット（会話への ad-hoc 質問。プロンプト構築・コンテキスト予算・履歴正規化） |
+| `Kikimi/Markdown/` | 会話ログの Markdown レンダリング・コピー |
 | `Kikimi/LLM/` | Claude CLI/API クライアント・課金集計・スタブプロバイダ |
 | `Kikimi/SessionStore/` | セッションのファイル I/O（JSONL・meta・各種 state） |
 | `Kikimi/Config/` | `AppConfig` / `AppState` / YAML 読み書き |
 | `Kikimi/WikiExport/` | セッション終了時の Wiki 向け Markdown export |
 | `Kikimi/Playback/` | セグメント単位の音声再生 |
 | `Kikimi/Window/` | NSPanel 管理・メニューバー・URL scheme ルーティング |
+| `Kikimi/Views/Markdown/` | WKWebView による Markdown 描画（ホスト・ブリッジ・リンク振り分け） |
+| `web/` | 描画層の TypeScript/CSS（markdown-it・テーマ・将来の mermaid）。生成物は `Kikimi/Resources/editor/` |
 | `Kikimi/ViewModels/` | 各ウィンドウの ViewModel |
 | `Kikimi/Views/` | SwiftUI 画面（Session Window / List / Settings） |
 | `KikimiTests/` | 各ディレクトリに対応する XCTest / swift-testing |
@@ -134,7 +148,8 @@ Chirami と同じ流儀（YAMLStore パターン参照）。
 ## テスト方式（docs/development-process.md 2.9）
 
 - **レイヤ 1: XCTest / swift-testing** — 各機能の入出力を対象。実装フェーズと同時に書く
-- **レイヤ 2: `kikimi-verify` skill** — 起動 → 録音開始 → ダミー音源投入（`KIKIMI_TEST_INPUT`）→ 停止 →
+- **レイヤ 2: `kikimi-verify` skill**（`.claude/skills/kikimi-verify/`。Kikimi 専用なのでリポジトリに同梱し、
+  `mise run verify-smoke` と同じライフサイクルで管理する） — 起動 → 録音開始 → ダミー音源投入（`KIKIMI_TEST_INPUT`）→ 停止 →
   セッションフォルダ確認。整形は `KIKIMI_STUB_LLM=1` でスタブ化
 - **レイヤ 3: 実戦テスト** — Phase 4 でリアル会議 3 本以上
 

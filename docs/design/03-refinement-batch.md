@@ -265,7 +265,7 @@ enum RefinementEvent: Sendable {
 | セグメント確定 | `enqueue`（3.3 節の位置。`knownIds` ガード付き） |
 | 一時停止（Recording → Paused） | `flush()`（端数バッチをワーカーに出させる）。**インスタンスは破棄しない**（Paused 中もワーカーは残りを処理し続ける。in-memory 文脈履歴も維持される） |
 | 再開（Paused → Recording） | 同一インスタンスに `start()`（冪等。②③のみ実質動作） |
-| 会議終了（→ Ended） | `flush()` を呼び、`drain()` は**待たずに** fire-and-forget で開始する。`on_session_end`（最終タイトル等）は従来どおり即実行（整形の遅延が終了処理をブロックしない。kikimi.md 8.5「会議終了後に自然にバッチ処理が追いつく」）。drain 完了後もインスタンスはウィンドウが閉じるまで残ってよい（再開 = reopen に備える） |
+| 会議終了（→ Ended） | `flush()` を呼び、`drain()` は**待たずに** fire-and-forget で開始する。`on_session_end`（最終タイトル等）は従来どおり即実行（整形の遅延が終了処理をブロックしない。kikimi.md 8.5「会議終了後に自然にバッチ処理が追いつく」）。drain 完了後もインスタンスはウィンドウが閉じるまで残ってよい（再開 = reopen に備える）。**改訂（`docs/design/37-transcript-markdown-copy.md` TC17）**: この fire-and-forget `Task` は `drain()` 完了後に Wiki export の再実行（冪等上書き）もぶら下げるようになったが、`drain()` を await しない方針自体は変わらない |
 | ウィンドウを閉じる | drain 中でも即破棄してよい（未整形分は次回 Recording 時のバックログ追い付きで回収） |
 | 録音していない Ended セッションを開いただけ | キューは作らない（勝手に LLM コストを発生させない。遡り整形は 12 章） |
 

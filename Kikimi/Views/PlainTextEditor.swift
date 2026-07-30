@@ -1,6 +1,26 @@
 import AppKit
 import SwiftUI
 
+// MARK: - PlainTextEditorMetrics
+
+/// Where the `NSTextView` below actually puts its first glyph, shared by the view that configures
+/// the text view and the placeholder that has to line up with it.
+///
+/// Kept as derived constants rather than two independently eyeballed `padding` values: the
+/// placeholder used to be positioned at `top 8` against a text origin of `6`, so it sat two points
+/// below the caret -- visible as soon as anyone looked at an empty field.
+private enum PlainTextEditorMetrics {
+    /// `NSTextView.textContainerInset`, applied in `TextViewRepresentable.makeNSView`.
+    static let containerInset = CGSize(width: 6, height: 6)
+
+    /// `NSTextContainer.lineFragmentPadding`'s default, which insets the first glyph horizontally on
+    /// top of `containerInset` but adds nothing vertically.
+    static let lineFragmentPadding: CGFloat = 5
+
+    static let textOriginX = containerInset.width + lineFragmentPadding
+    static let textOriginY = containerInset.height
+}
+
 // MARK: - PlainTextEditor
 
 /// A minimal wrapper around a plain-text `NSTextView` (kikimi.md 10 章 "NSTextView（プレインテキスト）で
@@ -55,8 +75,8 @@ struct PlainTextEditor: View {
                 Text(placeholder)
                     .font(.system(size: 13))
                     .foregroundStyle(Color(nsColor: .secondaryLabelColor))
-                    .padding(.top, 8)
-                    .padding(.leading, 11)
+                    .padding(.top, PlainTextEditorMetrics.textOriginY)
+                    .padding(.leading, PlainTextEditorMetrics.textOriginX)
                     .allowsHitTesting(false)
             }
         }
@@ -96,7 +116,11 @@ struct TextViewRepresentable: NSViewRepresentable {
         textView.isAutomaticSpellingCorrectionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
         textView.isAutomaticLinkDetectionEnabled = false
-        textView.textContainerInset = NSSize(width: 6, height: 6)
+        // Shared with the placeholder's own offset so the two cannot drift apart.
+        textView.textContainerInset = NSSize(
+            width: PlainTextEditorMetrics.containerInset.width,
+            height: PlainTextEditorMetrics.containerInset.height
+        )
 
         // Let the text container track the scroll view's width and grow vertically only, so long
         // lines wrap instead of requiring horizontal scrolling (plain-text notes, not code).

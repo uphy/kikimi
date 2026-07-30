@@ -1,4 +1,3 @@
-import MarkdownUI
 import SwiftUI
 
 // MARK: - WatchersTabView
@@ -7,12 +6,13 @@ import SwiftUI
 /// `docs/design/05-watcher-runner.md` §10.2).
 ///
 /// Renders every enabled Watcher (`items`, `MeetingWorkspaceViewModel.watcherItems`) as a sub-tab: a
-/// name button with a running/error badge, the latest view-template rendering as Markdown (reusing
-/// `SummaryTabView`'s `Theme.summary`), and a footer with a relative "N分前更新" timestamp / error
-/// message plus a manual "今すぐ実行" trigger. `kikimi-seg:` links produced by
-/// `WatcherViewRenderer.render(...)`'s seg-id linkification (§8.1) are intercepted via
-/// `.environment(\.openURL, ...)` and forwarded to `onOpenSegment` rather than being handed to the
-/// system (which has no handler for that scheme).
+/// name button with a running/error badge, the latest view-template rendering as Markdown
+/// (`MarkdownWebView`, `docs/design/39-webview-markdown.md`), and a footer with a relative "N分前更新"
+/// timestamp / error message, an `input_scope` badge (`WatcherPanelItem.inputScope`, so "how much of
+/// the meeting did this see?" is answerable without opening the definition), and a manual "今すぐ実行"
+/// trigger. `kikimi-seg:` links produced by `WatcherViewRenderer.render(...)`'s seg-id linkification
+/// (§8.1) are intercepted in the page and classified by `MarkdownLinkRouter`, then forwarded to
+/// `onOpenSegment` rather than being handed to the system (which has no handler for that scheme).
 ///
 /// Has **no compile-time dependency on `MeetingWorkspaceViewModel`** (same decoupling as
 /// `PrepContentView`/`TranscriptTabView`): `MeetingWorkspaceView` wires `viewModel.watcherItems`/
@@ -29,6 +29,9 @@ struct WatchersTabView: View {
     @Binding var selectedWatcherId: String?
     var onRunNow: (String) -> Void
     var onOpenSegment: (String) -> Void
+    /// The window-lifetime web view every sub-tab renders into
+    /// (`docs/design/39-webview-markdown.md` MD2).
+    @ObservedObject var markdownHost: MarkdownWebViewHost
 
     // MARK: Watchers management (`docs/design/05-watcher-runner.md` §10.3), forwarded verbatim to
     // `WatcherManagementSection`.
@@ -153,20 +156,19 @@ struct WatchersTabView: View {
     private func content(for item: WatcherPanelItem) -> some View {
         VStack(spacing: 0) {
             if let markdown = item.renderedMarkdown, !markdown.isEmpty {
-                ScrollView {
-                    Markdown(markdown)
-                        .markdownTheme(.summary)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding()
-                }
-                .environment(\.openURL, OpenURLAction { url in
-                    // `docs/design/05-watcher-runner.md` §10.4: the `kikimi-seg:` scheme is handled
-                    // entirely within this view -- it is never registered on `KikimiURLRoute`.
-                    guard url.scheme == "kikimi-seg" else { return .systemAction }
-                    onOpenSegment(url.absoluteString.replacingOccurrences(of: "kikimi-seg:", with: ""))
-                    return .handled
-                })
+                // `docKey` is per Watcher (`docs/design/39-webview-markdown.md` MD8): all the
+                // sub-tabs share one web view, so without it, switching from Watcher A to B would
+                // restore A's scroll position onto B's result.
+                //
+                // `kikimi-seg:` links no longer go through `.environment(\.openURL,)` — the page
+                // intercepts every click and `MarkdownLinkRouter` classifies it, which also keeps
+                // the scheme from ever reaching the system (design 05 §8.1).
+                MarkdownWebView(
+                    host: markdownHost,
+                    markdown: markdown,
+                    docKey: "watcher:\(item.id)",
+                    onOpenSegment: onOpenSegment
+                )
             } else {
                 WatcherNoResultPlaceholder()
             }
@@ -177,8 +179,17 @@ struct WatchersTabView: View {
     }
 
     private func footer(for item: WatcherPanelItem) -> some View {
-        HStack {
+        HStack(spacing: 6) {
             footerStatusText(for: item)
+            // Suppressed while an error is showing: that message is the one thing the reader needs
+            // there, and it already `lineLimit(1)`s in a narrow panel.
+            if !item.status.isError,
+               let scopeText = Self.inputScopeFooterText(lastRun: item.lastRunInputScope, definition: item.inputScope) {
+                Text("・対象: " + scopeText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
             Spacer()
             Button("今すぐ実行") {
                 onRunNow(item.id)
@@ -225,6 +236,45 @@ struct WatchersTabView: View {
                 managementSection
             }
             .padding()
+        }
+    }
+
+    /// The footer's whole `対象:` value, given the scope the displayed result was produced with
+    /// (`WatcherPanelItem.lastRunInputScope`, `nil` for a Watcher that has never run or whose last
+    /// run predates `watchers/<id>.run.json`) and the definition's current one
+    /// (`WatcherPanelItem.inputScope`, `nil` only for `origin: .missing`). Returns `nil` when there
+    /// is nothing truthful to say.
+    ///
+    /// When the two disagree -- the definition was edited after the last run -- both are shown as
+    /// `"<結果の scope>（次回: <定義の scope>）"`. Showing only the run's scope would look like an edit
+    /// hadn't taken effect; showing only the definition's would mislabel the result above it.
+    static func inputScopeFooterText(lastRun: WatcherInputScope?, definition: WatcherInputScope?) -> String? {
+        switch (lastRun, definition) {
+        case (nil, nil):
+            return nil
+        case (nil, .some(let definition)):
+            return inputScopeLabel(definition)
+        case (.some(let lastRun), nil):
+            return inputScopeLabel(lastRun)
+        case (.some(let lastRun), .some(let definition)):
+            guard lastRun != definition else { return inputScopeLabel(lastRun) }
+            return inputScopeLabel(lastRun) + "（次回: " + inputScopeLabel(definition) + "）"
+        }
+    }
+
+    /// One scope's label. Mirrors `SimpleWatcherFormSheet`'s picker labels
+    /// (`docs/design/34-simple-watchers.md` §6.2) -- every case starts with "サマリ" because the
+    /// summary is fed to the LLM on every run regardless of scope, so the only thing that varies is
+    /// the number of verbatim segments appended. `internal` (not `private`) purely so
+    /// `WatchersTabFooterTests` can pin the wording.
+    static func inputScopeLabel(_ inputScope: WatcherInputScope) -> String {
+        switch inputScope {
+        case .summary:
+            return "サマリのみ"
+        case .summaryAndRecent(let count):
+            return "サマリ + 直近\(count)発言"
+        case .fullRefined:
+            return "サマリ + 全発言"
         }
     }
 

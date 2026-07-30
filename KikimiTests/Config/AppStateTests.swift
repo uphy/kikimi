@@ -267,12 +267,45 @@ struct AppStateTests {
 
     // MARK: - MeetingWorkspaceTab/MeetingPaneMode migration (docs/design/17-session-window-redesign.md §4.3)
 
-    @Test("MeetingWorkspaceTab.allCases has exactly 3 cases with the redesigned Japanese titles")
-    func meetingWorkspaceTabHasThreeCasesWithJapaneseTitles() {
-        #expect(MeetingWorkspaceTab.allCases == [.prep, .meeting, .watchers])
+    @Test("MeetingWorkspaceTab.allCases has exactly 4 cases with the redesigned Japanese titles")
+    func meetingWorkspaceTabHasFourCasesWithJapaneseTitles() {
+        #expect(MeetingWorkspaceTab.allCases == [.prep, .meeting, .watchers, .chat])
         #expect(MeetingWorkspaceTab.prep.title == "準備")
         #expect(MeetingWorkspaceTab.meeting.title == "会議")
         #expect(MeetingWorkspaceTab.watchers.title == "Watchers")
+        #expect(MeetingWorkspaceTab.chat.title == "チャット")
+    }
+
+    @Test("restores active_tab: chat instead of silently falling back to 準備")
+    func restoresChatActiveTab() throws {
+        // `docs/design/38-session-chat.md` §8.1(d): `WorkspaceWindowState.init(from:)` is a
+        // hand-written `switch`, so adding the enum case alone would leave `chat` landing in
+        // `default:` and every reopen showing 準備.
+        let dir = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let sampleYAML = """
+        windows:
+          - session_id: session-a
+            x: 100
+            y: 100
+            width: 800
+            height: 600
+            visible: true
+            active_tab: chat
+
+        session_list_window:
+          x: 100
+          y: 750
+          width: 500
+          height: 400
+          visible: false
+        """
+        try sampleYAML.write(to: fileURL(in: dir), atomically: true, encoding: .utf8)
+
+        let appState = makeAppState(in: dir)
+        #expect(!appState.loadFailed)
+        #expect(try #require(appState.windowState(for: "session-a")).activeTab == .chat)
     }
 
     @Test("migrates old active_tab: transcript to activeTab: .meeting, meetingPaneMode: .transcript")

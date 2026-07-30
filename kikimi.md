@@ -93,10 +93,12 @@ macOS メニューバー + フローティングパネル型の会議書き起�
 │       ├── participants.json      # 参加者ヒント（声紋照合のクローズドセット名簿。docs/design/22）
 │       ├── summary.state.json     # サマリ内部 state（JSON、patch を適用して更新）
 │       ├── summary.md             # view template でレンダリング済み（上書き）
+│       ├── chat.jsonl             # チャットタブの質問と回答（追記。docs/design/38）
 │       └── watchers/
 │           ├── enabled.yaml       # このセッションで有効な Watcher ID 一覧
 │           ├── <id>.md            # session-local Watcher（preset を fork した場合もここ）
-│           └── <id>.state.json    # 各 Watcher の実行状態
+│           ├── <id>.state.json    # 各 Watcher の実行状態
+│           └── <id>.run.json      # 最終実行の時刻と input_scope（docs/design/05 §7.2）
 └── plugins/                       # 予約
 
 ~/.config/kikimi/
@@ -865,12 +867,12 @@ Kikimi の UI は以下の3ウィンドウ種別で構成される。全てフ�
 `docs/design/17-session-window-redesign.md`）。
 
 - **Draft（未録音）**: タブバーを出さず、**準備専用画面**（事前メモ + 折りたたみの詳細オプション）
-- **Recording / Paused / Ended**: **3 タブ**（`準備 / 会議 / Watchers`）
+- **Recording / Paused / Ended**: **4 タブ**（`準備 / 会議 / Watchers / チャット`）
 
 ```
-Draft（準備専用画面）                    Recording 以降（3タブ）
+Draft（準備専用画面）                    Recording 以降（4タブ）
 ┌──────────────────────────────┐       ┌──────────────────────────────────┐
-│ 無題の会議 ✎      [● 録音開始] │       │ [ 準備 ] [ 会議 ] [ Watchers ]     │
+│ 無題の会議 ✎      [● 録音開始] │       │ [準備][会議][Watchers][チャット]   │
 ├──────────────────────────────┤       ├──────────────────────────────────┤
 │ 事前メモ                      │       │ デイリースクラム [■][⏹] 25:12       │
 │ ┌──────────────────────────┐ │       ├───────────────────────[▤|▥|▦]───┤
@@ -939,6 +941,12 @@ Draft（準備専用画面）                    Recording 以降（3タブ）
 - **更新ドット**: サマリペインが見えていない間にサマリが更新されたら、セグメントの
   「サマリのみ表示」アイコンにドットを出す
 - seg ID クリックのジャンプ先はこのタブの書き起こしペイン（サマリのみ表示中は「両方」に切り替わる）
+- **Markdown コピー**（詳細設計は `docs/design/37-transcript-markdown-copy.md`）: ツールバー左端の
+  コピーボタンで、11 章の Wiki export と同一形式の Markdown をクリップボードへ書き出す。
+  クリックで全体（frontmatter + サマリ + 書き起こし）、ドロップダウンで
+  `書き起こしのみ / サマリのみ` を選べる。ショートカットは **⌘⇧C**（⌘C は書き起こし行の
+  テキスト選択コピーが使うため奪わない）。書き起こしの各行にもホバーで出るコピーボタンがあり、
+  その 1 行だけをコピーできる
 
 **Watchers タブ**
 
@@ -950,6 +958,21 @@ Draft（準備専用画面）                    Recording 以降（3タブ）
 - 「今すぐ実行」ボタンで手動トリガ
 - **管理 UI（有効化・新規作成・プリセットから追加・編集・fork・削除・プリセット昇格）もこのタブに置く**（9 章参照）。
   空状態では「この会議で追跡したい観点を追加できます」の説明とともに管理 UI を直接表示する
+
+**チャットタブ**
+
+その場で思いついたことをこの会議の会話について 1 回聞くための経路（詳細設計は
+`docs/design/38-session-chat.md`）。Watcher が「あらかじめ決めた観点を継続的に見る」のに対して、
+チャットは ad-hoc な単発の質問を受け持つ。
+
+- 質問と回答の履歴は下が最新の 1 列。入力欄は複数行で、**⌘⏎ で送信**（⏎ は改行）
+- コンテキストはセッション全体（整形済み書き起こし + サマリ）。`chat.max_context_chars` を超える
+  長い会議では**サマリ + 直近の会話**へ自動で降格し、その回答の上に理由を注記する
+- 直近数ターンを踏まえた追い質問ができる。回答ごとにコピーボタン
+- 録音の状態に依存しない。会議終了後に聞き直すのがむしろ主用途
+- コストは既存のセッション別 LLM 課金集計（`docs/design/16-llm-usage-stats.md`）に `chat` として乗り、
+  ヘッダのコストバッジに「チャット」の行が出る
+- 読むだけで、話者リネームやサマリ更新などの副作用は持たない
 
 ### Session List ウィンドウ
 
@@ -975,6 +998,8 @@ Draft（準備専用画面）                    Recording 以降（3タブ）
 - 検索は今のところタイトルのみ（全文検索は将来）
 - **「複製して新規セッション」** で context.md / summary_template.md を初期値に使った Draft ウィンドウを開ける（繰り返し会議の主導線）
 - **「+ 新規」** はデフォルト context を持つ Draft ウィンドウを開く
+- 右クリックメニューの **「Markdown をコピー」** で、ウィンドウを開かずに 11 章と同一形式の
+  Markdown をコピーできる（単一選択時のみ。`docs/design/37-transcript-markdown-copy.md`）
 
 ### フローティング挙動
 
@@ -1050,17 +1075,20 @@ tags: [meeting, transcript]
 
 ## 書き起こし
 
-**14:30:05 (mic)** 次のスプリントで対応します。
+**14:30:05 自分** 次のスプリントで対応します。
 
-**14:30:08 (system)** 了解しました。
+**14:30:08 田中** 了解しました。
 
 ...
 ```
 
 - **Frontmatter は export 側を正とする**（固定キー: `date` / `duration` / `source` / `session_id` / `tags`）。summary.md 側は frontmatter を含めない前提なので二重にはならない
 - タイトルは meta.json の最終タイトル
-- 書き起こしは refined 版を優先、**refined_text が null の場合は raw_text にフォールバック**（欠落を作らない。フォールバックした行にはマーカーを付けてトレーサビリティを保つ）
+- **話者列は話者分離の表示名**（`自分` / 実名 / `Speaker N` / `A + B`）。話者分離が無効・未稼働の区間は `system` になる。詳細な写像は `docs/design/37-transcript-markdown-copy.md` §4.2
+- **中身のないセクションは見出しごと省く**（サマリ未生成なら `## サマリ` を出さない）
+- 書き起こしは refined 版を優先、**refined_text が null の場合は raw_text にフォールバック**（欠落を作らない。フォールバックした行にはマーカーを付けてトレーサビリティを保つ）。**まだ整形されていないセグメントも同じマーカー付きで出す**
 - **refined_text が空文字（意味なしと判定され削除されたセグメント。7 章）の行は export に含めない**（フォールバックもしない）
+- 会議終了時の export は**整形の drain 完了後にもう一度実行して上書きする**（末尾の端数バッチが未整形のまま残らないようにするため。`docs/design/37-transcript-markdown-copy.md` §5.1）
 
 ---
 
@@ -1163,6 +1191,16 @@ watchers:
   # Watcher 実行のモデル既定値（Watcher frontmatter で上書き可）
   default_model: claude-haiku-4-5-20251001
 
+chat:
+  # チャットタブ（会話への ad-hoc 質問）のモデル
+  model: claude-haiku-4-5-20251001
+  # プロンプト全体（書き起こし + サマリ + 質問 + 会話履歴）の文字数上限。
+  # 超えるとサマリ + 直近セグメントへ自動降格する
+  max_context_chars: 120000
+  # プロンプトに載せる過去ターン数（画面の履歴は切り詰めない）
+  history_turns: 6
+  timeout_seconds: 180
+
 export:
   enabled: true
   target_dir: ~/Documents/Kikimi/export/
@@ -1234,10 +1272,18 @@ Chirami のアーキテクチャを踏襲する。
 | swift-sdk (Anthropic) or 自前 HTTP クライアント | Claude API |
 | HotKey（将来） | グローバルホットキー |
 
-**JS（採用するなら）**
+**JS（`web/`。詳細は `docs/design/39-webview-markdown.md`）**
 
-- サマリ・書き起こしプレビューを WKWebView にする場合は Chirami の editor-web を参考に最小構成を組む
-- MVP では SwiftUI Markdown プレビュー（`AttributedString` or `MarkdownUI`）で十分な可能性
+| ライブラリ | 用途 |
+|-----------|------|
+| markdown-it | Markdown → HTML（GFM テーブル・タスクリスト・脚注） |
+| highlight.js | コードブロックのシンタックスハイライト |
+| mermaid | 図の描画（` ```mermaid ` があるときだけ遅延ロード） |
+| esbuild / TypeScript / vitest | ビルドと単体テスト |
+
+サマリ・Watchers・チャットの Markdown 表示は WKWebView で描画する（MVP では MarkdownUI を使っていたが、
+mermaid が描けずコードハイライトも無いため置き換えた）。**編集**（準備タブ・Watcher 定義）は `NSTextView`
+のまま。生成物は `Kikimi/Resources/editor/`（git 管理外、`mise run build:web` が生成）
 
 ### Xcode プロジェクト
 

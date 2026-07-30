@@ -228,4 +228,60 @@ struct ClaudeCLIBackendTests {
         #expect(await runner.lastStdin == "user prompt")
         #expect(await runner.lastTimeout == .seconds(42))
     }
+
+    // MARK: - stdin assembly with messages (38-session-chat.md section 4.1)
+
+    @Test("buildStdin returns the user prompt untouched when messages is nil")
+    func buildStdinLeavesSingleShotRequestsAlone() {
+        // Every pre-chat consumer (refinement / summary / title / watcher / dictation) lands here.
+        #expect(ClaudeCLIBackend.buildStdin(request: makeRequest()) == "user prompt")
+    }
+
+    @Test("buildStdin returns the user prompt untouched for an empty messages array")
+    func buildStdinLeavesEmptyMessagesAlone() {
+        var request = makeRequest()
+        request.messages = []
+        #expect(ClaudeCLIBackend.buildStdin(request: request) == "user prompt")
+    }
+
+    @Test("buildStdin folds prior turns into Q:/A: blocks, oldest first, question last")
+    func buildStdinFoldsPriorTurns() {
+        var request = makeRequest()
+        request.user = "決まったことは？"
+        request.messages = [
+            LLMMessage(role: .user, text: "# 会議\n書き起こし本文"),
+            LLMMessage(role: .assistant, text: "読みました。"),
+            LLMMessage(role: .user, text: "前半の論点は？"),
+            LLMMessage(role: .assistant, text: "- 価格\n- 納期")
+        ]
+
+        #expect(ClaudeCLIBackend.buildStdin(request: request) == """
+        Q: # 会議
+        書き起こし本文
+
+        A: 読みました。
+
+        Q: 前半の論点は？
+
+        A: - 価格
+        - 納期
+
+        Q: 決まったことは？
+        """)
+    }
+
+    @Test("complete(_:) sends the folded conversation, not just the latest question, on stdin")
+    func completeSendsFoldedConversationOnStdin() async throws {
+        let runner = FakeProcessRunner(stdoutToReturn: makeCLIResponseLine())
+        let backend = ClaudeCLIBackend(runner: runner)
+        var request = makeRequest()
+        request.messages = [
+            LLMMessage(role: .user, text: "context"),
+            LLMMessage(role: .assistant, text: "ack")
+        ]
+
+        _ = try await backend.complete(request)
+
+        #expect(await runner.lastStdin == "Q: context\n\nA: ack\n\nQ: user prompt")
+    }
 }

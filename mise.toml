@@ -1,3 +1,7 @@
 [tools]
+# `web/` (docs/design/39-webview-markdown.md §9) is built with npm + esbuild. Pinned so every
+# machine resolves the same lockfile: `web/package-lock.json` is written by npm 11, which ships
+# with Node 24 and up.
+node = "24"
 swiftlint = "0.63.2"
 xcodegen = "2.44.1"

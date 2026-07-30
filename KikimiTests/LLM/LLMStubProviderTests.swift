@@ -100,6 +100,35 @@ struct LLMStubProviderTests {
         }
     }
 
+    // MARK: - "chat" builtin default (38-session-chat.md CH11b)
+
+    private struct ChatAnswerPayload: Decodable, Sendable, Equatable {
+        var answer: String
+    }
+
+    @Test("stubResult answers the \"chat\" stubKey from builtinDefaults with no override file")
+    func stubResultUsesBuiltinDefaultForChat() throws {
+        // Without this entry, every chat send under KIKIMI_STUB_LLM=1 (verify-smoke, kikimi-verify)
+        // would throw missingStructuredOutput.
+        let provider = LLMStubProvider(environment: ["KIKIMI_STUB_LLM": "1"])
+
+        let result: LLMResult<ChatAnswerPayload> = try provider.stubResult(for: makeRequest(stubKey: "chat"))
+
+        #expect(result.value.answer.hasPrefix("[stub]"))
+        #expect(result.usage == .zero)
+    }
+
+    @Test("an override file entry for \"chat\" wins over the built-in default")
+    func overrideFileWinsOverBuiltinDefaultForChat() throws {
+        let file = try writeOverridesFile(["chat": "{\"answer\":\"overridden\"}"])
+        defer { try? FileManager.default.removeItem(at: file) }
+        let provider = LLMStubProvider(environment: ["KIKIMI_STUB_LLM": "1", "KIKIMI_STUB_LLM_FILE": file.path])
+
+        let result: LLMResult<ChatAnswerPayload> = try provider.stubResult(for: makeRequest(stubKey: "chat"))
+
+        #expect(result.value == ChatAnswerPayload(answer: "overridden"))
+    }
+
     private struct RefinementResponse: Decodable, Sendable, Equatable {
         struct Item: Decodable, Sendable, Equatable {
             var id: String

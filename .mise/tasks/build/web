@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+#MISE description="web/ の Markdown レンダラをビルド (Kikimi/Resources/editor)"
+#MISE sources=["web/src/**/*", "web/index.html", "web/package.json", "web/scripts/**/*"]
+#MISE outputs=["Kikimi/Resources/editor/bundle.js"]
+set -euo pipefail
+
+# `npm ci` needs the network, which `mise run build` never did before. Skipping it when
+# node_modules is already present keeps offline rebuilds working (docs/design/39-webview-markdown.md
+# §7): the only thing that requires a fresh install is a changed lockfile.
+if [ ! -d web/node_modules ]; then
+  echo "Installing web dependencies (npm ci)..."
+  npm ci --prefix web --no-audit --no-fund
+fi
+
+npm run build --prefix web

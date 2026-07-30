@@ -31,7 +31,7 @@ kikimi.md 15 章 Open Question「Watcher 実行のコスト計算表示: 会議�
 
 | フィールド | 説明 |
 |---|---|
-| `purpose` | `LLMRequest.stubKey` を流用（`refinement` / `summary_patch` / `final_title` / …）。stubKey は元々スタブ振り分けキーだが、値が用途そのものなので兼用する。無ければ `"unknown"` |
+| `purpose` | `LLMRequest.stubKey` を流用（`refinement` / `summary_patch` / `final_title` / `dictation` / `chat` / …）。stubKey は元々スタブ振り分けキーだが、値が用途そのものなので兼用する。無ければ `"unknown"`。表示名は `LLMUsageBadge.displayLabel(forPurpose:)` が持ち、未知のキーは生値のまま出す |
 | `input_tokens` | **uncached input**（cache read / creation を含まない）。Anthropic の usage 意味論に統一する |
 | `cache_read_input_tokens` | prompt cache ヒット分 |
 | `cache_creation_input_tokens` | prompt cache 書き込み分（OpenAI 互換は常に 0） |

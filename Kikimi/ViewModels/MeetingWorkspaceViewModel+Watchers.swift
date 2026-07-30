@@ -1,54 +1,5 @@
 import Foundation
 
-// MARK: - WatcherPanelItem
-
-/// One Watchers-tab sub-tab / Prep-tab management row's worth of live state
-/// (`docs/design/05-watcher-runner.md` §2.5). Built and kept live entirely by
-/// `MeetingWorkspaceViewModel+Watchers.swift` -- the core `Kikimi/Watchers/` engine (`WatcherRunner`/
-/// `WatcherLibrary`) has no notion of this type; it only vends the lower-level `WatcherEvent`/
-/// `WatcherOrigin` this file consumes to build it.
-struct WatcherPanelItem: Sendable, Identifiable, Equatable {
-    var id: String
-    var name: String
-    var origin: WatcherOrigin
-    /// Whether this row's definition desugars from a `kind: simple` file
-    /// (`docs/design/34-simple-watchers.md` §6.3), set by `refreshWatcherItems()` from
-    /// `definition.simpleSpec != nil`. Drives the Prep tab's edit routing (simple form vs. text
-    /// editor); always `false` for `origin: .missing` since there's no definition to inspect.
-    var isSimple: Bool
-    /// The latest view-template rendering, `nil` until either the initial LLM-free render
-    /// (`refreshWatcherItems()`) or a first `WatcherEvent.Kind.finished` populates it.
-    var renderedMarkdown: String?
-    var status: Status
-    var lastRunAt: Date?
-
-    enum Status: Sendable, Equatable {
-        case idle
-        case running
-        case error(String)
-    }
-}
-
-// MARK: - SimpleWatcherSpecDraft
-
-/// The simple form's id-less input surface (`docs/design/34-simple-watchers.md` §6.3):
-/// `SimpleWatcherSpec` minus `id`, which `createSimpleWatcher(_:)` generates on the caller's behalf.
-/// `model` isn't exposed as a form field (§6.2) but is carried through so an existing hand-authored
-/// `model:` isn't silently dropped by an edit -- see `updateSimpleWatcher(id:_:)`'s doc comment.
-struct SimpleWatcherSpecDraft: Sendable, Equatable {
-    var name: String
-    var model: String?
-    var prompt: String
-    var trigger: WatcherTrigger
-    var inputScope: WatcherInputScope
-
-    /// Attaches `id` to complete a `SimpleWatcherSpec` -- shared by `createSimpleWatcher(_:)` (a
-    /// freshly generated id) and `updateSimpleWatcher(id:_:)` (an existing one).
-    func spec(id: String) -> SimpleWatcherSpec {
-        SimpleWatcherSpec(id: id, name: name, model: model, trigger: trigger, inputScope: inputScope, prompt: prompt)
-    }
-}
-
 // MARK: - MeetingWorkspaceViewModel + Watchers (`docs/design/05-watcher-runner.md` §10.1)
 
 /// Split into its own file (alongside `MeetingWorkspaceViewModel.swift`'s other extensions, e.g.
@@ -117,6 +68,7 @@ extension MeetingWorkspaceViewModel {
                     name: definition.name,
                     origin: resolved.origin,
                     isSimple: definition.simpleSpec != nil,
+                    inputScope: definition.inputScope,
                     renderedMarkdown: previous?.renderedMarkdown,
                     status: previous?.status ?? .idle,
                     lastRunAt: previous?.lastRunAt
@@ -127,6 +79,10 @@ extension MeetingWorkspaceViewModel {
                     name: previous?.name ?? id,
                     origin: .missing,
                     isSimple: false,
+                    // Not carried over from `previous`: an id that no longer resolves has no
+                    // definition to read a scope from, and showing the last-known one would claim
+                    // knowledge about a run that can no longer happen.
+                    inputScope: nil,
                     renderedMarkdown: previous?.renderedMarkdown,
                     status: .error("Watcher定義が見つからないか、解析に失敗しました。"),
                     lastRunAt: previous?.lastRunAt
@@ -165,7 +121,41 @@ extension MeetingWorkspaceViewModel {
         }
         guard let state = persisted ?? definition.initialState else { return }
         guard let rendered = WatcherViewRenderer.render(state: state, schema: definition.schema, template: definition.view) else { return }
-        updateWatcherItem(id: id) { $0.renderedMarkdown = rendered }
+
+        // Recovers when the displayed result was produced, and from what. Without this a reopened
+        // session (any Ended meeting, or any window opened from the session list) rendered a real
+        // result under a "未実行" footer, since `lastRunAt` otherwise only ever comes from a live
+        // `WatcherEvent.finished(at:)` this process observed itself.
+        //
+        // Deliberately skipped when `persisted == nil`: `rendered` then came from the definition's
+        // `initial_state`, which really has never been run, and any record on disk would describe a
+        // run whose output is no longer what's on screen.
+        let lastRun = persisted == nil ? nil : await lastRunMetadata(for: id)
+        updateWatcherItem(id: id) {
+            $0.renderedMarkdown = rendered
+            // Never overwrites what a live `.finished` already told us -- that is the run itself
+            // reporting, while this is reconstructed after the fact.
+            if $0.lastRunAt == nil, let lastRun {
+                $0.lastRunAt = lastRun.finishedAt
+                $0.lastRunInputScope = lastRun.inputScope
+            }
+        }
+    }
+
+    /// The last run's timestamp and `input_scope` for `id`, preferring `watchers/<id>.run.json`
+    /// (`WatcherRunRecord`, written by every run since `docs/design/05-watcher-runner.md` §7.2) and
+    /// falling back to `watchers/<id>.state.json`'s mtime for results produced before that file
+    /// existed. The fallback can only supply the timestamp -- the scope stays `nil`, and the footer
+    /// then describes the definition's current value alone.
+    ///
+    /// The mtime is a faithful proxy: `state.json` is written exactly once per successful run and
+    /// never touched otherwise.
+    private func lastRunMetadata(for id: String) async -> (finishedAt: Date, inputScope: WatcherInputScope?)? {
+        if let record = try? await sessionHandle.readJSON(.watcherRunRecord(id: id), as: WatcherRunRecord.self) {
+            return (record.finishedAt, record.inputScope)
+        }
+        guard let mtime = try? await sessionHandle.modificationDate(of: .watcherState(id: id)) else { return nil }
+        return (mtime, nil)
     }
 
     private func updateWatcherItem(id: String, _ mutate: (inout WatcherPanelItem) -> Void) {
@@ -183,11 +173,12 @@ extension MeetingWorkspaceViewModel {
         switch event.kind {
         case .started:
             updateWatcherItem(id: event.watcherId) { $0.status = .running }
-        case .finished(let renderedMarkdown, let at):
+        case .finished(let renderedMarkdown, let at, let inputScope):
             updateWatcherItem(id: event.watcherId) {
                 $0.renderedMarkdown = renderedMarkdown
                 $0.status = .idle
                 $0.lastRunAt = at
+                $0.lastRunInputScope = inputScope
             }
         case .failed(let message):
             updateWatcherItem(id: event.watcherId) { $0.status = .error(message) }
@@ -320,6 +311,11 @@ extension MeetingWorkspaceViewModel {
             try await sessionHandle.deleteFile(.watcherState(id: id))
         } catch {
             logger.error("Failed to delete watchers/\(id, privacy: .public).state.json: \(String(describing: error), privacy: .public)")
+        }
+        do {
+            try await sessionHandle.deleteFile(.watcherRunRecord(id: id))
+        } catch {
+            logger.error("Failed to delete watchers/\(id, privacy: .public).run.json: \(String(describing: error), privacy: .public)")
         }
         var ids = (try? await sessionHandle.readEnabledWatchers()) ?? []
         ids.removeAll { $0 == id }
@@ -529,46 +525,5 @@ extension MeetingWorkspaceViewModel {
 
         schema に沿った更新後の JSON を返してください。
         """
-    }
-}
-
-// MARK: - LocalWatcherCreationError
-
-/// Failure modes for `MeetingWorkspaceViewModel.createLocalWatcher(id:)`.
-enum LocalWatcherCreationError: LocalizedError, Equatable, Sendable {
-    case invalidId(String)
-    case alreadyExists(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .invalidId(let id):
-            return "無効なWatcher IDです: \"\(id)\"（英数字とハイフンのみ使用できます）"
-        case .alreadyExists(let id):
-            return "Watcher \"\(id)\" は既に存在します。"
-        }
-    }
-}
-
-// MARK: - SimpleWatcherConversionError
-
-/// Failure modes for `MeetingWorkspaceViewModel.convertSimpleWatcherToFull(id:)`
-/// (`docs/design/34-simple-watchers.md` §7). Both cases mean the on-disk `.md` was left untouched.
-enum SimpleWatcherConversionError: LocalizedError, Equatable, Sendable {
-    /// The generated full-format text failed to parse. `detail` is the underlying parse error's own
-    /// `errorDescription` (or a `String(describing:)` fallback), not a hardcoded cause -- §7 asks for
-    /// a "汎用形" message that surfaces whatever actually went wrong.
-    case parseFailed(detail: String)
-    /// The generated text parsed cleanly but its `WatcherDefinition` (minus `simpleSpec`) doesn't
-    /// match `spec.desugar()`. The only known cause is a `# `-prefixed line in the prompt colliding
-    /// with the `# System`/`# User` section split (§8.2).
-    case roundTripMismatch
-
-    var errorDescription: String? {
-        switch self {
-        case .parseFailed(let detail):
-            return "詳細形式への変換に失敗しました: \(detail)"
-        case .roundTripMismatch:
-            return "プロンプトに \"# \" で始まる行が含まれているため変換できません。行頭の \"#\" を減らすか削除してください。"
-        }
     }
 }

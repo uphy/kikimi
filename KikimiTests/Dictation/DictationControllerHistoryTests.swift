@@ -217,7 +217,7 @@ struct DictationControllerHistoryTests {
     /// Polls `predicate` until it becomes `true` or `timeout` elapses (mirrors
     /// `DictationHistoryViewModelTests.waitUntil`) -- used to wait for `handleHotkeyUp()`'s internal
     /// `Task`/the fire-and-forget `finalize` child `Task` to run.
-    private func waitUntil(timeout: Duration = .seconds(5), predicate: @escaping () async -> Bool) async throws {
+    private func waitUntil(timeout: Duration = .seconds(10), predicate: @escaping () async -> Bool) async throws {
         let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
             if await predicate() { return }

@@ -97,7 +97,10 @@ struct ClaudeCLIProcessRunnerTests {
             isExecutableFile: { _ in true },
             whichResolver: { nil }
         )
-        let stdout = try await runner.run(arguments: ["hello world"], stdin: "", timeout: .seconds(5))
+        // 60s, not 5s: the timeout is incidental here -- what is under test is that stdout comes
+        // back. A loaded CI runner can take seconds just to spawn /bin/echo, and this test used to
+        // fail with `timedOut` there, which said nothing about the behaviour it was written for.
+        let stdout = try await runner.run(arguments: ["hello world"], stdin: "", timeout: .seconds(60))
         #expect(stdout == "hello world\n")
     }
 
@@ -115,7 +118,8 @@ struct ClaudeCLIProcessRunnerTests {
         let stdout = try await runner.run(
             arguments: ["-c", "yes x | head -c 200000"],
             stdin: "",
-            timeout: .seconds(10)
+            // Incidental, like above: the claim is "does not deadlock", not "finishes within 10s".
+            timeout: .seconds(60)
         )
         #expect(stdout.utf8.count == 200_000)
     }
@@ -128,8 +132,69 @@ struct ClaudeCLIProcessRunnerTests {
             whichResolver: { nil }
         )
         await #expect(throws: LLMClientError.processFailed(exitCode: 3, stderr: "boom\n")) {
-            _ = try await runner.run(arguments: ["-c", "echo boom 1>&2; exit 3"], stdin: "", timeout: .seconds(5))
+            _ = try await runner.run(arguments: ["-c", "echo boom 1>&2; exit 3"], stdin: "", timeout: .seconds(60))
         }
+    }
+
+    // MARK: - Large stdin (38-session-chat.md section 8.1(a) / CH20)
+
+    @Test("run(_:) delivers a stdin payload several times larger than the pipe buffer")
+    func runDeliversLargeStdin() async throws {
+        // A macOS pipe buffers at most 64KB, so this only completes if the write happens off the
+        // calling task while `cat` drains the pipe. Chat prompts are routinely this size
+        // (`chat.max_context_chars: 120000` is ~360KB in Japanese UTF-8).
+        let runner = ClaudeCLIProcessRunner(
+            claudePathOverride: "/bin/cat",
+            isExecutableFile: { _ in true },
+            whichResolver: { nil }
+        )
+        let payload = String(repeating: "あ", count: 100_000)
+
+        let stdout = try await runner.run(arguments: [], stdin: payload, timeout: .seconds(30))
+
+        #expect(stdout == payload)
+    }
+
+    @Test("run(_:) still times out when the child never reads a stdin payload past the pipe buffer")
+    func runTimesOutOnLargeStdinChildNeverReads() async throws {
+        // The regression this guards: with a synchronous `write`, the >64KB payload blocks before
+        // the timeout race is even armed, so `run` hangs forever instead of returning `.timedOut`.
+        // `sleep` never reads stdin, which is exactly how a wedged `claude` process behaves.
+        let runner = ClaudeCLIProcessRunner(
+            claudePathOverride: "/bin/sleep",
+            isExecutableFile: { _ in true },
+            whichResolver: { nil }
+        )
+        let start = ContinuousClock.now
+        await #expect(throws: LLMClientError.timedOut(.milliseconds(300))) {
+            _ = try await runner.run(
+                arguments: ["120"],
+                stdin: String(repeating: "あ", count: 100_000),
+                timeout: .milliseconds(300)
+            )
+        }
+        // The child sleeps 120s; returning inside 30 proves the timeout fired rather than the sleep
+        // completing. The bound is deliberately loose -- what matters is the order of magnitude
+        // between "timed out" and "waited it out", not the exact latency of the SIGKILL escalation.
+        // A tight bound (this was 5s) only measures how loaded the machine is.
+        #expect(ContinuousClock.now - start < .seconds(30))
+    }
+
+    @Test("run(_:) survives a child that exits without reading its stdin (EPIPE, not SIGPIPE)")
+    func runSurvivesChildExitingWithoutReadingStdin() async throws {
+        // Writing to a pipe whose reader is gone raises SIGPIPE, which would kill this whole test
+        // process if the runner did not set it to SIG_IGN before launching children.
+        let runner = ClaudeCLIProcessRunner(
+            claudePathOverride: "/bin/sh",
+            isExecutableFile: { _ in true },
+            whichResolver: { nil }
+        )
+        let stdout = try await runner.run(
+            arguments: ["-c", "echo done"],
+            stdin: String(repeating: "あ", count: 100_000),
+            timeout: .seconds(10)
+        )
+        #expect(stdout == "done\n")
     }
 
     @Test("run(_:) times out, kills the child, and returns promptly rather than hanging")
@@ -141,12 +206,15 @@ struct ClaudeCLIProcessRunnerTests {
         )
         let start = ContinuousClock.now
         await #expect(throws: LLMClientError.timedOut(.milliseconds(200))) {
-            _ = try await runner.run(arguments: ["30"], stdin: "", timeout: .milliseconds(200))
+            _ = try await runner.run(arguments: ["120"], stdin: "", timeout: .milliseconds(200))
         }
         let elapsed = ContinuousClock.now - start
         // Must return once the SIGTERM/grace-period/SIGKILL escalation completes and the child is
-        // reaped -- nowhere near its full 30s sleep. Proves the child was actually killed, not
+        // reaped -- nowhere near its full 120s sleep. Proves the child was actually killed, not
         // merely abandoned (which would leak a zombie/orphan process).
-        #expect(elapsed < .seconds(5))
+        //
+        // 30s against a 120s sleep: a 4x margin, so the assertion still fails if the child is left
+        // to run out but survives a machine several times slower than this one.
+        #expect(elapsed < .seconds(30))
     }
 }

@@ -105,6 +105,16 @@ enum WikiExportRenderer {
 /`readRefinedSegments()`/`readText(.summaryMarkdown)` を読む → `WikiExportRenderer.render(_:)`/
 `fileName(for:)` を呼ぶ → `target_dir` をチルダ展開してディレクトリ作成 → atomic write。
 
+**改訂（`docs/design/37-transcript-markdown-copy.md`）**: 上記の `WikiExportRenderer` インターフェースは
+旧記述（履歴として残す）。`Input` / `render(_:)` / `displayText(for:)` / `wallClockDate(...)` /
+`durationLabel(...)` はコピー機能との共有化に伴い削除され、`TranscriptMarkdownRenderer.render(_:scope:
+.full)`（`Kikimi/Markdown/TranscriptMarkdownRenderer.swift`）へ移設された。`WikiExportRenderer` に残る
+のは `fileName(for:)` / `slug(from:)` のみ。`WikiExporter` は `ExportConfig` に加えて
+**`TranscriptMarkdownSource`**（`VoiceprintStore` + `DiarizationConfig` を保持するディスクアダプタ、
+同設計 §3.2(b)）を持つようになり、書き起こし行の話者列を `(mic)`/`(system)` ではなく画面と同じ表示名で
+出す。レンダリング仕様の詳細（frontmatter・話者表記・行の除外規則）は §4.3 ではなく
+`docs/design/37-transcript-markdown-copy.md` §4 を正とする。
+
 ## 4. レンダリング仕様
 
 kikimi.md 11 章のサンプルと同じ形（frontmatter → `# title` → `## サマリ` → `## 書き起こし`）を
@@ -139,6 +149,10 @@ tags: [meeting, transcript]
   Draft-only セッションは空文字のまま埋め込む。空 export 自体は許容する）
 
 ### 4.3 書き起こし
+
+**本節は `docs/design/37-transcript-markdown-copy.md` §4 に委譲された（改訂）**。話者列は `(mic|system)`
+ではなく画面と同じ表示名になり、空セクションの省略・未整形セグメントの `*(raw)*` 統合などのレンダリング
+規則も同設計が正。以下は改訂前の元記述（履歴として残す）。
 
 1 セグメント = `**HH:MM:SS (mic|system)** text` の 1 行、行間 1 空行。
 
@@ -197,7 +211,7 @@ export:
 | ファイル書き込みに失敗 | 同上 |
 | `summary.md` が存在しない（Draft のまま一度も録音していない、または一度も summary 更新が走らなかった Ended） | 空文字として `## サマリ` セクションに埋め込む（欠落ではなく空扱い） |
 | `readRefinedSegments()` が読み取りエラー | throw され `endMeeting()` 側でログのみ。書き起こしセクションが丸ごと欠けた export になり得る（次回 export（=同一セッションの再終了）で回復し得る） |
-| **末尾の未整形分（`RefinementQueue.flush()`/`drain()` が `endMeeting()` 内で fire-and-forget のため、export 実行時点でまだ `refined.jsonl` に反映されていない seg）** | **既知の制約**: 本 export は `transcript.jsonl` にフォールバックしない（§4.3 の設計判断）。そのため `on_session_end` の一瞬後に drain が完了する最後の数セグメントが export から漏れる場合がある。再度セッションを終了させれば（`reopenRecording()` → `endMeeting()`、冪等に上書き）そのときまでに `refined.jsonl` へ追記された分を含めて再生成できる。将来 Ended セッションの手動再 export ボタン（12 章 Open Questions）で緩和し得る |
+| **末尾の未整形分（`RefinementQueue.flush()`/`drain()` が `endMeeting()` 内で fire-and-forget のため、export 実行時点でまだ `refined.jsonl` に反映されていない seg）** | **解消済み（`docs/design/37-transcript-markdown-copy.md` TC15/TC17）**: 従来は本 export が `transcript.jsonl` にフォールバックしないため（§4.3 の設計判断）、drain 完了前に export した最後の数セグメントが恒久的に漏れていた。TC15 でディスクアダプタが `readTranscriptSegments()` も読むようになり、refined に未出現の末尾セグメントは 1 回目の export から `*(raw)*` 付きで含まれる（漏れなくなる）。さらに TC17 で `drain()` 完了後にもう一度 `export(sessionHandle:)` を呼ぶようになり（冪等上書き、`docs/design/03-refinement-batch.md` §7）、1 回目は raw のまま出た末尾セグメントが 2 回目では整形済みテキストに更新される |
 | タイトルが空文字 | `slug(from:)` が `"untitled"` にフォールバックするので、ファイル名は必ず一意な形になる（`# ` 見出し自体は空のまま出力される） |
 
 ## 7. `endMeeting()` への配線

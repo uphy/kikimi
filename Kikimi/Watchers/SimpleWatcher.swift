@@ -182,14 +182,7 @@ private extension SimpleWatcherSpec {
     /// §2's own example: `input_scope: summary_and_recent:30`, count spelled out even though it's the
     /// default). ASCII keywords/digits only, so this is always safe as a YAML plain scalar.
     static func plainScalar(forInputScope inputScope: WatcherInputScope) -> String {
-        switch inputScope {
-        case .summary:
-            return "summary"
-        case .summaryAndRecent(let count):
-            return "summary_and_recent:\(count)"
-        case .fullRefined:
-            return "full_refined"
-        }
+        inputScope.scalarValue
     }
 
     /// Renders `raw` as a YAML double-quoted scalar, escaping the three characters that would

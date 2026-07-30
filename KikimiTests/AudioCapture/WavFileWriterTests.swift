@@ -55,6 +55,41 @@ struct WavFileWriterTests {
             .appendingPathExtension("wav")
     }
 
+    /// Polls until the on-disk `data` chunk size reaches `expected`, so a test can wait for a
+    /// scheduled header flush *without* pinning the wait to a fixed duration -- the same
+    /// poll-don't-sleep pattern the view model/diarization suites use, and for the same reason: a
+    /// runner sharing a few cores with ~2,000 parallel tests delays a `DispatchSourceTimer`
+    /// arbitrarily. Returns as soon as the condition holds, so the generous ceiling costs a passing
+    /// test nothing.
+    private func waitForDataChunkSize(
+        _ expected: UInt32,
+        at url: URL,
+        timeout: Duration = .seconds(10)
+    ) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if (try? readDataChunkSize(at: url)) == expected { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(try readDataChunkSize(at: url) == expected, "the header never reached \(expected) within \(timeout)")
+    }
+
+    /// Polls the file's total size, for the same reason `waitForDataChunkSize` polls the header: the
+    /// serial writer queue commits appends whenever it gets scheduled, and a fixed sleep either
+    /// flakes or wastes time.
+    private func waitForFileSize(
+        _ expected: Int,
+        at url: URL,
+        timeout: Duration = .seconds(10)
+    ) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if (try? Data(contentsOf: url).count) == expected { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(try Data(contentsOf: url).count == expected, "the file never reached \(expected) bytes within \(timeout)")
+    }
+
     @Test("init creates the file with a 44-byte placeholder header of size 0")
     func initWritesPlaceholderHeader() throws {
         let fileURL = makeTemporaryFileURL()
@@ -68,46 +103,19 @@ struct WavFileWriterTests {
         #expect(try readDataChunkSize(at: fileURL) == 0)
     }
 
-    @Test("the periodic timer rewrites the in-progress header to cover the data appended so far")
-    func periodicTimerFlushesInProgressHeader() async throws {
+    @Test("append() alone never rewrites the header; close() writes the final total")
+    func appendDoesNotRewriteHeaderUntilClose() async throws {
         let fileURL = makeTemporaryFileURL()
         defer { try? FileManager.default.removeItem(at: fileURL) }
 
-        let flushInterval: TimeInterval = 0.1
-        let writer = try WavFileWriter(fileURL: fileURL, sampleRate: sampleRate, channels: channels, headerFlushInterval: flushInterval)
-        let failures = FailureRecorder()
-
-        // 100 frames of mono Int16 == 200 bytes.
-        let frameCount: AVAudioFrameCount = 100
-        let byteCount = UInt32(frameCount) * UInt32(channels) * UInt32(MemoryLayout<Int16>.size)
-        writer.append(makeBuffer(frameCount: frameCount)) { failures.record($0) }
-
-        // Polls for the flush rather than sleeping a fixed multiple of the interval: this waits
-        // *for* an event, so a slow runner only makes it take longer, never fail. A fixed sleep
-        // would also have to be long enough to cover a late timer, which is the same wait with a
-        // hard failure attached.
-        var flushed: UInt32 = 0
-        for _ in 0..<100 {
-            flushed = try readDataChunkSize(at: fileURL)
-            if flushed == byteCount { break }
-            try await Task.sleep(nanoseconds: 50_000_000)
-        }
-        #expect(flushed == byteCount)
-
-        writer.close()
-        #expect(failures.count == 0)
-    }
-
-    @Test("the header is not rewritten between flushes; close() writes the final total")
-    func staleHeaderUntilCloseWritesFinalTotal() async throws {
-        let fileURL = makeTemporaryFileURL()
-        defer { try? FileManager.default.removeItem(at: fileURL) }
-
-        // A 60s interval means no periodic flush can land inside this test. Asserting the *absence*
-        // of a flush against a live timer is a race the CI runner loses: the previous version slept
-        // past one flush and then assumed the next one was still 200ms away, which stopped holding
-        // as soon as `Task.sleep` overshot on a loaded machine.
-        let writer = try WavFileWriter(fileURL: fileURL, sampleRate: sampleRate, channels: channels, headerFlushInterval: 60)
+        // An hour-long flush period, i.e. the periodic timer provably never fires during this test.
+        // That is the point: this test is about `append()` *not* touching the header, and mixing that
+        // with "the periodic flush does touch it" is what made the old single test unstable -- it had
+        // to read the header in the gap between two flushes, and a `DispatchSourceTimer` on a loaded
+        // runner does not honour gaps (it coalesces the overdue tick with the next one). The periodic
+        // behaviour is covered on its own by `periodicFlushUpdatesInProgressHeader` below, which polls
+        // and so does not care when the tick lands.
+        let writer = try WavFileWriter(fileURL: fileURL, sampleRate: sampleRate, channels: channels, headerFlushInterval: 3_600)
         let failures = FailureRecorder()
 
         let firstFrameCount: AVAudioFrameCount = 100
@@ -118,19 +126,40 @@ struct WavFileWriterTests {
         let secondByteCount = UInt32(secondFrameCount) * UInt32(channels) * UInt32(MemoryLayout<Int16>.size)
         writer.append(makeBuffer(frameCount: secondFrameCount)) { failures.record($0) }
 
-        // Long enough for both appends to have been drained by the writer queue -- the point is
-        // that the sample data lands on disk while the header still reports the placeholder 0.
-        try await Task.sleep(nanoseconds: 200_000_000)
-
-        let finalByteCount = firstByteCount + secondByteCount
+        // Both appends have been through the serial queue by the time the audio data is on disk, so
+        // waiting on the file's size (not on a fixed span) is what makes the header read below
+        // meaningful: the samples are written, and the header still is not.
+        try await waitForFileSize(44 + Int(firstByteCount + secondByteCount), at: fileURL)
         #expect(try readDataChunkSize(at: fileURL) == 0)
-        #expect(try Data(contentsOf: fileURL).count == 44 + Int(finalByteCount))
 
         writer.close()
 
+        let finalByteCount = firstByteCount + secondByteCount
         #expect(try readDataChunkSize(at: fileURL) == finalByteCount)
-        #expect(try Data(contentsOf: fileURL).count == 44 + Int(finalByteCount))
 
+        let finalFileData = try Data(contentsOf: fileURL)
+        #expect(finalFileData.count == 44 + Int(finalByteCount))
+
+        #expect(failures.count == 0)
+    }
+
+    @Test("the periodic flush rewrites the in-progress header while recording continues")
+    func periodicFlushUpdatesInProgressHeader() async throws {
+        let fileURL = makeTemporaryFileURL()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        // Short period so the tick comes quickly, and a polled wait so it does not matter *when* it
+        // comes. Nothing here depends on the timer being punctual -- only on it happening at all,
+        // which is the property under test (a crashed session must leave a readable WAV).
+        let writer = try WavFileWriter(fileURL: fileURL, sampleRate: sampleRate, channels: channels, headerFlushInterval: 0.1)
+        let failures = FailureRecorder()
+        defer { writer.close() }
+
+        let frameCount: AVAudioFrameCount = 100
+        let byteCount = UInt32(frameCount) * UInt32(channels) * UInt32(MemoryLayout<Int16>.size)
+        writer.append(makeBuffer(frameCount: frameCount)) { failures.record($0) }
+
+        try await waitForDataChunkSize(byteCount, at: fileURL)
         #expect(failures.count == 0)
     }
 

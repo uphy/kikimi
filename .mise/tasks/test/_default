@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+#MISE description="単体テスト (swift test + vitest)"
+#MISE depends=["test:web"]
+set -euo pipefail
+
+# `KIKIMI_TEST_HIDDEN=1`: the window suites order real `NSPanel`s in, which without this flashes
+# panels over whatever the user is doing (`FloatingPanel.isUnobtrusive`). This machine is also used
+# for real work, so a test run has to stay invisible -- the same reason `kikimi-verify` sets it.
+KIKIMI_TEST_HIDDEN=1 swift test

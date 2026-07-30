@@ -17,6 +17,11 @@ import SwiftUI
 struct MeetingWorkspaceView: View {
     @ObservedObject var viewModel: MeetingWorkspaceViewModel
 
+    /// Owned by `MeetingWorkspaceWindowController`, not by this view
+    /// (`docs/design/39-webview-markdown.md` MD2): SwiftUI destroys and re-creates the tab bodies,
+    /// and the Markdown web views must outlive that.
+    let markdownWebViewStore: MarkdownWebViewStore
+
     /// `docs/design/18-...` §5.3: `.task`/`.onDisappear` stay on this outer `Group`, not inside the
     /// `if`/`else` -- a root-level branch would re-fire them on every compact <-> normal switch.
     var body: some View {
@@ -85,6 +90,8 @@ struct MeetingWorkspaceView: View {
             MeetingTabView(
                 paneMode: $viewModel.meetingPaneMode,
                 summaryHasUnseenUpdate: viewModel.summaryHasUnseenUpdate,
+                onCopy: { scope in Task { await viewModel.copyMarkdown(scope: scope) } },
+                copyFeedbackToken: viewModel.copyFeedbackToken,
                 transcriptContent: { transcriptTabView },
                 summaryContent: { summaryTabView }
             )
@@ -98,6 +105,7 @@ struct MeetingWorkspaceView: View {
                 selectedWatcherId: $viewModel.selectedWatcherId,
                 onRunNow: { id in viewModel.runWatcherNow(id: id) },
                 onOpenSegment: { segId in viewModel.jumpToTranscriptSegment(segId) },
+                markdownHost: markdownWebViewStore.host(for: .watchers),
                 onSetWatcherEnabled: { id, enabled in viewModel.setWatcherEnabled(id: id, enabled: enabled) },
                 onForkPresetWatcher: { id in await viewModel.forkPresetWatcher(id: id) },
                 presetExists: { id in viewModel.presetExists(id: id) },
@@ -111,6 +119,22 @@ struct MeetingWorkspaceView: View {
                 onCreateSimpleWatcher: { draft in try await viewModel.createSimpleWatcher(draft) },
                 onUpdateSimpleWatcher: { id, draft in try await viewModel.updateSimpleWatcher(id: id, draft) },
                 onConvertSimpleWatcherToFull: { id in try await viewModel.convertSimpleWatcherToFull(id: id) }
+            )
+        case .chat:
+            // `docs/design/38-session-chat.md` §3.5. Available from Recording onward, like every
+            // other tab -- Draft shows no tab bar at all (§3.1/CH1), and there is nothing to ask
+            // about before a single line has been transcribed.
+            ChatTabView(
+                turns: viewModel.chatTurns,
+                draft: $viewModel.chatDraft,
+                isResponding: viewModel.isChatResponding,
+                copyFeedbackTurnId: viewModel.chatCopyFeedbackTurnId,
+                onSend: { Task { await viewModel.sendChatMessage() } },
+                onRetry: { id in Task { await viewModel.retryChatTurn(id: id) } },
+                onCopy: { id in viewModel.copyChatAnswer(id: id) },
+                onClear: { Task { await viewModel.clearChatHistory() } },
+                onOpenSegment: { segId in viewModel.jumpToTranscriptSegment(segId) },
+                markdownHost: markdownWebViewStore.host(for: .chat)
             )
         }
     }
@@ -206,6 +230,8 @@ struct MeetingWorkspaceView: View {
             },
             playingRowId: viewModel.playingSegmentId,
             onTogglePlayback: { row in viewModel.toggleSegmentPlayback(row) },
+            onCopyRow: { row in Task { await viewModel.copyRowMarkdown(rowId: row.id) } },
+            copyFeedbackRowId: viewModel.copyFeedbackRowId,
             scrollTarget: viewModel.pendingTranscriptScrollTarget,
             onScrollTargetConsumed: { viewModel.pendingTranscriptScrollTarget = nil }
         )
@@ -220,7 +246,8 @@ struct MeetingWorkspaceView: View {
     private var summaryTabView: some View {
         SummaryTabView(
             summaryMarkdown: viewModel.summaryMarkdown,
-            onRegenerate: { await viewModel.regenerateSummary() }
+            onRegenerate: { await viewModel.regenerateSummary() },
+            markdownHost: markdownWebViewStore.host(for: .summary)
         )
     }
 

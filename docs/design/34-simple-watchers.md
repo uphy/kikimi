@@ -241,9 +241,14 @@ enum WatcherInputScope: Sendable, Equatable {
 |---|---|---|
 | 名前 | TextField（必須） | `name` |
 | 観点 | 複数行 TextEditor（必須）。placeholder に例を出す | `prompt` |
-| 対象 | Picker: 直近の会話（+ 発言数 Stepper 1〜200、既定 30）/ サマリのみ / 会議全体 | `input_scope` |
+| 対象 | Picker: サマリのみ / サマリ + 直近の発言（+ 発言数 Stepper 1〜200、既定 30）/ サマリ + 全発言。下に注記「どの選択でもサマリは常に含まれます。」 | `input_scope` |
 | 実行タイミング | Picker: サマリ更新ごと（既定）/ 定期（+ 分数 Stepper、秒に換算）/ 手動のみ / 会議終了時 | `trigger` |
 
+- **対象のラベルはすべて「サマリ」で始める**。`WatcherRunner` は `input_scope` に関係なく毎回
+  `summary.md` を読んで `{{summary}}` を展開するため（簡易 Watcher の `userPromptTemplate` は
+  必ず `{{summary}}` を含む）、この Picker が実際に変えているのは「逐語セグメントを何件足すか」
+  だけ。旧ラベル（直近の会話 / サマリのみ / 会議全体）は 3 つの排他的な入力源に見え、
+  「この Watcher は会議全体を見たのか直近だけか」が読み取れなかった
 - **id はフォームに出さない**。作成時に `simple-` + UUID 先頭 6 hex を自動生成し、衝突があれば
   再生成（ループ）。衝突チェックは session-local だけでなく **preset（`listPresetIds()`）も含める**
   — 過去に promote した simple preset と同 id を引くと、解決順序（session-local 優先）で preset を

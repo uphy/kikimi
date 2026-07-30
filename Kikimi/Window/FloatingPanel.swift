@@ -29,13 +29,39 @@ enum HiddenTestMode {
 /// (Draft → Recording → Ended) rather than long-lived notes, so those productivity features have
 /// no equivalent requirement here (`docs/design/06-ui-panels.md` section 2 diff table).
 class FloatingPanel: NSPanel {
+    /// The designated initializer, threading `isUnobtrusive` in before `NSWindow`'s own runs — a
+    /// `let` cannot be assigned after `self.init(...)`, and `canBecomeKey` is consulted during
+    /// window setup.
+    init(contentRect: NSRect, styleMask: NSWindow.StyleMask, backing: NSWindow.BackingStoreType, defer flag: Bool, isUnobtrusive: Bool) {
+        self.isUnobtrusive = isUnobtrusive
+        super.init(contentRect: contentRect, styleMask: styleMask, backing: backing, defer: flag)
+    }
+
     /// A `.nonactivatingPanel` defaults to `canBecomeKey == false`, which would make it
     /// impossible to type into any text field or `NSTextView` hosted inside it (e.g. the Prep
     /// tab editors, the inline title rename field). Overriding lets the panel accept key status
     /// when the user interacts with it, without the *app* itself becoming active and stealing
     /// focus from whatever app the user is currently in (the whole point of `.nonactivatingPanel`).
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
+    ///
+    /// **Except when `isUnobtrusive`**: this machine is also used for real work, and "invisible" is
+    /// not the same as "harmless". A transparent panel that takes key status still swallows the
+    /// user's keystrokes mid-sentence. Refusing key status there costs nothing that matters, because
+    /// AX-driven operations (`ax_click.py` / `tab_click.py`) do not need a key window — verified
+    /// 2026-07-30 by driving the tab bar and the WebView dump bridge against a fully transparent,
+    /// non-key window.
+    override var canBecomeKey: Bool { !isUnobtrusive }
+    override var canBecomeMain: Bool { !isUnobtrusive }
+
+    /// Whether this panel must not appear on screen or take any input.
+    ///
+    /// Defaults to `HiddenTestMode.isActive` (`KIKIMI_TEST_HIDDEN=1`), which both `kikimi-verify` and
+    /// `swift test` set — the unit suites order real windows in, and without this a test run flashes
+    /// panels over whatever the user is doing.
+    ///
+    /// Injectable rather than read straight from the environment so the tests can exercise *both*
+    /// branches: asserting `canBecomeKey` against `HiddenTestMode.isActive` would only ever check
+    /// whichever branch the suite happened to run under, leaving the production one unverified.
+    let isUnobtrusive: Bool
 
     /// Chrome variant. `.titled` is every existing Kikimi window (Session Window / Session List /
     /// Settings / the D2 misfire-guard `DictationOverlayPanel`); `.borderless` is for
@@ -51,7 +77,7 @@ class FloatingPanel: NSPanel {
     /// window. Callers (window controllers) remain responsible for `title`, restoring saved
     /// position/size, and installing their content view. `style` defaults to `.titled` so every
     /// existing call site is unaffected.
-    convenience init(contentRect: NSRect, style: Style = .titled) {
+    convenience init(contentRect: NSRect, style: Style = .titled, isUnobtrusive: Bool = HiddenTestMode.isActive) {
         let styleMask: NSWindow.StyleMask
         switch style {
         case .titled:
@@ -63,7 +89,8 @@ class FloatingPanel: NSPanel {
             contentRect: contentRect,
             styleMask: styleMask,
             backing: .buffered,
-            defer: false
+            defer: false,
+            isUnobtrusive: isUnobtrusive
         )
 
         // Float above other windows/apps without ever activating Kikimi or stealing key focus
@@ -96,8 +123,14 @@ class FloatingPanel: NSPanel {
         // System Events' AX clicks, which `kikimi-verify`'s `ax_click.py` relies on, need the window
         // present in the accessibility tree), but make it fully transparent so nothing ever paints
         // on screen and no screenshot/`screencapture` can show it.
-        if HiddenTestMode.isActive {
+        if isUnobtrusive {
             alphaValue = 0
+            // An invisible window that still hit-tests is worse than a visible one: the user clicks
+            // where they expect their editor to be and the click disappears into Kikimi. Letting
+            // mouse events pass straight through removes that entirely. AX-driven clicks are
+            // unaffected (they never go through hit testing), and coordinate clicks are not usable
+            // against a transparent window anyway.
+            ignoresMouseEvents = true
         }
     }
 }

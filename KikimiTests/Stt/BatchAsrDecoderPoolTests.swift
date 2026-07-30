@@ -82,12 +82,14 @@ struct BatchAsrDecoderPoolTests {
     /// `BatchAsrDecoderLease.release()` is synchronous and reaches the pool actor through a
     /// fire-and-forget `Task` (see `BatchAsrDecoderPool.refcountForTesting`'s doc comment), so a
     /// test that calls `release()` and immediately re-`acquire`s can race the decrement. Polling
-    /// `refcountForTesting` first waits for that hop to actually land.
+    /// `refcountForTesting` first waits for that hop to actually land. The timeout is a hang guard
+    /// only; 10s so a contended CI runner cannot overrun it (see
+    /// `MeetingWorkspaceViewModelTests.waitUntil`).
     private func waitUntilRefcount(
         _ pool: BatchAsrDecoderPool,
         version: AsrModelVersion,
         equals expected: Int,
-        timeout: Duration = .seconds(2)
+        timeout: Duration = .seconds(10)
     ) async throws {
         let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {

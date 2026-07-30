@@ -70,6 +70,11 @@ final class MeetingWorkspaceWindowController: NSWindowController, NSWindowDelega
     /// comment on why that's necessary.
     private let hostingView: NSHostingView<MeetingWorkspaceView>
 
+    /// The window's Markdown web views (`docs/design/39-webview-markdown.md` MD2). Owned here so
+    /// they survive SwiftUI rebuilding the view tree; released in `windowWillClose`. Not `private`
+    /// so the verification bridge (MD12) can reach a specific surface's host.
+    let markdownWebViewStore: MarkdownWebViewStore
+
     /// Keeps the native `NSWindow.title` (Window menu, Mission Control, etc.) in sync with
     /// `viewModel.meta.title` for the window's whole lifetime — the one-time `panel.title = ...`
     /// assignment in `init` below only covers the initial (pre-hydration, always-empty)
@@ -96,7 +101,16 @@ final class MeetingWorkspaceWindowController: NSWindowController, NSWindowDelega
         panel.title = viewModel.meta.title
         panel.isRestorable = false
 
-        let hostingView = FirstMouseHostingView(rootView: MeetingWorkspaceView(viewModel: viewModel))
+        // `docs/design/39-webview-markdown.md` MD2: the Markdown web views are owned here, for the
+        // window's whole lifetime. SwiftUI tears its representables down on a tab switch (measured
+        // in Phase A0, §11), so a web view created inside the view tree would re-parse its bundle
+        // and lose its scroll position every time the user came back to the tab.
+        let markdownWebViewStore = MarkdownWebViewStore()
+        self.markdownWebViewStore = markdownWebViewStore
+
+        let hostingView = FirstMouseHostingView(
+            rootView: MeetingWorkspaceView(viewModel: viewModel, markdownWebViewStore: markdownWebViewStore)
+        )
         // `NSHostingView`'s default `sizingOptions` is `[.minSize, .intrinsicContentSize, .maxSize]`
         // (macOS 13+): the hosting view probes its SwiftUI content and installs Auto Layout
         // constraints back onto itself (and, transitively, the window) that push the *window*'s
@@ -446,6 +460,10 @@ final class MeetingWorkspaceWindowController: NSWindowController, NSWindowDelega
         // past `WindowManager.workspaceWindowDidClose`'s `visible = false` update below.
         moveResizeDebounceTask?.cancel()
         moveResizeDebounceTask = nil
+
+        // The one place web views are released (design 39 MD2): they are kept alive across every
+        // tab and pane switch on purpose, so nothing shorter-lived may drop them.
+        markdownWebViewStore.tearDown()
 
         WindowManager.shared.workspaceWindowDidClose(sessionId: sessionId)
     }

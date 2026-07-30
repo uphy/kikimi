@@ -19,9 +19,15 @@ struct LLMStubProvider: Sendable {
 
     /// Built-in `stubKey -> raw JSON` fallback table, consulted only when `overrides` has no entry
     /// for the key and the key isn't `"refinement"` (that one is generated dynamically -- see
-    /// `RefinementEchoStub` below). Currently empty; kept as an extension point for future stub keys
-    /// that only need a fixed canned response.
-    private static let builtinDefaults: [String: String] = [:]
+    /// `RefinementEchoStub` below).
+    ///
+    /// `"chat"` (`docs/design/38-session-chat.md` CH11b) has to be here, not just in a
+    /// `KIKIMI_STUB_LLM_FILE` fixture: without it every chat send under `KIKIMI_STUB_LLM=1`
+    /// (`mise run verify-smoke`, the `kikimi-verify` skill) throws `missingStructuredOutput`. The
+    /// canned answer is Markdown so the tab's web-view rendering is exercised too.
+    private static let builtinDefaults: [String: String] = [
+        "chat": #"{"answer": "[stub] スタブ応答です。\n\n- 実際の LLM は呼ばれていません\n- `KIKIMI_STUB_LLM_FILE` で上書きできます"}"#
+    ]
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment) {
         isEnabled = environment["KIKIMI_STUB_LLM"] == "1"

@@ -25,6 +25,44 @@ jobs:
 
       - run: mise run lint
 
+  # `web/` (docs/design/39-webview-markdown.md) holds the Markdown renderer. Without this job its
+  # 55 tests and its type checking never run in CI: `mise run lint` skips the web typecheck when
+  # node_modules is absent, which on a fresh runner it always is. The two bugs that slipped through
+  # review on this layer (a swapped argument order across the Swift/JS bridge, and mermaid's SVG
+  # sizing) both lived exactly here, so leaving it unguarded defeats the tests that exist.
+  web:
+    name: Web (typecheck & test)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+
+      # Node's version lives in `mise.toml` for the same reason SwiftLint's does: CI and local runs
+      # must not drift.
+      - uses: jdx/mise-action@v4
+        with:
+          experimental: true
+
+      - name: Cache npm
+        uses: actions/cache@v6
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
+          restore-keys: npm-${{ runner.os }}-
+
+      - name: Install
+        run: npm ci --prefix web
+
+      - name: Typecheck
+        run: npm run typecheck --prefix web
+
+      - name: Test
+        run: npm test --prefix web
+
+      # Proves the bundle the app actually ships can be produced -- a broken esbuild config would
+      # otherwise only surface at `mise run build` time, on someone's machine.
+      - name: Build bundle
+        run: npm run build --prefix web
+
   test:
     name: Build & test
     runs-on: macos-15
@@ -52,4 +90,7 @@ jobs:
         run: swift build --build-tests
 
       - name: Test
-        run: swift test --skip-build
+        # Matches `mise run test`: the window suites order real panels in, and the flag keeps them
+        # invisible and inert (`FloatingPanel.isUnobtrusive`). Harmless on a headless runner, and it
+        # keeps CI exercising the same configuration a developer runs.
+        run: KIKIMI_TEST_HIDDEN=1 swift test --skip-build

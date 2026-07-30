@@ -1,0 +1,428 @@
+/*
+ * Reproduces `Theme.summary` (the old MarkdownUI theme: GitHub's, with its opaque background
+ * dropped and the base size lowered to 13pt) in CSS -- docs/design/39-webview-markdown.md MD13.
+ * Every color comes from a Swift-injected custom property, so light/dark and the user's accent
+ * color follow the system without this file knowing about appearance.
+ */
+
+@import "highlight.js/styles/github.css";
+
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  margin: 0;
+  padding: 16px;
+  font-family: var(--kikimi-font-family, -apple-system, BlinkMacSystemFont, sans-serif);
+  font-size: var(--kikimi-font-size, 13px);
+  line-height: 1.6;
+  color: var(--kikimi-fg, canvastext);
+  /* The panel paints the background; the web view is transparent over it (§3.2). */
+  background: transparent;
+  overflow-wrap: anywhere;
+}
+
+.kikimi-document > *:first-child {
+  margin-top: 0;
+}
+
+.kikimi-document > *:last-child {
+  margin-bottom: 0;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  margin: 1.2em 0 0.5em;
+  line-height: 1.3;
+  font-weight: 600;
+}
+
+h1 {
+  font-size: 1.7em;
+}
+h2 {
+  font-size: 1.4em;
+}
+h3 {
+  font-size: 1.2em;
+}
+h4 {
+  font-size: 1em;
+}
+h5,
+h6 {
+  font-size: 0.9em;
+  color: var(--kikimi-fg-secondary, gray);
+}
+
+p,
+ul,
+ol,
+blockquote,
+table,
+pre {
+  margin: 0 0 0.8em;
+}
+
+ul,
+ol {
+  padding-left: 1.5em;
+}
+
+li {
+  margin: 0.15em 0;
+}
+
+a {
+  color: var(--kikimi-accent, highlight);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.92em;
+  padding: 0.15em 0.35em;
+  border-radius: 3px;
+  background: var(--kikimi-code-bg, rgba(128, 128, 128, 0.15));
+}
+
+pre {
+  padding: 10px 12px;
+  border-radius: 5px;
+  overflow-x: auto;
+  background: var(--kikimi-code-bg, rgba(128, 128, 128, 0.15));
+}
+
+pre code,
+pre.hljs {
+  padding: 0;
+  background: none;
+  font-size: 0.92em;
+}
+
+blockquote {
+  padding-left: 0.9em;
+  border-left: 3px solid var(--kikimi-border, rgba(128, 128, 128, 0.4));
+  color: var(--kikimi-fg-secondary, gray);
+}
+
+table {
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+}
+
+th,
+td {
+  border: 1px solid var(--kikimi-border, rgba(128, 128, 128, 0.4));
+  padding: 4px 10px;
+  text-align: left;
+}
+
+th {
+  font-weight: 600;
+  background: var(--kikimi-code-bg, rgba(128, 128, 128, 0.1));
+}
+
+hr {
+  border: none;
+  border-top: 1px solid var(--kikimi-border, rgba(128, 128, 128, 0.4));
+  margin: 1.2em 0;
+}
+
+/* markdown-it-task-lists */
+.task-list-item {
+  list-style: none;
+}
+
+.task-list-item input[type="checkbox"] {
+  margin: 0 0.4em 0 -1.3em;
+}
+
+/* markdown-it-footnote */
+.footnotes {
+  font-size: 0.9em;
+  color: var(--kikimi-fg-secondary, gray);
+  border-top: 1px solid var(--kikimi-border, rgba(128, 128, 128, 0.4));
+  margin-top: 1.5em;
+  padding-top: 0.5em;
+}
+
+/*
+ * mermaid placeholder (MD9/§4). The reserved height keeps an asynchronously drawn diagram from
+ * shoving the restored scroll position (MD8) once it lands.
+ */
+.kikimi-mermaid {
+  min-height: 120px;
+  margin: 0 0 0.8em;
+  /* Anchors the zoom button (design 40 §3.2). */
+  position: relative;
+}
+
+/*
+ * design 40 DZ9: in the body the diagram is shrunk to fit the panel, whole. Letting it overflow and
+ * scroll was tried and rejected -- being able to take in the entire diagram at a glance is worth more
+ * here than legible labels, and the zoom button is what covers reading it properly.
+ */
+.kikimi-mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* design 40 §3.2: revealed on hover so it does not permanently sit on top of the diagram. */
+.kikimi-mermaid-zoom {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  padding: 3px;
+  line-height: 0;
+  border: 1px solid var(--kikimi-border, rgba(128, 128, 128, 0.4));
+  border-radius: 4px;
+  background: var(--kikimi-code-bg, rgba(128, 128, 128, 0.15));
+  color: var(--kikimi-fg-secondary, gray);
+  cursor: default;
+  opacity: 0;
+  transition: opacity 0.12s ease-out;
+}
+
+.kikimi-mermaid:hover .kikimi-mermaid-zoom,
+.kikimi-mermaid-zoom:focus-visible {
+  opacity: 1;
+}
+
+.kikimi-mermaid-zoom svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* A diagram that could not be drawn keeps its source visible instead (§4). */
+.kikimi-mermaid-failed {
+  min-height: 0;
+}
+
+.kikimi-mermaid-error {
+  font-size: 0.9em;
+  color: var(--kikimi-fg-secondary, gray);
+  margin-bottom: 0.3em;
+}
+
+/*
+ * Chat (§3.6). Reproduces what `ChatTabView` drew in SwiftUI: right-aligned question bubbles on a
+ * tinted accent, full-width answers on a faint neutral, a footer with the copy button and HH:mm.
+ */
+.kikimi-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.kikimi-chat-user {
+  align-self: flex-end;
+  max-width: calc(100% - 40px);
+  padding: 6px 10px;
+  border-radius: 8px;
+  /* `Color.accentColor.opacity(0.15)` */
+  background: color-mix(in srgb, var(--kikimi-accent, highlight) 15%, transparent);
+  white-space: pre-wrap;
+}
+
+.kikimi-chat-assistant {
+  align-self: stretch;
+  padding: 6px 10px;
+  border-radius: 8px;
+  /* `Color.secondary.opacity(0.08)` */
+  background: color-mix(in srgb, var(--kikimi-fg-secondary, gray) 8%, transparent);
+}
+
+.kikimi-chat-body > *:first-child {
+  margin-top: 0;
+}
+
+.kikimi-chat-body > *:last-child {
+  margin-bottom: 0;
+}
+
+.kikimi-chat-note {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.85em;
+  color: var(--kikimi-fg-secondary, gray);
+  margin-bottom: 4px;
+}
+
+.kikimi-chat-note-icon {
+  width: 1em;
+  height: 1em;
+  flex: none;
+}
+
+.kikimi-chat-failure {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--kikimi-fg-secondary, gray);
+}
+
+.kikimi-chat-retry {
+  flex: none;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--kikimi-accent, highlight);
+  cursor: default;
+}
+
+.kikimi-chat-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+  color: var(--kikimi-fg-secondary, gray);
+}
+
+.kikimi-chat-icon-button {
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  cursor: default;
+  line-height: 0;
+}
+
+.kikimi-chat-icon-button svg {
+  width: 13px;
+  height: 13px;
+}
+
+.kikimi-chat-time {
+  font-size: 0.8em;
+  font-variant-numeric: tabular-nums;
+}
+
+.kikimi-chat-pending {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  color: var(--kikimi-fg-secondary, gray);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Stands in for `ProgressView().controlSize(.small)`. */
+.kikimi-chat-spinner {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  border: 1.5px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: kikimi-spin 0.8s linear infinite;
+}
+
+@keyframes kikimi-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.kikimi-chat-placeholder {
+  text-align: center;
+  padding: 24px 0;
+  color: var(--kikimi-fg-secondary, gray);
+}
+
+/*
+ * highlight.js ships one stylesheet per appearance; the imported light theme above is overridden
+ * for the tokens that actually go unreadable on a dark background.
+ */
+@media (prefers-color-scheme: dark) {
+  .hljs {
+    color: var(--kikimi-fg, #e6edf3);
+  }
+  .hljs-comment,
+  .hljs-quote {
+    color: #8b949e;
+  }
+  .hljs-keyword,
+  .hljs-selector-tag,
+  .hljs-literal,
+  .hljs-type {
+    color: #ff7b72;
+  }
+  .hljs-string,
+  .hljs-attr,
+  .hljs-addition {
+    color: #a5d6ff;
+  }
+  .hljs-title,
+  .hljs-name,
+  .hljs-section {
+    color: #d2a8ff;
+  }
+  .hljs-number,
+  .hljs-variable,
+  .hljs-template-variable {
+    color: #79c0ff;
+  }
+}
+
+/*
+ * Zoom overlay (docs/design/40-diagram-zoom.md §3.4). Its own window, its own web view: a whole
+ * screen for one diagram. The scrim is drawn here rather than by the panel, which stays transparent.
+ */
+.kikimi-diagram-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.kikimi-diagram-stage {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  cursor: grab;
+}
+
+.kikimi-diagram-dragging .kikimi-diagram-stage {
+  cursor: grabbing;
+}
+
+.kikimi-diagram-canvas {
+  /* Panned and zoomed via `transform`; the origin is the centre so `fit` needs no offset. */
+  transform-origin: center center;
+  background: white;
+  border-radius: 6px;
+  padding: 12px;
+  /* The diagram is never clipped by the canvas -- the stage does the clipping. */
+  line-height: 0;
+}
+
+.kikimi-diagram-canvas svg {
+  /*
+   * The size is pinned inline by `pinNaturalSize` (web/src/svg-size.ts), not here. Overriding
+   * `width` to `auto` in this rule is what made the diagram collapse to a replaced element's default
+   * size while `fit` still scaled from `viewBox` -- layout and measurement have to agree.
+   */
+  display: block;
+}
+
+.kikimi-diagram-canvas .kikimi-mermaid-error,
+.kikimi-diagram-canvas pre {
+  line-height: 1.5;
+  color: black;
+}

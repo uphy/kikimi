@@ -217,6 +217,22 @@ struct OpenAIChatBackend: LLMBackend {
 
     // MARK: - Request body assembly (section 4.1)
 
+    /// `[system] + request.messages + [user]` (38-session-chat.md §4.1). Unlike `ClaudeCLIBackend`,
+    /// this endpoint takes turn arrays natively, so prior turns are passed through with their own
+    /// roles rather than flattened -- which is the whole reason `LLMRequest.messages` is structured
+    /// (CH15: past answers reach the model as the *assistant's* words, not the user's).
+    ///
+    /// With `messages == nil` this produces exactly the two-message body every pre-chat consumer
+    /// already sent.
+    static func buildMessages(request: LLMRequest) -> [[String: String]] {
+        var messages: [[String: String]] = [["role": "system", "content": request.system]]
+        for message in request.messages ?? [] {
+            messages.append(["role": message.role.rawValue, "content": message.text])
+        }
+        messages.append(["role": "user", "content": request.user])
+        return messages
+    }
+
     static func buildURLRequest(request: LLMRequest, config: OpenAIBackendConfig, apiKey: String) throws -> URLRequest {
         guard let url = buildURL(baseURL: config.baseURL, apiVersion: config.apiVersion) else {
             throw LLMClientError.networkFailed(description: "llm.openai.base_url is missing or invalid: \"\(config.baseURL)\"")
@@ -229,10 +245,7 @@ struct OpenAIChatBackend: LLMBackend {
 
         var body: [String: Any] = [
             "model": resolveModel(config: config, requestModel: request.model),
-            "messages": [
-                ["role": "system", "content": request.system],
-                ["role": "user", "content": request.user]
-            ],
+            "messages": buildMessages(request: request),
             "response_format": [
                 "type": "json_schema",
                 "json_schema": [

@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<!--
+  Markdown rendering host for Kikimi's Session Window (docs/design/39-webview-markdown.md §3).
+  Copied verbatim into Kikimi/Resources/editor/ by scripts/build.mjs.
+-->
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      design 39 MD10. Verified over file:// in Phase A0 (§11): both the main bundle and a
+      dynamically injected second classic script load under `script-src 'self'`, so mermaid's
+      lazy bundle (MD9) needs no relaxation here. `connect-src 'none'` is what keeps meeting
+      content from leaving the process.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'"
+    />
+    <link rel="stylesheet" href="bundle.css" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script src="bundle.js"></script>
+  </body>
+</html>

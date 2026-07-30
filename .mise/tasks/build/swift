@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #MISE description="Swift ビルド"
-#MISE depends=["lint"]
+#MISE depends=["lint", "build:web"]
 #MISE sources=["Kikimi/**/*.swift", "Package.swift"]
 #MISE outputs=[".build/release/Kikimi"]
 set -euo pipefail

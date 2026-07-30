@@ -195,6 +195,61 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             } catch {
                 logger.error("kikimi://record/quick failed: \(error.localizedDescription, privacy: .public)")
             }
+        case .debugWebView(let target, let action):
+            await handleDebugWebView(target: target, action: action)
+        }
+    }
+
+    /// `kikimi://debug/webview` (`docs/design/39-webview-markdown.md` MD12 / §8.3): lets
+    /// `kikimi-verify` read and click inside a WebView-rendered surface from outside the process.
+    ///
+    /// Everything is reported through the log rather than a dialog, matching the rest of the URL
+    /// scheme's non-interactive contract. `out` exists because a script wants a file it can diff, not
+    /// a line it has to scrape out of `log stream`.
+    private func handleDebugWebView(
+        target: KikimiURLRoute.DebugWebViewTarget,
+        action: KikimiURLRoute.DebugWebViewAction
+    ) async {
+        guard DebugBridgeMode.isActive else {
+            // Not an error: a stray URL in a normal session should be inert, and saying why makes
+            // that obvious to whoever fired it.
+            logger.warning("kikimi://debug/webview ignored: set KIKIMI_DEBUG_BRIDGE=1 (or run under KIKIMI_TEST_HIDDEN / KIKIMI_STUB_LLM)")
+            return
+        }
+        guard let host = WindowManager.shared.debugWebViewHost(target: target) else {
+            logger.error("kikimi://debug/webview: no web view for target \(target.rawValue, privacy: .public)")
+            return
+        }
+
+        switch action {
+        case .dump(let out):
+            guard let text = await host.dumpText() else {
+                logger.error("kikimi://debug/webview: dump failed for \(target.rawValue, privacy: .public)")
+                return
+            }
+            guard let out else {
+                logger.info("webview dump [\(target.rawValue, privacy: .public)]: \(text, privacy: .public)")
+                return
+            }
+            do {
+                try text.write(to: URL(fileURLWithPath: out), atomically: true, encoding: .utf8)
+                logger.info("webview dump [\(target.rawValue, privacy: .public)] -> \(out, privacy: .public) (\(text.count) chars)")
+            } catch {
+                logger.error("kikimi://debug/webview: writing \(out, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            }
+        case .click(let testId, let out):
+            let clicked = await host.clickTestId(testId)
+            if clicked {
+                logger.info("webview click [\(target.rawValue, privacy: .public)]: \(testId, privacy: .public)")
+            } else {
+                logger.error("kikimi://debug/webview: no element with data-testid=\(testId, privacy: .public) in \(target.rawValue, privacy: .public)")
+            }
+            guard let out else { return }
+            do {
+                try (clicked ? "clicked" : "not-found").write(to: URL(fileURLWithPath: out), atomically: true, encoding: .utf8)
+            } catch {
+                logger.error("kikimi://debug/webview: writing \(out, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 

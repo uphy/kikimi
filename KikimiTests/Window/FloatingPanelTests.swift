@@ -15,8 +15,12 @@ import Testing
 @Suite("FloatingPanel")
 @MainActor
 struct FloatingPanelTests {
-    private func makePanel() -> FloatingPanel {
-        FloatingPanel(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600))
+    /// Production configuration by default. `isUnobtrusive` is passed explicitly rather than left to
+    /// `HiddenTestMode`, because the suite itself runs with `KIKIMI_TEST_HIDDEN=1` (so a test run does
+    /// not flash panels over the user's work) -- reading the environment here would silently test
+    /// only the hidden branch.
+    private func makePanel(isUnobtrusive: Bool = false) -> FloatingPanel {
+        FloatingPanel(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600), isUnobtrusive: isUnobtrusive)
     }
 
     @Test("canBecomeKey/canBecomeMain are overridden to true so hosted text fields/NSTextViews can accept input")
@@ -24,6 +28,25 @@ struct FloatingPanelTests {
         let panel = makePanel()
         #expect(panel.canBecomeKey)
         #expect(panel.canBecomeMain)
+    }
+
+    @Test("a panel is visible and interactive in production configuration")
+    func productionPanelIsInteractive() {
+        let panel = makePanel()
+        #expect(panel.alphaValue == 1)
+        #expect(!panel.ignoresMouseEvents)
+    }
+
+    @Test("an unobtrusive panel is transparent, takes no key status, and lets mouse events through")
+    func unobtrusivePanelTouchesNothing() {
+        // What `KIKIMI_TEST_HIDDEN=1` buys: a verification run (or a `swift test` run) must not appear
+        // on screen, must not swallow the user's keystrokes, and must not eat their clicks. Being
+        // invisible alone covers only the first.
+        let panel = makePanel(isUnobtrusive: true)
+        #expect(panel.alphaValue == 0)
+        #expect(panel.ignoresMouseEvents)
+        #expect(!panel.canBecomeKey)
+        #expect(!panel.canBecomeMain)
     }
 
     @Test("styleMask includes .nonactivatingPanel so the app never steals focus from whatever is in front")

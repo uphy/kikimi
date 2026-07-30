@@ -715,3 +715,56 @@ struct WatcherDefinitionParserTests {
         #expect(definition.initialState == nil)
     }
 }
+
+// MARK: - WatcherInputScope scalar round-trip
+
+/// `WatcherInputScope` owns the `input_scope` text vocabulary shared by three writers/readers: `.md`
+/// frontmatter (`WatcherDefinitionParser`), the simple form's file emitter
+/// (`SimpleWatcherSpec.fileText()`), and `watchers/<id>.run.json` (`WatcherRunRecord`). These pin the
+/// round-trip so a change on one side can't silently desync the others.
+@Suite("WatcherInputScope scalar")
+struct WatcherInputScopeScalarTests {
+    @Test(
+        "scalarValue -> init?(scalarValue:) round-trips every case",
+        arguments: [
+            WatcherInputScope.summary,
+            .summaryAndRecent(count: WatcherInputScope.defaultRecentCount),
+            .summaryAndRecent(count: 1),
+            .summaryAndRecent(count: 200),
+            .fullRefined
+        ]
+    )
+    func roundTripsEveryCase(scope: WatcherInputScope) throws {
+        #expect(WatcherInputScope(scalarValue: scope.scalarValue) == scope)
+    }
+
+    /// The bare, count-less form only appears in hand-authored frontmatter -- `scalarValue` always
+    /// spells the count out -- but it still has to parse, to the documented default.
+    @Test("the bare summary_and_recent form parses to the default count")
+    func bareFormParsesToDefaultCount() {
+        #expect(
+            WatcherInputScope(scalarValue: "summary_and_recent")
+                == .summaryAndRecent(count: WatcherInputScope.defaultRecentCount)
+        )
+    }
+
+    @Test("unrecognized text parses as nil", arguments: ["", "bogus", "summary_and_recent:", "summary_and_recent:abc"])
+    func unrecognizedTextIsNil(raw: String) {
+        #expect(WatcherInputScope(scalarValue: raw) == nil)
+    }
+
+    @Test("Codable encodes as a plain string and decodes back")
+    func codableRoundTrip() throws {
+        let encoded = try JSONEncoder().encode(WatcherInputScope.summaryAndRecent(count: 12))
+        #expect(String(data: encoded, encoding: .utf8) == "\"summary_and_recent:12\"")
+        #expect(try JSONDecoder().decode(WatcherInputScope.self, from: encoded) == .summaryAndRecent(count: 12))
+    }
+
+    @Test("decoding an unrecognized string throws rather than silently defaulting")
+    func codableRejectsUnknownScope() {
+        let data = Data("\"bogus\"".utf8)
+        #expect(throws: (any Error).self) {
+            _ = try JSONDecoder().decode(WatcherInputScope.self, from: data)
+        }
+    }
+}
