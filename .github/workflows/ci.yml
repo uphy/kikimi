@@ -90,4 +90,7 @@ jobs:
         run: swift build --build-tests
 
       - name: Test
-        run: swift test --skip-build
+        # Matches `mise run test`: the window suites order real panels in, and the flag keeps them
+        # invisible and inert (`FloatingPanel.isUnobtrusive`). Harmless on a headless runner, and it
+        # keeps CI exercising the same configuration a developer runs.
+        run: KIKIMI_TEST_HIDDEN=1 swift test --skip-build
