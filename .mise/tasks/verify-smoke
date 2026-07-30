@@ -69,7 +69,10 @@ cleanup() {
     sleep 1
   fi
   if [ -d "$APP_BUNDLE" ]; then
-    open -a "$APP_BUNDLE" >/dev/null 2>&1 || true
+    # `-g`: relaunch WITHOUT bringing Kikimi to the front. This machine is also used for real work,
+    # and the whole run is otherwise focus-neutral -- ending it by stealing the frontmost app (and
+    # with it the keyboard) undoes that at the last step.
+    open -g -a "$APP_BUNDLE" >/dev/null 2>&1 || true
   fi
   rm -rf "$WORKDIR"
 }
@@ -77,13 +80,13 @@ trap cleanup EXIT
 
 # --- 0) sanity: kikimi-verify skill must be present ---
 [ -d "$SCRIPTS" ] || abort "kikimi-verify skill scripts not found at $SCRIPTS (skill not installed?)"
-for f in build_and_apply.sh with_env.sh crash_diff.sh verify_session.py kikimi_interact.py ax_click.py; do
+for f in build_and_apply.sh with_env.sh crash_diff.sh verify_session.py kikimi_interact.py ax_click.py tab_click.py webview.sh; do
   [ -e "$SCRIPTS/$f" ] || abort "required script missing: $SCRIPTS/$f"
 done
 
 # --- 1) dummy input WAV (16kHz mono, includes an "えーと" filler so the
 #        KIKIMI_STUB_LLM drop path -- refined_text=="" -- is exercised too) ---
-log "[1/7] Preparing dummy input WAV"
+log "[1/8] Preparing dummy input WAV"
 DUMMY_AIFF="$WORKDIR/dummy.aiff"
 DUMMY_WAV="$WORKDIR/dummy-16k-mono.wav"
 PHRASE="えーと、それでは動作確認を開始します。次のスプリントで対応します。よろしくお願いします。"
@@ -96,17 +99,17 @@ fi
 [ -s "$DUMMY_WAV" ] || abort "dummy WAV $DUMMY_WAV is empty after afconvert"
 
 # --- 2) build + apply (~/Applications/Kikimi.app) ---
-log "[2/7] Build + apply"
+log "[2/8] Build + apply"
 if ! "$SCRIPTS/build_and_apply.sh"; then
   abort "build_and_apply.sh failed -- see output above"
 fi
 
 # --- 3) crash baseline ---
-log "[3/7] Snapshot crash report baseline"
+log "[3/8] Snapshot crash report baseline"
 "$SCRIPTS/crash_diff.sh" snapshot || abort "crash_diff.sh snapshot failed"
 
 # --- 4) launch with dummy input + stub LLM, process-scoped (no launchctl) ---
-log "[4/7] Launch Kikimi with KIKIMI_TEST_INPUT + KIKIMI_STUB_LLM + KIKIMI_TEST_HIDDEN"
+log "[4/8] Launch Kikimi with KIKIMI_TEST_INPUT + KIKIMI_STUB_LLM + KIKIMI_TEST_HIDDEN"
 mkdir -p "$SESSIONS_DIR"
 MARKER="$WORKDIR/marker"
 touch "$MARKER"
@@ -118,7 +121,7 @@ if ! "$SCRIPTS/with_env.sh" "KIKIMI_TEST_INPUT=$DUMMY_WAV" "KIKIMI_STUB_LLM=1" "
 fi
 
 # --- 5) start recording via the kikimi:// URL scheme (no global hotkey in MVP) ---
-log "[5/7] Start recording via kikimi://record/quick"
+log "[5/8] Start recording via kikimi://record/quick"
 python3 "$SCRIPTS/kikimi_interact.py" open_url "kikimi://record/quick"
 sleep 2
 
@@ -137,19 +140,34 @@ log "    waiting for dummy audio to stream through STT + batch refinement"
 sleep 15
 
 # --- 6) end the meeting (triggers on_session_end; can take ~10s+ with the stub LLM) ---
-log "[6/7] End the meeting (Recording/Paused -> Ended)"
+log "[6/8] End the meeting (Recording/Paused -> Ended)"
 if ! python3 "$SCRIPTS/ax_click.py" click "" 会議終了 ended "$NEW_SESSION" 30; then
   fail "ax_click.py could not confirm meta.json state reached 'ended' for $NEW_SESSION"
 fi
 
 # --- 7) verify session folder structure + crash check ---
-log "[7/7] Verify session folder + crash report diff"
+log "[7/8] Verify session folder + crash report diff"
 if ! python3 "$SCRIPTS/verify_session.py" --mic-only "$NEW_SESSION"; then
   fail "verify_session.py reported structural failures for $NEW_SESSION"
 fi
 
 if ! "$SCRIPTS/crash_diff.sh" check; then
   fail "crash_diff.sh detected a new crash report during this run"
+fi
+
+# --- 8) verify the WebView-rendered surfaces actually rendered ---
+# `docs/design/39-webview-markdown.md`: the summary / Watchers / chat bodies are WKWebView pages, and
+# nothing above this point touches them -- a page that failed to load would leave every check so far
+# green. The chat tab is used because its empty-state placeholder renders without needing an LLM
+# response (the stub has no `summary_patch` reply, so no summary is produced in this run).
+#
+# `KIKIMI_TEST_HIDDEN=1` is still in effect here: AX ignores alpha, so tab switching and the dump
+# bridge both work against the invisible window (verified 2026-07-30).
+log "[8/8] Verify WebView rendering (chat tab)"
+if ! python3 "$SCRIPTS/tab_click.py" click チャット; then
+  fail "tab_click.py could not open the chat tab (tab bar moved? see SKILL.md)"
+elif ! "$SCRIPTS/webview.sh" wait chat "この会議について質問できます" 15; then
+  fail "the chat WebView never rendered -- the page failed to load, or the bridge is unreachable"
 fi
 
 echo

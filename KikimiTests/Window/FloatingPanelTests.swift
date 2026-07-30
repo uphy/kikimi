@@ -22,8 +22,31 @@ struct FloatingPanelTests {
     @Test("canBecomeKey/canBecomeMain are overridden to true so hosted text fields/NSTextViews can accept input")
     func canBecomeKeyAndMainAreTrue() {
         let panel = makePanel()
-        #expect(panel.canBecomeKey)
-        #expect(panel.canBecomeMain)
+        // Both follow `HiddenTestMode`: under `KIKIMI_TEST_HIDDEN` the panel must not take key status,
+        // because this machine is also used for real work and an invisible panel holding the keyboard
+        // eats the user's typing. The test suite itself does not set that variable, so the normal
+        // (production) expectation is what is asserted here.
+        #expect(panel.canBecomeKey == !HiddenTestMode.isActive)
+        #expect(panel.canBecomeMain == !HiddenTestMode.isActive)
+    }
+
+    /// Only runs when the suite itself is executed with `KIKIMI_TEST_HIDDEN=1`; `.enabled(if:)`
+    /// rather than a `#require` guard, which swift-testing counts as a failure rather than a skip.
+    @Test(
+        "under KIKIMI_TEST_HIDDEN the panel is transparent and lets mouse events through",
+        .enabled(if: HiddenTestMode.isActive)
+    )
+    func hiddenTestModeIsUnobtrusive() {
+        let panel = makePanel()
+        #expect(panel.alphaValue == 0)
+        #expect(panel.ignoresMouseEvents)
+    }
+
+    @Test("outside test mode the panel is opaque and hit-testable (the production path)")
+    func productionPanelIsInteractive() {
+        let panel = makePanel()
+        #expect(panel.alphaValue == (HiddenTestMode.isActive ? 0 : 1))
+        #expect(panel.ignoresMouseEvents == HiddenTestMode.isActive)
     }
 
     @Test("styleMask includes .nonactivatingPanel so the app never steals focus from whatever is in front")

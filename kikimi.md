@@ -1272,10 +1272,18 @@ Chirami のアーキテクチャを踏襲する。
 | swift-sdk (Anthropic) or 自前 HTTP クライアント | Claude API |
 | HotKey（将来） | グローバルホットキー |
 
-**JS（採用するなら）**
+**JS（`web/`。詳細は `docs/design/39-webview-markdown.md`）**
 
-- サマリ・書き起こしプレビューを WKWebView にする場合は Chirami の editor-web を参考に最小構成を組む
-- MVP では SwiftUI Markdown プレビュー（`AttributedString` or `MarkdownUI`）で十分な可能性
+| ライブラリ | 用途 |
+|-----------|------|
+| markdown-it | Markdown → HTML（GFM テーブル・タスクリスト・脚注） |
+| highlight.js | コードブロックのシンタックスハイライト |
+| mermaid | 図の描画（` ```mermaid ` があるときだけ遅延ロード） |
+| esbuild / TypeScript / vitest | ビルドと単体テスト |
+
+サマリ・Watchers・チャットの Markdown 表示は WKWebView で描画する（MVP では MarkdownUI を使っていたが、
+mermaid が描けずコードハイライトも無いため置き換えた）。**編集**（準備タブ・Watcher 定義）は `NSTextView`
+のまま。生成物は `Kikimi/Resources/editor/`（git 管理外、`mise run build:web` が生成）
 
 ### Xcode プロジェクト
 

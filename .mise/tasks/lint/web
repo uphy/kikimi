@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+#MISE description="web/ の型チェック (tsc --noEmit)"
+set -euo pipefail
+
+# The web layer's equivalent of SwiftLint's job. `tsc --strict` with `noUnusedLocals` /
+# `noUnusedParameters` covers what a separate linter would add here, so no ESLint config is carried
+# (docs/design/39-webview-markdown.md §9).
+if [ ! -d web/node_modules ]; then
+  echo "web/node_modules not found; skipping (run 'mise run build:web' first)."
+  exit 0
+fi
+
+npm run typecheck --prefix web

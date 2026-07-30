@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="単体テスト (swift test + vitest)"
+#MISE depends=["test:web"]
+set -euo pipefail
+
+swift test

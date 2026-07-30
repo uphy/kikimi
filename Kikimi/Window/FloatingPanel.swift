@@ -34,8 +34,15 @@ class FloatingPanel: NSPanel {
     /// tab editors, the inline title rename field). Overriding lets the panel accept key status
     /// when the user interacts with it, without the *app* itself becoming active and stealing
     /// focus from whatever app the user is currently in (the whole point of `.nonactivatingPanel`).
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
+    ///
+    /// **Except under `KIKIMI_TEST_HIDDEN`**: this machine is also used for real work, and
+    /// "invisible" is not the same as "harmless". A transparent panel that takes key status still
+    /// swallows the user's keystrokes mid-sentence. Refusing key status there costs nothing that
+    /// matters, because AX-driven operations (`ax_click.py` / `tab_click.py`) do not need a key
+    /// window — verified 2026-07-30 by driving the tab bar and the WebView dump bridge against a
+    /// fully transparent, non-key window.
+    override var canBecomeKey: Bool { !HiddenTestMode.isActive }
+    override var canBecomeMain: Bool { !HiddenTestMode.isActive }
 
     /// Chrome variant. `.titled` is every existing Kikimi window (Session Window / Session List /
     /// Settings / the D2 misfire-guard `DictationOverlayPanel`); `.borderless` is for
@@ -98,6 +105,12 @@ class FloatingPanel: NSPanel {
         // on screen and no screenshot/`screencapture` can show it.
         if HiddenTestMode.isActive {
             alphaValue = 0
+            // An invisible window that still hit-tests is worse than a visible one: the user clicks
+            // where they expect their editor to be and the click disappears into Kikimi. Letting
+            // mouse events pass straight through removes that entirely. AX-driven clicks are
+            // unaffected (they never go through hit testing), and coordinate clicks are not usable
+            // against a transparent window anyway.
+            ignoresMouseEvents = true
         }
     }
 }

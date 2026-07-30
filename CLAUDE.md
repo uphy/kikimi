@@ -43,7 +43,7 @@ phase-cycle / fix-cycle workflow には UI 検証ステップを含めない。
 ## Build
 
 ```bash
-# Initial setup (requires xcodegen, cmake)
+# Initial setup (xcodegen / cmake / node は mise が入れる)
 mise install
 mise run generate
 mise run signing-identity   # 初回のみ。TCC 権限を再ビルドで失わないため（下記）
@@ -59,14 +59,24 @@ Command Line Tools のみのため、**実際のビルド経路は `xcodebuild` 
 ### mise Tasks
 
 - `mise run generate` — xcodegen でプロジェクトファイルを生成
-- `mise run build` — Release ビルド（`.build/release/Kikimi` → `build/Kikimi.app` バンドル化 → 署名）
+- `mise run build` — Release ビルド（`build:web` → `build:swift` → `build/Kikimi.app` バンドル化 → 署名）
+- `mise run build:web` — `web/` の Markdown レンダラを `Kikimi/Resources/editor/` に出力（npm + esbuild）
 - `mise run apply` — `~/Applications/Kikimi.app` にインストール（実行中なら再起動）
+- `mise run test` — 単体テスト（vitest → `swift test`）
 - `mise run signing-identity` — ローカル開発用のコード署名 identity を作成（初回のみ・冪等）
 - `mise run reset-permissions` — Kikimi の TCC 許可をリセット（署名方式を変えた直後のみ）
 - `mise run clean` — ビルド成果物を削除
 - `mise run purge` — アプリ・config・state を全削除
-- `mise run lint` / `mise run lint-fix` — SwiftLint
+- `mise run lint` / `mise run lint-fix` — SwiftLint（`lint` は `web/` の `tsc --noEmit` も走らせる）
 - `mise run verify-smoke` — `kikimi-verify` のスモークテスト
+
+### Markdown 描画（WebView）
+
+サマリの Markdown 表示は WKWebView + `markdown-it`（`docs/design/39-webview-markdown.md`）。
+描画層のソースは `web/`、ビルド成果物は `Kikimi/Resources/editor/`（git 管理外）。
+
+**`swift build` 単体では web 資産が更新されない**。`mise run build` を使う。資産が無いと画面は
+プレーンテキストにフォールバックし、その旨が本文の上に出る。
 
 ### コード署名と TCC 権限
 
@@ -109,6 +119,8 @@ kikimi.md 13 章に準拠。主要コンポーネント:
 | `Kikimi/WikiExport/` | セッション終了時の Wiki 向け Markdown export |
 | `Kikimi/Playback/` | セグメント単位の音声再生 |
 | `Kikimi/Window/` | NSPanel 管理・メニューバー・URL scheme ルーティング |
+| `Kikimi/Views/Markdown/` | WKWebView による Markdown 描画（ホスト・ブリッジ・リンク振り分け） |
+| `web/` | 描画層の TypeScript/CSS（markdown-it・テーマ・将来の mermaid）。生成物は `Kikimi/Resources/editor/` |
 | `Kikimi/ViewModels/` | 各ウィンドウの ViewModel |
 | `Kikimi/Views/` | SwiftUI 画面（Session Window / List / Settings） |
 | `KikimiTests/` | 各ディレクトリに対応する XCTest / swift-testing |

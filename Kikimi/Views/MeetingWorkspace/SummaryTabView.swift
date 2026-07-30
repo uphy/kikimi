@@ -1,4 +1,3 @@
-import MarkdownUI
 import SwiftUI
 
 // MARK: - SummaryTabView
@@ -14,16 +13,18 @@ import SwiftUI
 /// The "サマリ全文再生成" button (kikimi.md section 8) is now shown, per section 6.4: "「サマリ全文再生成」
 /// ボタンは `04-summary-updater.md` 実装後まで非表示にする" -- that condition is now satisfied.
 ///
-/// Rendering uses MarkdownUI's `Markdown` view (kikimi.md section 13 / docs/development-process.md
-/// section 2.2 lists it as the approved Markdown preview option) rather than a plain `Text`, since `summary.md` contains
-/// headings, lists, and a GFM table (the action items table, `04-summary-updater.md` section
-/// 5.1's view template) that `Text`/`AttributedString(markdown:)` cannot render. The theme is
-/// `Theme.gitHub` with the `.text` style stripped of its background color (`Theme.summary` below)
-/// so the rendered content blends into the tab's own background instead of painting its own
-/// light/dark box -- this floating panel has no distinct "card" chrome to render onto.
+/// Rendering goes through `MarkdownWebView` (`docs/design/39-webview-markdown.md`): `summary.md`
+/// contains headings, lists, and a GFM table (the action items table, `04-summary-updater.md`
+/// section 5.1's view template), and now also mermaid diagrams, none of which
+/// `Text`/`AttributedString(markdown:)` can render. MarkdownUI — and the `Theme.summary` that used
+/// to live in this file — is gone as of design 39's Phase C: every Markdown surface renders through
+/// the web view now, and keeping a second renderer alive would mean maintaining both.
 struct SummaryTabView: View {
     let summaryMarkdown: String?
     let onRegenerate: () async -> Void
+    /// The window-lifetime web view this tab renders into (`docs/design/39-webview-markdown.md`
+    /// MD2), handed down from `MeetingWorkspaceWindowController`'s `MarkdownWebViewStore`.
+    @ObservedObject var markdownHost: MarkdownWebViewHost
 
     @State private var isRegenerating = false
 
@@ -39,13 +40,7 @@ struct SummaryTabView: View {
             }
 
             if let summaryMarkdown, !summaryMarkdown.isEmpty {
-                ScrollView {
-                    Markdown(summaryMarkdown)
-                        .markdownTheme(.summary)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding()
-                }
+                MarkdownWebView(host: markdownHost, markdown: summaryMarkdown, docKey: "summary")
             } else {
                 SummaryPlaceholder()
             }
@@ -78,28 +73,6 @@ struct SummaryTabView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
     }
-}
-
-// MARK: - Theme.summary
-
-extension Theme {
-    /// `Theme.gitHub` (docs/development-process.md 2.2's approved MarkdownUI theme starting point) with two
-    /// adjustments for the Summary tab's floating-panel context:
-    ///
-    /// - The `.text` style drops `Theme.gitHub`'s explicit `BackgroundColor(.background)` (a
-    ///   fixed white/near-black rectangle painted behind every text run) so the rendered Markdown
-    ///   shows through to whatever the tab's own background is, rather than layering a second,
-    ///   slightly different light/dark box on top of it.
-    /// - The base `FontSize` is lowered from GitHub's 16pt default to 13pt to match `.body`
-    ///   (the font every other Session Window tab, e.g. `TranscriptTabView`, renders its primary
-    ///   text at) instead of looking oversized next to them. Headings/code/etc. still scale off
-    ///   this base via `Theme.gitHub`'s `.em(...)` multipliers, so their relative proportions are
-    ///   unchanged.
-    static let summary = Theme.gitHub
-        .text {
-            ForegroundColor(.primary)
-            FontSize(13)
-        }
 }
 
 // MARK: - SummaryPlaceholder

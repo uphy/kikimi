@@ -35,10 +35,10 @@ enum ChatPromptBuilder {
     /// refinement, so mishearings and misattributed speakers are normal; a model that fills gaps
     /// plausibly produces answers that read as confident and are wrong about who said what.
     ///
-    /// Diagrams are steered to tables and lists because the renderer is MarkdownUI, a CommonMark
-    /// renderer that cannot draw mermaid, and `docs/design/06-ui-panels.md:71` rules out WKWebView.
-    /// Keeping that restriction in the prompt (rather than in the view) means the WebView design
-    /// (§9), when it lands, only has to delete this one line.
+    /// The instruction that steered diagrams to tables and lists (CH6) is gone: the chat history is
+    /// rendered by `ChatWebView` now, which draws mermaid (`docs/design/39-webview-markdown.md`).
+    /// Keeping that restriction in the prompt rather than in the view is what made removing it a
+    /// one-line change, as CH6 intended.
     static func buildSystem() -> String {
         """
         あなたは、ある会議の書き起こしについて質問に答えるアシスタントです。与えられた会議の記録だけを\
@@ -53,7 +53,7 @@ enum ChatPromptBuilder {
         回答の形式:
 
         - Markdown で書いてください
-        - 図表が必要なときは mermaid ではなく、表と箇条書きで表現してください
+        - 図で示したほうが分かりやすいときは mermaid のコードブロックを使ってください
         - 発言を引用するときは `HH:MM:SS` と話者名を添えてください
         """
     }

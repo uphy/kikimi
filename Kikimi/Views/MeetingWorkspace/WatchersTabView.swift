@@ -1,4 +1,3 @@
-import MarkdownUI
 import SwiftUI
 
 // MARK: - WatchersTabView
@@ -7,14 +6,13 @@ import SwiftUI
 /// `docs/design/05-watcher-runner.md` §10.2).
 ///
 /// Renders every enabled Watcher (`items`, `MeetingWorkspaceViewModel.watcherItems`) as a sub-tab: a
-/// name button with a running/error badge, the latest view-template rendering as Markdown (reusing
-/// `SummaryTabView`'s `Theme.summary`), and a footer with a relative "N分前更新" timestamp / error
-/// message, an `input_scope` badge (`WatcherPanelItem.inputScope`, so "how much of the meeting did
-/// this see?" is answerable without opening the definition), and a manual "今すぐ実行" trigger.
-/// `kikimi-seg:` links produced by
-/// `WatcherViewRenderer.render(...)`'s seg-id linkification (§8.1) are intercepted via
-/// `.environment(\.openURL, ...)` and forwarded to `onOpenSegment` rather than being handed to the
-/// system (which has no handler for that scheme).
+/// name button with a running/error badge, the latest view-template rendering as Markdown
+/// (`MarkdownWebView`, `docs/design/39-webview-markdown.md`), and a footer with a relative "N分前更新"
+/// timestamp / error message, an `input_scope` badge (`WatcherPanelItem.inputScope`, so "how much of
+/// the meeting did this see?" is answerable without opening the definition), and a manual "今すぐ実行"
+/// trigger. `kikimi-seg:` links produced by `WatcherViewRenderer.render(...)`'s seg-id linkification
+/// (§8.1) are intercepted in the page and classified by `MarkdownLinkRouter`, then forwarded to
+/// `onOpenSegment` rather than being handed to the system (which has no handler for that scheme).
 ///
 /// Has **no compile-time dependency on `MeetingWorkspaceViewModel`** (same decoupling as
 /// `PrepContentView`/`TranscriptTabView`): `MeetingWorkspaceView` wires `viewModel.watcherItems`/
@@ -31,6 +29,9 @@ struct WatchersTabView: View {
     @Binding var selectedWatcherId: String?
     var onRunNow: (String) -> Void
     var onOpenSegment: (String) -> Void
+    /// The window-lifetime web view every sub-tab renders into
+    /// (`docs/design/39-webview-markdown.md` MD2).
+    @ObservedObject var markdownHost: MarkdownWebViewHost
 
     // MARK: Watchers management (`docs/design/05-watcher-runner.md` §10.3), forwarded verbatim to
     // `WatcherManagementSection`.
@@ -155,20 +156,19 @@ struct WatchersTabView: View {
     private func content(for item: WatcherPanelItem) -> some View {
         VStack(spacing: 0) {
             if let markdown = item.renderedMarkdown, !markdown.isEmpty {
-                ScrollView {
-                    Markdown(markdown)
-                        .markdownTheme(.summary)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding()
-                }
-                .environment(\.openURL, OpenURLAction { url in
-                    // `docs/design/05-watcher-runner.md` §10.4: the `kikimi-seg:` scheme is handled
-                    // entirely within this view -- it is never registered on `KikimiURLRoute`.
-                    guard url.scheme == "kikimi-seg" else { return .systemAction }
-                    onOpenSegment(url.absoluteString.replacingOccurrences(of: "kikimi-seg:", with: ""))
-                    return .handled
-                })
+                // `docKey` is per Watcher (`docs/design/39-webview-markdown.md` MD8): all the
+                // sub-tabs share one web view, so without it, switching from Watcher A to B would
+                // restore A's scroll position onto B's result.
+                //
+                // `kikimi-seg:` links no longer go through `.environment(\.openURL,)` — the page
+                // intercepts every click and `MarkdownLinkRouter` classifies it, which also keeps
+                // the scheme from ever reaching the system (design 05 §8.1).
+                MarkdownWebView(
+                    host: markdownHost,
+                    markdown: markdown,
+                    docKey: "watcher:\(item.id)",
+                    onOpenSegment: onOpenSegment
+                )
             } else {
                 WatcherNoResultPlaceholder()
             }
