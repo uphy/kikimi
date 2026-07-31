@@ -4,9 +4,9 @@ import Foundation
 
 /// A `kind: simple` Watcher file's parsed contents -- the user-facing surface the simple form
 /// (`Kikimi/Views/MeetingWorkspace/SimpleWatcherFormSheet.swift`) round-trips through
-/// (`docs/design/34-simple-watchers.md` §3.1). `desugar()` is the only bridge to the execution
-/// engine's `WatcherDefinition`; `WatcherRunner`/`WatcherLibrary`/`WatcherViewRenderer` never see this
-/// type directly -- they only ever see the `WatcherDefinition` it desugars into.
+/// (`docs/design/34-simple-watchers.md` §3.1). `desugar(promptTemplate:)` is the only bridge to the
+/// execution engine's `WatcherDefinition`; `WatcherRunner`/`WatcherLibrary`/`WatcherViewRenderer` never
+/// see this type directly -- they only ever see the `WatcherDefinition` it desugars into.
 struct SimpleWatcherSpec: Sendable, Equatable {
     var id: String
     var name: String
@@ -42,24 +42,28 @@ extension SimpleWatcherSpec {
     {{recent_segments}}
     """
 
-    /// Builds the `# System` section body: a fixed preamble + output-rules footer (verbatim, never
-    /// re-interpolated per run -- keeps the prompt-cache-friendly "System は実行間で完全固定" property)
-    /// wrapping the user-authored observation prompt (§4.1). `prompt` is the only variable part, so
-    /// this function's output changes iff the `.md` file's body changes -- exactly the "spec 相当の変更
-    /// でしか変わらない" cache-stability property §4.1 asks for.
-    static func systemPrompt(forViewpoint prompt: String) -> String {
-        """
-        あなたは会議のリアルタイム書き起こしを観察するアシスタントです。
-        次の【観点】に従って、与えられた会議内容から分かることを Markdown で簡潔にまとめてください。
+    /// The built-in default `# System` section template: a fixed preamble + output-rules footer
+    /// wrapping a `{{viewpoint}}` placeholder (`docs/design/42-prompt-overrides.md` §2.1's
+    /// `simple-watcher` row / §2.2). Forwards to `PromptSpec.spec(for: .simpleWatcher).defaultBody` --
+    /// `Kikimi/Prompts/PromptSpec.swift` is this text's single source of truth (§2.2: "Moved from
+    /// `SimpleWatcherSpec.systemPrompt(forViewpoint:)`"); this stays a Watchers-module-local alias so
+    /// callers in this file (and `WatcherDefinitionParser`/`WatcherRunner`'s own default-parameter
+    /// values) don't have to spell out the `Kikimi/Prompts/` type every time they need "no override
+    /// active" behavior.
+    static var defaultSystemPromptTemplate: String {
+        PromptSpec.spec(for: .simpleWatcher).defaultBody
+    }
 
-        【観点】
-        \(prompt)
-
-        【出力ルール】
-        - markdown フィールドに結果の Markdown 本文を入れて返す
-        - 会議内容から判断できないことは推測で書かない
-        - 根拠となる発言を参照するときは、その発言の seg ID（例: seg_00042）を本文にそのまま書く
-        """
+    /// Builds the `# System` section body: `template` (the built-in default, or a
+    /// `prompts/simple-watcher.md` override's active body) with its required `{{viewpoint}}`
+    /// placeholder expanded to `viewpoint` via `PromptPlaceholder.expand`
+    /// (`docs/design/42-prompt-overrides.md` §4.2). Never re-interpolated per run -- keeps the
+    /// prompt-cache-friendly "System は実行間で完全固定" property (§4.1 of
+    /// `docs/design/34-simple-watchers.md`). `template` is expected to already be resolved by the
+    /// caller (session-start snapshot for `WatcherRunner`, current value for the Prep-tab/UI paths --
+    /// see `docs/design/42-prompt-overrides.md` §4.3); this function itself does no resolution.
+    static func systemPrompt(template: String, viewpoint: String) -> String {
+        PromptPlaceholder.expand(template: template, replacements: [("{{viewpoint}}", viewpoint)])
     }
 
     /// Builds this spec's `WatcherDefinition` (§4's table): `state_mode: snapshot`, the single
@@ -67,7 +71,13 @@ extension SimpleWatcherSpec {
     /// `simpleSpec: self` so the UI can route this row back to the simple form
     /// (`docs/design/34-simple-watchers.md` §6.3). This is the *only* place a `kind: simple` file's
     /// runtime behavior is decided -- `WatcherRunner` never special-cases `simpleSpec`.
-    func desugar() -> WatcherDefinition {
+    ///
+    /// - Parameter promptTemplate: The `# System` section template to embed `prompt` into (see
+    ///   `systemPrompt(template:viewpoint:)`). Callers pass the currently-resolved
+    ///   `simple-watcher` prompt override body (or `Self.defaultSystemPromptTemplate` if none is
+    ///   active) -- this function performs no resolution of its own
+    ///   (`docs/design/42-prompt-overrides.md` §4.2/§4.3).
+    func desugar(promptTemplate: String) -> WatcherDefinition {
         WatcherDefinition(
             id: id,
             name: name,
@@ -80,7 +90,7 @@ extension SimpleWatcherSpec {
             ]),
             view: Self.viewTemplate,
             initialState: nil,
-            systemPrompt: Self.systemPrompt(forViewpoint: prompt),
+            systemPrompt: Self.systemPrompt(template: promptTemplate, viewpoint: prompt),
             userPromptTemplate: Self.userPromptTemplate,
             simpleSpec: self
         )
@@ -116,12 +126,13 @@ extension SimpleWatcherSpec {
 // MARK: - `desugaredFullText()` (§7)
 
 extension SimpleWatcherSpec {
-    /// Renders this spec's `desugar()` result as a **full-format** `.md` text -- "詳細形式に変換…"'s
-    /// output (§7). Pure text generation only; the round-trip check §7 requires before any caller
-    /// persists this text (`WatcherDefinitionParser.parse` the result, compare against `desugar()`
-    /// ignoring `simpleSpec`) is the caller's responsibility (`MeetingWorkspaceViewModel
-    /// .convertSimpleWatcherToFull(id:)`), not this function's -- eject is a UI-triggered, one-shot
-    /// action, not something every `desugar()` call needs to pay for.
+    /// Renders this spec's `desugar(promptTemplate:)` result as a **full-format** `.md` text --
+    /// "詳細形式に変換…"'s output (§7). Pure text generation only; the round-trip check §7 requires
+    /// before any caller persists this text (`WatcherDefinitionParser.parse` the result, compare
+    /// against `desugar(promptTemplate:)` ignoring `simpleSpec`) is the caller's responsibility
+    /// (`MeetingWorkspaceViewModel.convertSimpleWatcherToFull(id:)`), not this function's -- eject is a
+    /// UI-triggered, one-shot action, not something every `desugar(promptTemplate:)` call needs to pay
+    /// for.
     ///
     /// `name`/`model`/`view` are emitted as double-quoted scalars (same escaping helper `fileText()`
     /// uses); `id`/`trigger`/`state_mode`/`input_scope` as plain scalars (§7's emit-format bullets).
@@ -129,7 +140,14 @@ extension SimpleWatcherSpec {
     /// scalar starting with `{` parses as YAML flow-mapping syntax, so `WatcherDefinitionParser` would
     /// see `mapping["view"]?.string == nil` and throw `missingRequiredField("view")` (verified against
     /// `WatcherDefinition.swift`'s parse implementation, §7).
-    func desugaredFullText() -> String {
+    ///
+    /// - Parameter promptTemplate: Forwarded to `systemPrompt(template:viewpoint:)` -- see
+    ///   `desugar(promptTemplate:)`'s doc comment. The caller of `convertSimpleWatcherToFull(id:)`
+    ///   (`MeetingWorkspaceViewModel+Watchers.swift`) must pass the *same* value here as it passes to
+    ///   the paired `desugar(promptTemplate:)` call its round-trip check compares against
+    ///   (`docs/design/42-prompt-overrides.md` §4.3) -- a mismatched template would make that
+    ///   comparison fail on an unrelated `systemPrompt` difference.
+    func desugaredFullText(promptTemplate: String) -> String {
         var lines = [
             "---",
             "id: \(id)",
@@ -148,7 +166,7 @@ extension SimpleWatcherSpec {
         lines.append("")
         lines.append("# System")
         lines.append("")
-        lines.append(Self.systemPrompt(forViewpoint: prompt))
+        lines.append(Self.systemPrompt(template: promptTemplate, viewpoint: prompt))
         lines.append("")
         lines.append("# User")
         lines.append("")

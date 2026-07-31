@@ -1026,6 +1026,146 @@ struct RefinementQueueTests {
         #expect(requests.count == 1)
         #expect(!requests[0].system.contains("# Glossary"))
     }
+
+    // MARK: - ruleBodyProvider / glossaryHeaderProvider (`docs/design/42-prompt-overrides.md` §4.2/§4.3)
+
+    @Test("ruleBodyProvider defaults to PromptSpec's built-in refinement policy body")
+    func ruleBodyProviderDefaultsToBuiltInPolicyBody() async throws {
+        let handle = makeHandle()
+        try await handle.writeContext("")
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 1))
+        await queue.start()
+        let segments = try await appendSegments(1, to: handle)
+        await queue.enqueue(segments[0])
+        await queue.drain()
+
+        let requests = await fakeLLM.receivedRequests
+        #expect(requests.count == 1)
+        // `PromptSpec.spec(for: .refinement).defaultBody` up to its `{{leak_dedup_rule}}` token, plus
+        // the expanded leak-dedup rule (`config.dedupSystemLeakSegments` defaults to `true`, per
+        // `RefinementConfig.default`) -- together this is the exact policy layer the built-in default
+        // renders (mirrors `RefinementPromptBuilderTests`'s default-equivalence assertions).
+        #expect(requests[0].system.contains("あなたは会議書き起こしを整形する専門家です"))
+        #expect(requests[0].system.contains("スピーカーの音がマイクに回り込んで二重に書き起こされたものとみなし"))
+        #expect(!requests[0].system.contains("{{leak_dedup_rule}}"))
+    }
+
+    @Test("glossaryHeaderProvider defaults to GlossaryRenderer's built-in header")
+    func glossaryHeaderProviderDefaultsToBuiltInHeader() async throws {
+        let handle = makeHandle()
+        try await handle.writeContext("")
+        let glossary = [GlossaryEntry(term: "nekosuke", reading: "ねこすけ")]
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(
+            sessionHandle: handle,
+            llm: fakeLLM,
+            config: makeConfig(batchSize: 1),
+            glossaryProvider: { glossary }
+        )
+        await queue.start()
+        let segments = try await appendSegments(1, to: handle)
+        await queue.enqueue(segments[0])
+        await queue.drain()
+
+        let requests = await fakeLLM.receivedRequests
+        #expect(requests.count == 1)
+        #expect(requests[0].system.contains(GlossaryRenderer.defaultHeader))
+    }
+
+    @Test("a custom ruleBodyProvider's text replaces the built-in policy layer in every batch's system prompt")
+    func customRuleBodyProviderIsUsedInEveryBatch() async throws {
+        let handle = makeHandle()
+        try await handle.writeContext("")
+        let customRuleBody = "カスタム方針: 常に敬語で整形する。{{leak_dedup_rule}}"
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(
+            sessionHandle: handle,
+            llm: fakeLLM,
+            config: makeConfig(batchSize: 1),
+            ruleBodyProvider: { customRuleBody }
+        )
+        await queue.start()
+        let segments = try await appendSegments(2, to: handle)
+        await queue.enqueue(segments[0])
+        await queue.drain()
+        await queue.enqueue(segments[1])
+        await queue.drain()
+
+        let requests = await fakeLLM.receivedRequests
+        #expect(requests.count == 2)
+        #expect(requests[0].system.hasPrefix("カスタム方針: 常に敬語で整形する。"))
+        #expect(requests[1].system.hasPrefix("カスタム方針: 常に敬語で整形する。"))
+        #expect(!requests[0].system.contains("あなたは会議書き起こしを整形する専門家です"))
+    }
+
+    @Test("a custom glossaryHeaderProvider's text replaces the default Glossary header in the rendered block")
+    func customGlossaryHeaderProviderIsUsedInGlossaryBlock() async throws {
+        let handle = makeHandle()
+        try await handle.writeContext("")
+        let glossary = [GlossaryEntry(term: "nekosuke", reading: "ねこすけ")]
+        let customHeader = "# カスタム用語集ヘッダー"
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(
+            sessionHandle: handle,
+            llm: fakeLLM,
+            config: makeConfig(batchSize: 1),
+            glossaryProvider: { glossary },
+            glossaryHeaderProvider: { customHeader }
+        )
+        await queue.start()
+        let segments = try await appendSegments(1, to: handle)
+        await queue.enqueue(segments[0])
+        await queue.drain()
+
+        let requests = await fakeLLM.receivedRequests
+        #expect(requests.count == 1)
+        #expect(requests[0].system.contains(customHeader))
+        #expect(!requests[0].system.contains(GlossaryRenderer.defaultHeader))
+    }
+
+    @Test("ruleBodyProvider/glossaryHeaderProvider are captured once at construction, mirroring the session-start snapshot defaultRefinementQueueFactory relies on (§4.3/§5.2)")
+    func ruleBodyAndGlossaryHeaderProvidersAreFixedForTheQueuesLifetime() async throws {
+        // Mirrors `defaultRefinementQueueFactory`'s own shape (`MeetingWorkspaceViewModel+Factories
+        // .swift`): read a source value into a plain `let` *before* constructing the queue, then hand
+        // a closure that returns that captured value -- not one that re-reads a live, mutable source.
+        // Mutating the mutable sources below *after* the queue is constructed must never be reflected
+        // in a later batch's system prompt, which is exactly what "セッション開始時スナップショット"
+        // (§5.2's `reload: session-start` row) requires of the `refinement`/`glossary-header` prompt ids.
+        let handle = makeHandle()
+        try await handle.writeContext("")
+        var mutableRuleBody = "SNAPSHOT RULE {{leak_dedup_rule}}"
+        var mutableGlossaryHeader = "# Snapshot Glossary Header"
+        let ruleBodySnapshot = mutableRuleBody
+        let glossaryHeaderSnapshot = mutableGlossaryHeader
+
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(
+            sessionHandle: handle,
+            llm: fakeLLM,
+            config: makeConfig(batchSize: 1),
+            glossaryProvider: { [GlossaryEntry(term: "nekosuke", reading: "ねこすけ")] },
+            ruleBodyProvider: { ruleBodySnapshot },
+            glossaryHeaderProvider: { glossaryHeaderSnapshot }
+        )
+        await queue.start()
+
+        // Simulate a mid-session `prompts/refinement.md`/`prompts/glossary-header.md` edit: the queue
+        // must not see this, because its providers already captured the pre-edit snapshot above.
+        mutableRuleBody = "CHANGED RULE {{leak_dedup_rule}}"
+        mutableGlossaryHeader = "# Changed Header"
+
+        let segments = try await appendSegments(1, to: handle)
+        await queue.enqueue(segments[0])
+        await queue.drain()
+
+        let requests = await fakeLLM.receivedRequests
+        #expect(requests.count == 1)
+        #expect(requests[0].system.contains("SNAPSHOT RULE"))
+        #expect(!requests[0].system.contains("CHANGED RULE"))
+        #expect(requests[0].system.contains("# Snapshot Glossary Header"))
+        #expect(!requests[0].system.contains("# Changed Header"))
+    }
 }
 
 private extension FakeLLM {

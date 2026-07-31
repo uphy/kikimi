@@ -7,12 +7,23 @@ import Testing
 /// 「LLM への入出力の例」).
 @Suite("SummaryPromptBuilder")
 struct SummaryPromptBuilderTests {
-    @Test("system prompt is fixed and mentions the patch-only, null-if-unchanged rule")
-    func systemPromptIsFixedAndMentionsPatchRule() {
-        let prompt = SummaryPromptBuilder.systemPrompt
+    @Test("patch contract is fixed and mentions the patch-only, null-if-unchanged structural rules")
+    func patchContractIsFixedAndMentionsStructuralRules() {
+        let contract = SummaryPromptBuilder.patchContract
 
-        #expect(prompt.contains("変更差分（patch）"))
-        #expect(prompt.contains("何も変更がなければ全フィールド null"))
+        #expect(contract.contains("変更差分（patch）"))
+        #expect(contract.contains("何も変更がなければ全フィールド null"))
+    }
+
+    @Test("systemPrompt(policyBody:) reconstructs the policy layer and the fixed patch-contract layer")
+    func systemPromptReconstructsPolicyAndContractLayers() {
+        let policyBody = "あなたは会議サマリを更新するエディタです。"
+
+        let prompt = SummaryPromptBuilder.systemPrompt(policyBody: policyBody)
+
+        #expect(prompt == policyBody + "\n\n【patch 契約】\n" + SummaryPromptBuilder.patchContract)
+        #expect(prompt.hasPrefix(policyBody))
+        #expect(prompt.contains("【patch 契約】"))
     }
 
     @Test("user prompt embeds the current state, segments in seg_XXXXX (speaker): text form, and the given timestamp")

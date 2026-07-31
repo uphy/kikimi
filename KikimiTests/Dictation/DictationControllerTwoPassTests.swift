@@ -113,6 +113,14 @@ struct DictationControllerTwoPassTests {
             watchersDefaultModelProvider: { "claude-haiku-4-5-20251001" },
             glossaryProvider: { [] },
             glossaryCategoriesProvider: { [] },
+            // `docs/design/42-prompt-overrides.md` §7.2: `makeConfig` always sets `refine: false`
+            // above, so `refineForHistory` never actually reaches these -- stubbed anyway (matching
+            // every other provider on this type) so a future `refine: true` here can't silently
+            // fall through to `PromptStore.shared`'s real `~/.config/kikimi/prompts/` access.
+            dictationGlobalBodyProvider: { "" },
+            dictationAppBundleIDsProvider: { [] },
+            dictationAppBodyProvider: { _ in "" },
+            dictationGlossaryHeaderProvider: { GlossaryRenderer.defaultHeader },
             transcriberFactory: { _ in throw TwoPassTestStubError() },
             batchTranscriberFactory: batchTranscriberFactory,
             historyStore: historyStore,

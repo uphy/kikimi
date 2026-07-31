@@ -71,6 +71,27 @@ actor RefinementQueue {
     /// list rather than a live `AppConfig.shared` read, for exactly the data-race reason spelled out
     /// there. `defaultRefinementQueueFactory` snapshots the real value once on the main actor.
     let glossaryCategoriesProvider: @Sendable () -> [GlossaryCategory]
+    /// `docs/design/42-prompt-overrides.md` §2.2/§4.2/§4.3: the refinement system prompt's 方針層
+    /// (policy-layer) body, `{{leak_dedup_rule}}` unexpanded, passed to
+    /// `RefinementPromptBuilder.buildSystemPrompt(ruleBody:context:glossaryBlock:
+    /// dedupSystemLeakSegments:)`. Defaults to a fixed closure returning the built-in
+    /// `PromptSpec.spec(for: .refinement).defaultBody` -- **not** a live `PromptStore` read, for the
+    /// exact same reason `glossaryProvider`'s doc comment above gives (this actor's background
+    /// executor must not touch `@MainActor`-only state). `defaultRefinementQueueFactory`
+    /// (`MeetingWorkspaceViewModel+Factories.swift`) snapshots `PromptStore`'s current override (or the
+    /// default) once, on the main actor, at queue-construction time, and passes `{ snapshot }` -- the
+    /// "セッション開始時スナップショット" this prompt id's `reload: session-start` requires (§5.2): a
+    /// `prompts/refinement.md` edit mid-session is picked up by the *next* session's queue, never this
+    /// one's, because this provider is called fresh every batch (`currentSystemPrompt()`) but always
+    /// returns the same captured value for this queue's whole lifetime.
+    let ruleBodyProvider: @Sendable () -> String
+    /// `docs/design/42-prompt-overrides.md` §2.1's `glossary-header` prompt id, as folded into every
+    /// batch's glossary block via `GlossaryRenderer.render(entries:categories:header:)`. Defaults to a
+    /// fixed closure returning `GlossaryRenderer.defaultHeader`. Same session-start snapshot contract
+    /// as `ruleBodyProvider` above (§5.2: "会議整形はセッション開始時スナップショット... glossary エントリ
+    /// 自体も既にキュー生成時スナップショット... であり、それに揃える") -- `defaultRefinementQueueFactory`
+    /// snapshots this alongside `ruleBodyProvider`.
+    let glossaryHeaderProvider: @Sendable () -> String
 
     // MARK: - §3.2 id dedup invariant
 
@@ -174,6 +195,8 @@ actor RefinementQueue {
     ///   - voiceprintStore: See the stored property's doc comment above.
     ///   - glossaryProvider: See the stored property's doc comment above.
     ///   - glossaryCategoriesProvider: See the stored property's doc comment above.
+    ///   - ruleBodyProvider: See the stored property's doc comment above.
+    ///   - glossaryHeaderProvider: See the stored property's doc comment above.
     init(
         sessionHandle: SessionHandle,
         llm: LLMCompleting,
@@ -182,7 +205,9 @@ actor RefinementQueue {
         retryDelay: Duration = .seconds(2),
         voiceprintStore: VoiceprintStore = .shared,
         glossaryProvider: @escaping @Sendable () -> [GlossaryEntry] = { [] },
-        glossaryCategoriesProvider: @escaping @Sendable () -> [GlossaryCategory] = { [] }
+        glossaryCategoriesProvider: @escaping @Sendable () -> [GlossaryCategory] = { [] },
+        ruleBodyProvider: @escaping @Sendable () -> String = { PromptSpec.spec(for: .refinement).defaultBody },
+        glossaryHeaderProvider: @escaping @Sendable () -> String = { GlossaryRenderer.defaultHeader }
     ) {
         self.sessionHandle = sessionHandle
         self.llm = llm
@@ -192,6 +217,8 @@ actor RefinementQueue {
         self.voiceprintStore = voiceprintStore
         self.glossaryProvider = glossaryProvider
         self.glossaryCategoriesProvider = glossaryCategoriesProvider
+        self.ruleBodyProvider = ruleBodyProvider
+        self.glossaryHeaderProvider = glossaryHeaderProvider
         (eventsStream, eventsContinuation) = AsyncStream.makeStream()
     }
 

@@ -96,20 +96,9 @@ struct ChatPromptBuilderTests {
 
         #expect(payload.answer.hasPrefix("## 決定事項"))
     }
-
-    // MARK: - (d) system prompt rules
-
-    @Test("buildSystem states the no-guessing rule, the raw marker, and how to draw diagrams")
-    func buildSystemStatesTheRules() {
-        let system = ChatPromptBuilder.buildSystem()
-
-        #expect(system.contains("推測"), "the transcript is ASR output; filling gaps plausibly produces confident wrong answers")
-        #expect(system.contains("読み取れない"))
-        #expect(system.contains("*(raw)*"))
-        // design 39 Phase C: the chat history is a web view now, so mermaid is allowed rather than
-        // steered away from. What matters is that the prompt still says something about diagrams --
-        // silence would leave the model guessing.
-        #expect(system.contains("mermaid"), "diagram guidance should still mention mermaid (design 39 §4)")
-        #expect(system.contains("HH:MM:SS"))
-    }
+    // (d) system prompt rules: `buildSystem()` moved out of `ChatPromptBuilder` entirely
+    // (`docs/design/42-prompt-overrides.md` §4.2). The rule content (no-guessing, `*(raw)*` marker,
+    // mermaid, `HH:MM:SS` citation format) now lives in `PromptSpec.spec(for: .chat).defaultBody`
+    // and is covered by `Kikimi/Prompts/`'s own tests; `ChatRunnerTests` covers that `ChatRunner`
+    // forwards whatever `promptBodyProvider` returns into `LLMRequest.system`.
 }

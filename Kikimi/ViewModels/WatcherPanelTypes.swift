@@ -100,8 +100,8 @@ enum SimpleWatcherConversionError: LocalizedError, Equatable, Sendable {
     /// a "汎用形" message that surfaces whatever actually went wrong.
     case parseFailed(detail: String)
     /// The generated text parsed cleanly but its `WatcherDefinition` (minus `simpleSpec`) doesn't
-    /// match `spec.desugar()`. The only known cause is a `# `-prefixed line in the prompt colliding
-    /// with the `# System`/`# User` section split (§8.2).
+    /// match `spec.desugar(promptTemplate:)`. The only known cause is a `# `-prefixed line in the
+    /// prompt colliding with the `# System`/`# User` section split (§8.2).
     case roundTripMismatch
 
     var errorDescription: String? {

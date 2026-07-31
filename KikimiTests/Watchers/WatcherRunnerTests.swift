@@ -712,6 +712,58 @@ struct WatcherRunnerTests {
         #expect(!receivedUserPrompt.contains("raw 1"), "second (covered, non-leading) must not fall back to its own raw text")
     }
 
+    // MARK: - simpleWatcherTemplate session-start fixity (`docs/design/42-prompt-overrides.md` §4.3/§5.2)
+
+    /// A minimal, always-valid `kind: simple` definition -- the runner desugars this through
+    /// `SimpleWatcherSpec.desugar(promptTemplate:)`, embedding `prompt` into whatever template this
+    /// runner was constructed with.
+    private func simpleDefinitionText(id: String, prompt: String) -> String {
+        """
+        ---
+        kind: simple
+        id: \(id)
+        name: Simple Test Watcher
+        trigger: on_manual
+        input_scope: summary
+        ---
+
+        \(prompt)
+        """
+    }
+
+    @Test("a kind: simple Watcher's .md edit mid-recording is reflected on the next manual run, while the systemPrompt's surrounding template stays this runner's own init-time snapshot")
+    func simpleWatcherTemplateStaysFixedAcrossReparsedMdEdits() async throws {
+        let directory = makeTempSessionDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = makeHandle(directory: directory)
+        try await handle.writeText(simpleDefinitionText(id: "watcher-a", prompt: "最初の観点"), to: .watcherDefinition(id: "watcher-a"))
+        try await handle.writeEnabledWatchers(["watcher-a"])
+
+        let llm = FakeWatcherLLM()
+        await llm.setResponse("{\"markdown\":\"result\"}", for: "watcher_watcher-a")
+
+        let customTemplate = "CUSTOM PREAMBLE\n{{viewpoint}}\nCUSTOM FOOTER"
+        let runner = WatcherRunner(
+            sessionHandle: handle, llm: llm, library: makeLibrary(), defaultModel: "claude-haiku-4-5-20251001",
+            simpleWatcherTemplate: customTemplate
+        )
+        await runner.runManually(id: "watcher-a")
+        let firstSystemPrompt = await llm.receivedRequests.last?.system ?? ""
+        #expect(firstSystemPrompt == "CUSTOM PREAMBLE\n最初の観点\nCUSTOM FOOTER")
+
+        // kikimi.md 9 章: "Recording 中の .md 編集は次回発火から即反映" -- simulate a live edit.
+        try await handle.writeText(simpleDefinitionText(id: "watcher-a", prompt: "更新後の観点"), to: .watcherDefinition(id: "watcher-a"))
+        await runner.runManually(id: "watcher-a")
+        let secondSystemPrompt = await llm.receivedRequests.last?.system ?? ""
+
+        // The viewpoint reflects the edit immediately (next-trigger reparse)...
+        #expect(secondSystemPrompt == "CUSTOM PREAMBLE\n更新後の観点\nCUSTOM FOOTER")
+        // ...but the template wrapping it is still this runner's own construction-time snapshot,
+        // fixed for the session's duration (§5.2's "System は実行間で完全固定").
+        #expect(secondSystemPrompt.hasPrefix("CUSTOM PREAMBLE\n"))
+        #expect(secondSystemPrompt.hasSuffix("\nCUSTOM FOOTER"))
+    }
+
     @Test("runManually(id:) yields .failed for an unresolvable definition")
     func runManuallyFailsForUnresolvableDefinition() async throws {
         let directory = makeTempSessionDirectory()

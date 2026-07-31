@@ -201,6 +201,14 @@ struct DictationControllerHistoryTests {
             watchersDefaultModelProvider: { "claude-haiku-4-5-20251001" },
             glossaryProvider: { [] },
             glossaryCategoriesProvider: { [] },
+            // `docs/design/42-prompt-overrides.md` §7.2: these default to `PromptStore.shared`,
+            // which would otherwise touch the real `~/.config/kikimi/prompts/`/`AppConfig.shared`/
+            // `AppState.shared` the first time a `refine: true` test above reaches `refineForHistory`.
+            // Stubbed out the same way every other provider on this type already is.
+            dictationGlobalBodyProvider: { "" },
+            dictationAppBundleIDsProvider: { [] },
+            dictationAppBodyProvider: { _ in "" },
+            dictationGlossaryHeaderProvider: { GlossaryRenderer.defaultHeader },
             transcriberFactory: { _ in throw ControllerHistoryTestStubError() },
             refiner: DictationRefiner(llm: llm),
             historyStore: historyStore,

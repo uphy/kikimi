@@ -24,21 +24,28 @@ struct SummarySegmentInput: Sendable, Equatable {
 /// Pure by construction: callers pass `now`/`contextMarkdown` in explicitly rather than this type
 /// reading `Date()` or touching the filesystem (04-summary-updater.md §4.4's task instruction).
 enum SummaryPromptBuilder {
-    /// Fixed system prompt (kikimi.md 8 章's system prompt example). Kept small and constant across
-    /// every call so structure stays predictable; unlike refinement's system prompt (7 章), this one
-    /// is *not* prompt-cached (summary updates are infrequent, and context is folded into the user
-    /// prompt every time instead -- 04-summary-updater.md §4.4).
-    static let systemPrompt = """
-    あなたは会議サマリを更新するエディタです。前サマリ state と直近の会話を受け取り、変更差分（patch）を JSON で返してください。
-
-    【ルール】
-    - title は会議内容を表す簡潔なタイトルを毎回提案する（会議名が明確でなければ議題や会話内容から推定する）。現在の state.title が空の場合は必ず提案し、既に付いているタイトルと実質同じ内容なら null で良い
+    /// Contract layer (`docs/design/42-prompt-overrides.md` §2.2/§4.2): the structural invariants of
+    /// the patch response that hold regardless of the policy layer's wording, so they are fixed
+    /// across every call and never editable via a `prompts/summary.md` override. Unlike
+    /// `refinement`'s system prompt (7 章), the summary system prompt is *not* prompt-cached
+    /// (summary updates are infrequent, and context is folded into the user prompt every time
+    /// instead -- 04-summary-updater.md §4.4), so re-deriving it per call via `systemPrompt(policyBody:)`
+    /// costs nothing.
+    static let patchContract = """
+    - 出力は変更差分（patch）の JSON
     - participants は新たに登場した発言者・出席者だけを participants_add に追加する（既出の参加者は含めない）
-    - overview は必要に応じて全文書き直し
     - decisions は新規追加分のみ返す（既存には触らない）
     - action_items は add / modify / complete のいずれかの操作を返す
     - 何も変更がなければ全フィールド null で良い
     """
+
+    /// Combines the policy layer -- role declaration + editing policy (title proposal / overview
+    /// rewrite guidance), sourced from `PromptStore.policyBody(for: .builtin(.summary))` /
+    /// `PromptSpec.defaultBody` when there is no override file -- with the fixed `patchContract`
+    /// above to produce the final system prompt (42-prompt-overrides.md §4.2).
+    static func systemPrompt(policyBody: String) -> String {
+        policyBody + "\n\n【patch 契約】\n" + patchContract
+    }
 
     /// Builds the per-call user prompt (04-summary-updater.md §4.4's "現在の state（JSON）＋直近の
     /// 会話（`start_ms` 昇順、未反映分）＋現在時刻". `context.md` is folded in too (kikimi.md 7 章:

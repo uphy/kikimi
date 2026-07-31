@@ -57,33 +57,14 @@ enum WatcherPromptBuilder {
     /// で行う"). Deliberately not three sequential `replacingOccurrences(of:with:)` calls: the state
     /// JSON substituted for `{{state}}` could -- in principle -- itself contain the literal text
     /// `"{{summary}}"` (e.g. if a Watcher's state happens to store that string), and a sequential
-    /// replace would then wrongly re-expand it. Scanning the original template once and copying
-    /// substituted text through untouched avoids that class of bug entirely.
+    /// replace would then wrongly re-expand it. Delegates to `PromptPlaceholder.expand`, the shared
+    /// single-pass helper (`docs/design/42-prompt-overrides.md` §4.1) that implements this same
+    /// scan-once-and-copy-through logic.
     static func buildUserPrompt(template: String, stateText: String, summaryMarkdown: String, recentSegmentsText: String) -> String {
-        let tokens: [(token: String, replacement: String)] = [
+        PromptPlaceholder.expand(template: template, replacements: [
             (stateToken, stateText),
             (summaryToken, summaryMarkdown),
             (recentSegmentsToken, recentSegmentsText)
-        ]
-
-        var result = ""
-        var remaining = Substring(template)
-        while !remaining.isEmpty {
-            var earliestMatch: (range: Range<Substring.Index>, replacement: String)?
-            for (token, replacement) in tokens {
-                guard let range = remaining.range(of: token) else { continue }
-                if earliestMatch == nil || range.lowerBound < earliestMatch!.range.lowerBound {
-                    earliestMatch = (range, replacement)
-                }
-            }
-            guard let match = earliestMatch else {
-                result += remaining
-                break
-            }
-            result += remaining[remaining.startIndex..<match.range.lowerBound]
-            result += match.replacement
-            remaining = remaining[match.range.upperBound...]
-        }
-        return result
+        ])
     }
 }

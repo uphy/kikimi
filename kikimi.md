@@ -339,17 +339,26 @@ transcript.jsonl と同じ ID・時刻情報を持ち、整形結果を追加。
 
 ### Prompt 設計
 
-Prompt caching を最大限効かせるため、system prompt を完全固定にする。
+Prompt caching を最大限効かせるため、system prompt はセッション中固定にする（整形ルールの編集は
+次セッションから反映）。
 
-#### System prompt（キャッシュヒット狙い・完全固定）
+#### System prompt（キャッシュヒット狙い・セッション中固定）
+
+整形ルール部分（方針層）の正は `Kikimi/Prompts/PromptSpec.swift` の組み込み default で、
+`~/.config/kikimi/prompts/refinement.md` により上書きできる（`docs/prompts.md`、
+`docs/design/42-prompt-overrides.md`）。以下は現在の default での例
+（`dedup_system_leak_segments` が既定の true のときは、マイク回り込み除去の bullet が
+【整形ルール】の末尾にもう 1 行付く）。
 
 ```
 あなたは会議書き起こしを整形する専門家です。以下のルールに従ってください。
 
 【整形ルール】
 - フィラー（「えーと」「あの」など）を除去する
+- 言い直しがある場合は言い直した後の内容を採用し、言い直し前の断片は削除する（例:「明日、いや明後日の会議」→「明後日の会議」）
 - 句読点を補い、自然な日本語にする
-- 意味を変えない範囲での軽微な言い換えは可
+- 入力は音声認識の書き起こしのため、同音・近音の誤変換があり得る。文脈から明らかな誤変換は正しい表記に直す（例:「駅存の実装」→「既存の実装」）
+- 意味を変えない範囲での軽微な言い換えは可。話者の口調（です・ます調/常体）は変えない
 - 意味の解釈が不明瞭な箇所は元の表現を残す
 - フィラー・相槌・言い直しの断片のみで、除去すると意味のある内容が何も残らないセグメントは、refined_text を空文字にする（そのセグメントを削除する扱い）
 
@@ -358,8 +367,9 @@ Prompt caching を最大限効かせるため、system prompt を完全固定に
 
 【出力形式】
 schema の "segments" 配列で、対象セグメント数分の整形結果を返す。
-segments の各要素: {"id": "seg_XXXXX", "refined_text": "..."}
+segments の各要素: {"id": "seg_XXXXX", "refined_text": "...", "joins_next": false}
 意味のある内容がないセグメントは refined_text を空文字（{"id": "seg_XXXXX", "refined_text": ""}）にする。
+文が不自然に途切れて次のセグメントに続いている場合は joins_next を true にする。意味的に独立していれば false にする。
 ```
 
 - **`refined_text: ""`（空文字）は「意味なしセグメントの削除」の合図**。整形失敗（`refined_text: null` + error）とは別扱いで、Transcript 表示・サマリ入力・整形の文脈行から除外する（raw フォールバックしない）
@@ -480,19 +490,24 @@ state は `sessions/<id>/summary.state.json` に保存される。長時間会�
 
 ### LLM への入出力の例
 
-**System prompt（固定）**:
+**System prompt**（編集方針＝方針層は `Kikimi/Prompts/PromptSpec.swift` の default。
+`~/.config/kikimi/prompts/summary.md` で上書き可能で、patch 操作の構造ルール（decisions は追加のみ・
+action_items は add/modify/complete 等）はアプリが【patch 契約】として自動付与する。以下は現在の
+default での例）:
 
 ```
 あなたは会議サマリを更新するエディタです。前サマリ state と直近の会話を受け取り、変更差分（patch）を JSON で返してください。
 
-【schema】
-（Kikimi が内部 schema を JSON Schema として埋め込む）
+【編集方針】
+- title: 現在の state.title が空の場合は、会議内容を表す簡潔なタイトルを必ず提案する（会議名が明確でなければ議題や会話内容から推定する）。既に付いているタイトルは、明確に良くなる場合だけ新しい title を返し、実質同じ内容の言い換えなら null を返す
+- overview は必要に応じて全文書き直す。会議の流れと現時点の論点が短時間で掴める要約に保ち、発言の羅列にしない
+- decisions は会話で明確に合意・決定された事項だけを追加する。提案・検討段階のものを決定として書かない
+- action_items は担当や期限が発言から読み取れる場合のみ埋める。読み取れないときは assignee は空文字、due は null にする（推測で埋めない）
+- 書き起こしには誤変換があり得る。意味の取れない断片は無理にサマリへ反映しない
 
-【ルール】
-- overview は必要に応じて全文書き直し
-- decisions は新規追加分のみ返す（既存には触らない）
-- action_items は add / modify / complete のいずれかの操作を返す
-- 何も変更がなければ全フィールド null で良い
+【patch 契約】
+（アプリが自動付与: 出力は patch の JSON / participants_add は新規の発言者のみ / decisions は
+新規追加分のみ / action_items は add・modify・complete のいずれか / 変更がなければ全フィールド null）
 ```
 
 **User prompt（毎回）**:

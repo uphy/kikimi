@@ -29,6 +29,18 @@ struct ChatRunner: Sendable {
     var source: TranscriptMarkdownSource
     var config: ChatConfig
 
+    /// Policy-layer prompt body lookup (`docs/design/42-prompt-overrides.md` §4.1/§4.3): override
+    /// file content if `prompts/<id>.md` is active, `PromptSpec.defaultBody` otherwise. `ask(...)`
+    /// calls this with `.chat` on every send rather than snapshotting it at `init` -- chat's reload
+    /// timing is immediate (§5.2: "次の質問送信から即時"), so an edit to `prompts/chat.md` takes
+    /// effect on the very next question, unlike the session-start snapshots `RefinementQueue` and
+    /// `WatcherRunner` take for their own prompts.
+    ///
+    /// Defaults to `PromptStore.shared` directly (nonisolated read, safe from this non-`@MainActor`
+    /// struct) rather than requiring `MeetingWorkspaceViewModel+Factories.swift` to wire it, the same
+    /// default shape `SummaryUpdater.promptBodyProvider` uses for its own immediate-reload prompts.
+    var promptBodyProvider: @Sendable (PromptID) -> String = { PromptStore.shared.policyBody(for: .builtin($0)) }
+
     private static let logger = Logger(subsystem: "io.github.uphy.Kikimi", category: "ChatRunner")
 
     /// - Parameter history: every stored turn, unfiltered. Trimming and normalization happen here so
@@ -58,7 +70,7 @@ struct ChatRunner: Sendable {
             question: question
         )
         let request = LLMRequest(
-            system: ChatPromptBuilder.buildSystem(),
+            system: promptBodyProvider(.chat),
             user: ChatPromptBuilder.buildUser(promptInput),
             messages: ChatPromptBuilder.buildMessages(promptInput),
             schema: ChatPromptBuilder.answerSchema,

@@ -129,7 +129,7 @@ extension WatcherInputScope: Codable {
 
 // MARK: - WatcherParseError
 
-/// Failure modes for `WatcherDefinitionParser.parse(text:expectedId:)` (§4, §12's "定義ファイルのパース
+/// Failure modes for `WatcherDefinitionParser.parse(text:expectedId:simpleWatcherTemplate:)` (§4, §12's "定義ファイルのパース
 /// エラー" row). Every case carries enough context to surface directly in the UI's error badge
 /// (kikimi.md 9 章 "`WatcherParseError` はケースごとに日本語で表示可能なメッセージを持つ").
 enum WatcherParseError: LocalizedError, Equatable, Sendable {
@@ -215,7 +215,16 @@ enum WatcherDefinitionParser {
     ///     `WatcherLibrary.resolveDefinitionText(id:sessionHandle:)` resolved the text under (§4
     ///     step 4: "`id` がファイル名（拡張子除く）と不一致の場合はエラー"). Callers pass the id they looked the
     ///     text up by, not a filename, so this parser stays filesystem-agnostic.
-    static func parse(text: String, expectedId: String) throws -> WatcherDefinition {
+    ///   - simpleWatcherTemplate: The `# System` section template a `kind: simple` file's
+    ///     `SimpleWatcherSpec.desugar(promptTemplate:)` embeds its viewpoint into (`docs/design/42-prompt-overrides.md`
+    ///     §4.2/§4.3). Defaults to the built-in default template so every pre-existing full-definition
+    ///     caller (which never reaches `parseSimpleDefinition`) is unaffected. Unused on the
+    ///     `kind: nil`/`full` path.
+    static func parse(
+        text: String,
+        expectedId: String,
+        simpleWatcherTemplate: String = SimpleWatcherSpec.defaultSystemPromptTemplate
+    ) throws -> WatcherDefinition {
         let (frontmatterText, body) = try splitFrontmatter(text)
         let frontmatterNode: Node
         do {
@@ -234,7 +243,12 @@ enum WatcherDefinitionParser {
         case nil, "full":
             return try parseFullDefinition(mapping: mapping, body: body, expectedId: expectedId)
         case "simple":
-            return try parseSimpleDefinition(mapping: mapping, body: body, expectedId: expectedId)
+            return try parseSimpleDefinition(
+                mapping: mapping,
+                body: body,
+                expectedId: expectedId,
+                promptTemplate: simpleWatcherTemplate
+            )
         case .some(let raw):
             throw WatcherParseError.unknownKind(raw)
         }
@@ -298,7 +312,12 @@ enum WatcherDefinitionParser {
     /// and must not be hand-authored in a `kind: simple` file (§2.1: "レニエントにしない").
     private static let simpleUnsupportedFieldKeys = ["schema", "view", "state_mode", "initial_state"]
 
-    private static func parseSimpleDefinition(mapping: Node.Mapping, body: String, expectedId: String) throws -> WatcherDefinition {
+    private static func parseSimpleDefinition(
+        mapping: Node.Mapping,
+        body: String,
+        expectedId: String,
+        promptTemplate: String
+    ) throws -> WatcherDefinition {
         for field in simpleUnsupportedFieldKeys where mapping[field] != nil {
             throw WatcherParseError.simpleUnsupportedField(field)
         }
@@ -326,7 +345,7 @@ enum WatcherDefinitionParser {
             inputScope: inputScope,
             prompt: prompt
         )
-        return spec.desugar()
+        return spec.desugar(promptTemplate: promptTemplate)
     }
 
     // MARK: - Frontmatter delimiter split (§4 step 1)

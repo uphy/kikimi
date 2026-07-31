@@ -37,11 +37,19 @@ extension DictationController {
 
         markRefining()
         let model = DictationRefiner.resolveModel(dictationModel: config.model, watchersDefaultModel: watchersDefaultModelProvider())
+
+        // `docs/design/42-prompt-overrides.md` §7.2: the frontmost-app -> `dictation/apps/<bundle-id>`
+        // match happens here (controller side), not inside `DictationContextResolver` -- exact match
+        // only (R14), first (and only, ids are unique file names) hit wins.
+        let matchedAppBundleID = capturedTarget.bundleId.flatMap { bundleId in
+            dictationAppBundleIDsProvider().first { $0 == bundleId }
+        }
         let resolvedContext = DictationContextResolver.resolve(
-            bundleID: capturedTarget.bundleId,
-            config: config.context,
+            globalBody: dictationGlobalBodyProvider(),
+            appBody: matchedAppBundleID.map(dictationAppBodyProvider),
             glossary: glossaryProvider(),
-            glossaryCategories: glossaryCategoriesProvider()
+            glossaryCategories: glossaryCategoriesProvider(),
+            glossaryHeader: dictationGlossaryHeaderProvider()
         )
         let refineOutcome = await refiner.refine(
             rawText: rawText,

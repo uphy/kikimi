@@ -4,7 +4,11 @@ import SwiftUI
 
 private let logger = Logger(subsystem: "io.github.uphy.Kikimi", category: "KikimiApp")
 
-@main
+/// `@main` moved to `Kikimi/KikimiMain.swift` (`docs/design/42-prompt-overrides.md` §6.1) so a
+/// headless prompt-CLI invocation can run and exit before this GUI `App` ever stands up
+/// `AppKit`/`MenuBarExtra`. `KikimiMain.main()` calls `KikimiApp.main()` (the `App` protocol's own
+/// static entry point, synthesized below) for every ordinary launch, so this type's behavior is
+/// otherwise unchanged.
 struct KikimiApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
@@ -168,6 +172,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Force `PromptStore.shared`'s lazy init here, on the main thread: its static initializer
+        // reads `AppConfig.shared.data` and runs `DictationPromptMigration` (which writes
+        // `AppState.shared`), both of which are main-queue-only. Without this, a background actor
+        // (e.g. `ChatRunner.ask`'s default `promptBodyProvider`) could be the first to touch
+        // `.shared` and run that initialization off the main thread.
+        _ = PromptStore.shared
         Task {
             await WindowManager.shared.launch()
         }

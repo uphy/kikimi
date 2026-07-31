@@ -29,18 +29,35 @@ enum RefinementPromptBuilder {
     /// reports whether clamping happened via `wasClamped`.
     static let maxContextBytes = 32 * 1_024
 
-    /// Fixed system prompt template (kikimi.md 7 章, verbatim) with the `{{事前知識}}` slot filled
-    /// from `context`. `context` is clamped to `maxContextBytes` first; `wasClamped` tells the
-    /// caller whether that happened so it can log the kikimi.md-mandated warning.
+    /// The `{{leak_dedup_rule}}` placeholder token `ruleBody` may embed (`docs/design/42-prompt-
+    /// overrides.md` §2.1's optional placeholder for the `refinement` prompt id, `PromptSpec.spec(for:
+    /// .refinement).optionalPlaceholders`). `ruleBody`'s built-in default value lives at
+    /// `PromptSpec.spec(for: .refinement).defaultBody` (`Kikimi/Prompts/PromptSpec.swift`) -- not
+    /// duplicated here -- with this exact token at the same position the pre-refactor hardcoded prompt
+    /// used to conditionally interpolate the leak-dedup bullet (§9.1's default-equivalence requirement).
+    static let leakDedupRuleToken = "{{leak_dedup_rule}}"
+
+    /// Assembles the refinement system prompt from a 方針層 (policy-layer) `ruleBody` plus the fixed
+    /// 契約層 (contract-layer) blocks the app always appends (`docs/design/42-prompt-overrides.md`
+    /// §2.2's fixed structure: `<ruleBody>` + 【事前知識】 + 【出力形式】). `context` is clamped to
+    /// `maxContextBytes` first; `wasClamped` tells the caller whether that happened so it can log the
+    /// kikimi.md-mandated warning.
     ///
     /// - Parameters:
-    ///   - dedupSystemLeakSegments: When `true` (the default), appends the
+    ///   - ruleBody: The 方針層 body, `{{leak_dedup_rule}}` unexpanded (`RefinementQueue
+    ///     .ruleBodyProvider()`'s session-start snapshot -- either `PromptSpec.spec(for:
+    ///     .refinement).defaultBody` or an active `prompts/refinement.md` override's body). Expanded
+    ///     via `PromptPlaceholder.expand` before being folded into the assembled prompt, so an override
+    ///     that omits the optional token simply never sees the leak-dedup rule appended, and one that
+    ///     repeats it gets the same text at every occurrence (single left-to-right pass, no
+    ///     re-expansion -- §4.1).
+    ///   - dedupSystemLeakSegments: When `true` (the default), `{{leak_dedup_rule}}` expands to the
     ///     24-system-audio-leak-mitigation.md §4.2 rule instructing the LLM to empty out a `(mic)`
     ///     segment's `refined_text` when it duplicates a nearby `(system)` segment (acoustic leakage
-    ///     of speaker output into the mic). `false` omits that rule line entirely, restoring the prior
-    ///     prompt verbatim. Callers pass `config.dedupSystemLeakSegments` (§4.3), which is fixed for
-    ///     the lifetime of a session, so this never breaks the system prompt's cache-hit fixedness
-    ///     (kikimi.md 7 章).
+    ///     of speaker output into the mic). `false` expands it to the empty string instead, restoring
+    ///     the prior prompt verbatim. Callers pass `config.dedupSystemLeakSegments` (§4.3), which is
+    ///     fixed for the lifetime of a session, so this never breaks the system prompt's cache-hit
+    ///     fixedness (kikimi.md 7 章).
     ///   - glossaryBlock: `GlossaryRenderer.render(entries:)`'s output for the top-level `glossary`
     ///     config section (`docs/design/28-glossary.md` §2/§3), or `nil` to omit the section entirely
     ///     (the default -- also what `GlossaryRenderer.render(entries:)` itself returns for an empty
@@ -50,6 +67,7 @@ enum RefinementPromptBuilder {
     ///     use the same `GlossaryRenderer`, per that design doc's "会議・ディクテーションで別々の実装を
     ///     持たない" decision.
     static func buildSystemPrompt(
+        ruleBody: String,
         context: String,
         glossaryBlock: String? = nil,
         dedupSystemLeakSegments: Bool = true
@@ -58,16 +76,13 @@ enum RefinementPromptBuilder {
         let leakDedupRule = dedupSystemLeakSegments
             ? "\n- (mic) セグメントの内容が、直前の文脈または今回のバッチ内にある近い時刻の (system) セグメントとほぼ同じ内容の場合、スピーカーの音がマイクに回り込んで二重に書き起こされたものとみなし、その (mic) セグメントの refined_text を空文字にする（対応する (system) セグメント側は変更しない）"
             : ""
+        let expandedRuleBody = PromptPlaceholder.expand(
+            template: ruleBody,
+            replacements: [(leakDedupRuleToken, leakDedupRule)]
+        )
         let glossarySection = glossaryBlock.map { "\n\n\($0)" } ?? ""
         let prompt = """
-        あなたは会議書き起こしを整形する専門家です。以下のルールに従ってください。
-
-        【整形ルール】
-        - フィラー（「えーと」「あの」など）を除去する
-        - 句読点を補い、自然な日本語にする
-        - 意味を変えない範囲での軽微な言い換えは可
-        - 意味の解釈が不明瞭な箇所は元の表現を残す
-        - フィラー・相槌・言い直しの断片のみで、除去すると意味のある内容が何も残らないセグメントは、refined_text を空文字にする（そのセグメントを削除する扱い）\(leakDedupRule)
+        \(expandedRuleBody)
 
         【事前知識】
         \(clamped)\(glossarySection)

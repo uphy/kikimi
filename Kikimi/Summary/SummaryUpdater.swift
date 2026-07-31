@@ -141,6 +141,13 @@ actor SummaryUpdater {
     /// to `.shared`, mirroring `RefinementQueue`'s same injection point
     /// (`Kikimi/Refinement/RefinementQueue.swift`).
     let voiceprintStore: VoiceprintStore
+    /// Resolves a `PromptID`'s current policy-layer body (`docs/design/42-prompt-overrides.md`
+    /// §4.3): override file content if `prompts/<id>.md` is active, `PromptSpec.defaultBody`
+    /// otherwise. Read fresh on every call (`.summary`/`.finalTitle` are both `reload: immediate`),
+    /// unlike `RefinementQueue`'s `ruleBodyProvider`, which the caller snapshots once at session
+    /// start for its `session-start` reload prompts -- there is no such snapshotting here. Defaults
+    /// to `PromptStore.shared`, mirroring `voiceprintStore`'s own default-to-`.shared` shape above.
+    let promptBodyProvider: @Sendable (PromptID) -> String
 
     // MARK: Trigger bookkeeping (§4.2)
 
@@ -181,18 +188,21 @@ actor SummaryUpdater {
     ///   - now: Injectable wall clock, so tests can drive the time-threshold trigger deterministically
     ///     instead of sleeping (mirrors `SessionHandle`'s own `now` injection point).
     ///   - voiceprintStore: See the stored property's doc comment above.
+    ///   - promptBodyProvider: See the stored property's doc comment above.
     init(
         sessionHandle: SessionHandle,
         llm: LLMCompleting,
         config: SummaryConfig = SummaryConfig(),
         now: @escaping @Sendable () -> Date = Date.init,
-        voiceprintStore: VoiceprintStore = .shared
+        voiceprintStore: VoiceprintStore = .shared,
+        promptBodyProvider: @escaping @Sendable (PromptID) -> String = { PromptStore.shared.policyBody(for: .builtin($0)) }
     ) {
         self.sessionHandle = sessionHandle
         self.llm = llm
         self.config = config
         self.now = now
         self.voiceprintStore = voiceprintStore
+        self.promptBodyProvider = promptBodyProvider
         self.lastUpdateAt = now()
         (eventsStream, eventsContinuation) = AsyncStream.makeStream()
     }
@@ -430,7 +440,7 @@ actor SummaryUpdater {
         do {
             let result: LLMResult<SummaryPatch> = try await llm.complete(
                 LLMRequest(
-                    system: SummaryPromptBuilder.systemPrompt,
+                    system: SummaryPromptBuilder.systemPrompt(policyBody: promptBodyProvider(.summary)),
                     user: userPrompt,
                     schema: SummaryJSONSchema.patchSchemaJSON,
                     model: config.model,

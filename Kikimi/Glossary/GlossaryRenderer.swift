@@ -12,44 +12,15 @@ import Foundation
 /// uses for Watchers/summary. Living outside both `Kikimi/Dictation/` and `Kikimi/Refinement/` reflects
 /// that neither feature owns this type -- it is shared, feature-independent rendering logic.
 enum GlossaryRenderer {
-    /// Fixed instructions preceding the term list.
-    ///
-    /// Deliberately framed as a **substitution rule**, not as mis-transcription repair. The earlier
-    /// wording ("音声認識でよく誤変換される〜。文中に読みが似た誤変換が含まれている場合は置換してください")
-    /// only ever fired on readings that were obviously broken Japanese: 「デブ環境」→「dev環境」 worked,
-    /// but 「ステージング環境」→「stg環境」 never did, because the LLM correctly judged「ステージング環境」
-    /// to be a faithful transcription and therefore not a 誤変換 to repair (2026-07 実戦フィードバック).
-    /// Notation normalization and mis-transcription repair are the same operation from the model's
-    /// side -- "if you see A, write B" -- so the rule now says exactly that, and explicitly covers the
-    /// correctly-transcribed case.
-    ///
-    /// The bare-term case (`reading` empty) also gets an explicit line. It previously had none: its
-    /// meaning ("this is a real proper noun, do not 'correct' it into a commoner word") lived only in
-    /// `GlossaryEntry`'s doc comment, i.e. nowhere the LLM could read it.
-    ///
-    /// Bullets render as `A → B` (arrow), not the original `A: B` (colon): with a colon, small
-    /// models fall back on the dictionary prior "headword: gloss" and emit the *left* side --
-    /// 「根建さん」 came out as 「こんけんさん」 (the reading) instead of 「konkenさん」, and before
-    /// that as 「ねこかく」, a *different* entry's reading force-matched onto a then-unlisted name
-    /// (2026-07-10 実戦フィードバック, gpt-5.4-nano). The arrow matches the header's own examples,
-    /// the direction is restated outright ("必ず「→」の右側"), and force-matching unlisted words
-    /// onto some nearby entry is explicitly forbidden.
-    ///
-    /// The final clause still lets the LLM decline a replacement the surrounding context clearly
-    /// doesn't call for -- a glossary hit is a strong hint, not an unconditional find-and-replace.
-    static let header = """
-    # Glossary
-
-    以下は、この書き起こしに登場する固有名詞・専門用語の一覧です。
-
-    - 「A → B」形式の行は、文中に A（またはそれに近い表記・誤変換）が現れたら B に置換してください。A が正しく書き起こされていても、B の表記に統一してください。
-      (例:「猫助」→「nekosuke」、「デブ環境」→「dev環境」、「ステージング環境」→「stg環境」)
-    - 「A1, A2 → B」のようにカンマ区切りで複数並ぶ行は、そのいずれの表記が現れても B に置換してください。
-    - 置換結果として出力してよいのは、必ず「→」の右側の表記です。左側（読み・誤変換の側）を出力に使わないでください。
-    - 用語のみの行は、実在の固有名詞です。別の一般語に「訂正」しないでください。
-    - どの行の A とも読みが明確に一致しない語は、そのまま残してください。一覧のどれかへ無理に寄せてはいけません。
-    - ただし、文脈上明らかに無関係な語だと分かる場合は、無理に置換しないでください。
-    """
+    /// Fixed instructions preceding the term list. Forwards to
+    /// `PromptSpec.spec(for: .glossaryHeader).defaultBody` -- `Kikimi/Prompts/PromptSpec.swift` is
+    /// this text's single source of truth (same forwarding shape as
+    /// `SimpleWatcherSpec.defaultSystemPromptTemplate`), so the `based_on` staleness hash and this
+    /// render-time default can never drift apart. The wording's field-tuning history (why
+    /// substitution-rule framing, why `A → B` arrows over colons) lives with the text there.
+    static var defaultHeader: String {
+        PromptSpec.spec(for: .glossaryHeader).defaultBody
+    }
 
     /// - Parameters:
     ///   - entries: the `glossary` config section. Entries whose `term` is blank (after trimming) are
@@ -62,9 +33,14 @@ enum GlossaryRenderer {
     ///
     ///     Defaults to `[]`, which renders exactly the pre-categories flat list -- so a caller that
     ///     has no categories (and every test that predates them) is unaffected.
+    ///   - header: the fixed instructions preceding the term list (`docs/design/42-prompt-overrides.md`
+    ///     §2.2 "glossary-header" -- the only 方針層 slice of this renderer; term bullets and category
+    ///     headings below stay code-owned and unconditional). Defaults to `defaultHeader`. Callers pass
+    ///     a `PromptStore`-resolved override here instead of reading `defaultHeader` themselves, so a
+    ///     caller that never overrides it (and every test that predates overrides) is unaffected.
     /// - Returns: `nil` when there is nothing left to render, so the caller can omit the block
     ///   entirely rather than injecting a header with no terms under it.
-    static func render(entries: [GlossaryEntry], categories: [GlossaryCategory] = []) -> String? {
+    static func render(entries: [GlossaryEntry], categories: [GlossaryCategory] = [], header: String = defaultHeader) -> String? {
         var blocks: [String] = []
 
         let uncategorized = GlossaryCategorization

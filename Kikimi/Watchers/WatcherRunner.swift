@@ -52,6 +52,15 @@ actor WatcherRunner {
     private let llm: LLMCompleting
     private let library: WatcherLibrary
     private let defaultModel: String
+    /// The `simple-watcher` prompt override's session-start snapshot (`docs/design/42-prompt-overrides.md`
+    /// §4.3/§5.2): captured once by `defaultWatcherRunnerFactory` when this runner is constructed, then
+    /// threaded unchanged into every `WatcherDefinitionParser.parse(text:expectedId:simpleWatcherTemplate:)`
+    /// call this actor makes for the rest of the session. A live `prompts/simple-watcher.md` edit only
+    /// takes effect for the *next* session's `WatcherRunner`, keeping the "System は実行間で完全固定"
+    /// prompt-cache property (`docs/design/34-simple-watchers.md` §4.1) intact even though a `.md`
+    /// Watcher's *viewpoint* (the part `{{viewpoint}}` expands to) still re-reads from disk on every
+    /// trigger, unaffected by this snapshot.
+    private let simpleWatcherTemplate: String
     /// Injectable wall clock for `.finished(at:)`, so tests can assert its value deterministically
     /// instead of racing `Date()` (mirrors `SummaryUpdater`/`RefinementQueue`'s own `now` injection).
     private let now: @Sendable () -> Date
@@ -73,6 +82,7 @@ actor WatcherRunner {
         llm: LLMCompleting,
         library: WatcherLibrary,
         defaultModel: String,
+        simpleWatcherTemplate: String = SimpleWatcherSpec.defaultSystemPromptTemplate,
         now: @escaping @Sendable () -> Date = Date.init,
         sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     ) {
@@ -80,6 +90,7 @@ actor WatcherRunner {
         self.llm = llm
         self.library = library
         self.defaultModel = defaultModel
+        self.simpleWatcherTemplate = simpleWatcherTemplate
         self.now = now
         self.sleep = sleep
         (eventsStream, eventsContinuation) = AsyncStream.makeStream()
@@ -132,7 +143,7 @@ actor WatcherRunner {
             return
         }
         do {
-            let definition = try WatcherDefinitionParser.parse(text: resolved.text, expectedId: id)
+            let definition = try WatcherDefinitionParser.parse(text: resolved.text, expectedId: id, simpleWatcherTemplate: simpleWatcherTemplate)
             await execute(id: id, definition: definition)
         } catch {
             eventsContinuation.yield(WatcherEvent(watcherId: id, kind: .failed(message: Self.describe(error))))
@@ -177,7 +188,7 @@ actor WatcherRunner {
         }
         let definition: WatcherDefinition
         do {
-            definition = try WatcherDefinitionParser.parse(text: resolved.text, expectedId: id)
+            definition = try WatcherDefinitionParser.parse(text: resolved.text, expectedId: id, simpleWatcherTemplate: simpleWatcherTemplate)
         } catch {
             eventsContinuation.yield(WatcherEvent(watcherId: id, kind: .failed(message: Self.describe(error))))
             return
@@ -190,7 +201,7 @@ actor WatcherRunner {
         guard let resolved = try? await library.resolveDefinitionText(id: id, sessionHandle: sessionHandle) else {
             return nil
         }
-        return try? WatcherDefinitionParser.parse(text: resolved.text, expectedId: id)
+        return try? WatcherDefinitionParser.parse(text: resolved.text, expectedId: id, simpleWatcherTemplate: simpleWatcherTemplate)
     }
 
     private static func triggerKind(of trigger: WatcherTrigger) -> WatcherTriggerKind {

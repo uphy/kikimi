@@ -807,4 +807,68 @@ struct AppStateTests {
         #expect(appState.data.lastAudioInput.mic.deviceUid == "BuiltInMicrophoneDevice")
         #expect(appState.data.lastAudioInput.system.bundleId == "us.zoom.xos")
     }
+
+    // MARK: - dictationPromptsMigrated (docs/design/42-prompt-overrides.md §7.1)
+
+    @Test("missing state.yaml starts with dictationPromptsMigrated == false")
+    func missingFileStartsWithDictationPromptsMigratedFalse() {
+        let dir = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let appState = makeAppState(in: dir)
+        #expect(appState.data.dictationPromptsMigrated == false)
+    }
+
+    @Test("markDictationPromptsMigrated sets only that field and persists across a fresh AppState instance")
+    func markDictationPromptsMigratedPersistsAcrossInstances() {
+        let dir = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let appState = makeAppState(in: dir)
+        appState.markDictationPromptsMigrated()
+
+        #expect(appState.data.dictationPromptsMigrated == true)
+        // Untouched sibling fields keep their defaults.
+        #expect(appState.data.dictationHistoryWindow == .default)
+        #expect(appState.data.sessionListWindow == .default)
+
+        let reloaded = makeAppState(in: dir)
+        #expect(reloaded.data.dictationPromptsMigrated == true)
+    }
+
+    @Test("saved YAML serializes dictation_prompts_migrated with snake_case key")
+    func savedYAMLIncludesDictationPromptsMigratedSnakeCase() throws {
+        let dir = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let appState = makeAppState(in: dir)
+        appState.markDictationPromptsMigrated()
+
+        let onDisk = try String(contentsOf: fileURL(in: dir), encoding: .utf8)
+        let root = try Yams.load(yaml: onDisk) as? [String: Any]
+        #expect(root?["dictation_prompts_migrated"] as? Bool == true)
+    }
+
+    @Test("decoding state.yaml without dictation_prompts_migrated falls back to false (an old state.yaml has never migrated)")
+    func migratesStateYAMLWithoutDictationPromptsMigrated() throws {
+        let dir = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Pre-migration on-disk shape: no `dictation_prompts_migrated` key at all.
+        let sampleYAML = """
+        windows: []
+
+        session_list_window:
+          x: 100
+          y: 750
+          width: 500
+          height: 400
+          visible: false
+        """
+        try sampleYAML.write(to: fileURL(in: dir), atomically: true, encoding: .utf8)
+
+        let appState = makeAppState(in: dir)
+        #expect(!appState.loadFailed, "a missing dictation_prompts_migrated key must not fail the whole decode")
+        #expect(appState.data.dictationPromptsMigrated == false)
+    }
 }
