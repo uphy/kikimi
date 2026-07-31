@@ -206,33 +206,48 @@ struct KikimiStateData: Codable, Equatable, Sendable {
     /// frame/visibility, keyed identically to `sessionListWindow` (it is likewise a single,
     /// not-per-session floating window).
     var dictationHistoryWindow: FloatingWindowState = .default
+    /// `docs/design/42-prompt-overrides.md` §7.1: `true` once `DictationPromptMigration` has run
+    /// (successfully, or as a deliberate no-op — see that type's doc comment) at least once for this
+    /// state directory. Gates the one-time `dictation.context` -> `prompts/dictation.md` /
+    /// `prompts/dictation/apps/<bundle-id>.md` migration so it never re-runs (which would otherwise
+    /// re-migrate every time a user removes an override to restore the built-in default).
+    /// Deliberately a marker in `state.yaml`, not "does `prompts/dictation.md` exist" — the latter
+    /// can't tell "never migrated" apart from "migrated, then the user deleted the override on
+    /// purpose to go back to the default".
+    var dictationPromptsMigrated: Bool = false
 
     enum CodingKeys: String, CodingKey {
         case windows
         case sessionListWindow = "session_list_window"
         case lastAudioInput = "last_audio_input"
         case dictationHistoryWindow = "dictation_history_window"
+        case dictationPromptsMigrated = "dictation_prompts_migrated"
     }
 
     init(windows: [WorkspaceWindowState] = [], sessionListWindow: FloatingWindowState = .default,
          lastAudioInput: AudioInputSelection = .default,
-         dictationHistoryWindow: FloatingWindowState = .default) {
+         dictationHistoryWindow: FloatingWindowState = .default,
+         dictationPromptsMigrated: Bool = false) {
         self.windows = windows
         self.sessionListWindow = sessionListWindow
         self.lastAudioInput = lastAudioInput
         self.dictationHistoryWindow = dictationHistoryWindow
+        self.dictationPromptsMigrated = dictationPromptsMigrated
     }
 
     /// Custom decoder so that existing `state.yaml` files written before `last_audio_input`/
-    /// `dictation_history_window` were introduced keep decoding successfully: a missing key falls
-    /// back to `.default` rather than failing the whole decode (which would set
-    /// `YAMLStore.loadFailed` and permanently refuse further `save()` calls). `windows`/
-    /// `sessionListWindow` keep their pre-existing (throwing) decode behavior unchanged — only
-    /// `lastAudioInput`/`dictationHistoryWindow` are decoded leniently.
-    /// (`docs/design/10-audio-input-selection.md` section 3, "後方互換（必須）"; `docs/design/
-    /// 29-dictation-history.md` section 6.1 explicitly calls out repeating this `decodeIfPresent`
-    /// pattern rather than `sessionListWindow`'s throwing one, since a throwing decode of a brand
-    /// new field would fail loading any pre-existing `state.yaml`.)
+    /// `dictation_history_window`/`dictation_prompts_migrated` were introduced keep decoding
+    /// successfully: a missing key falls back to `.default` rather than failing the whole decode
+    /// (which would set `YAMLStore.loadFailed` and permanently refuse further `save()` calls).
+    /// `windows`/`sessionListWindow` keep their pre-existing (throwing) decode behavior unchanged —
+    /// only `lastAudioInput`/`dictationHistoryWindow`/`dictationPromptsMigrated` are decoded
+    /// leniently. (`docs/design/10-audio-input-selection.md` section 3, "後方互換（必須）";
+    /// `docs/design/29-dictation-history.md` section 6.1 explicitly calls out repeating this
+    /// `decodeIfPresent` pattern rather than `sessionListWindow`'s throwing one, since a throwing
+    /// decode of a brand new field would fail loading any pre-existing `state.yaml`. A missing
+    /// `dictation_prompts_migrated` key must default to `false`, not skip migration — an old
+    /// `state.yaml` written before `docs/design/42-prompt-overrides.md` shipped has, by definition,
+    /// never run the migration.)
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         windows = try container.decode([WorkspaceWindowState].self, forKey: .windows)
@@ -241,6 +256,9 @@ struct KikimiStateData: Codable, Equatable, Sendable {
         dictationHistoryWindow = try container.decodeIfPresent(
             FloatingWindowState.self, forKey: .dictationHistoryWindow
         ) ?? .default
+        dictationPromptsMigrated = try container.decodeIfPresent(
+            Bool.self, forKey: .dictationPromptsMigrated
+        ) ?? false
     }
 }
 
@@ -320,6 +338,15 @@ final class AppState: YAMLStore<KikimiStateData> {
     func updateDictationHistoryWindow(_ mutate: (inout FloatingWindowState) -> Void) {
         update { data in
             mutate(&data.dictationHistoryWindow)
+        }
+    }
+
+    /// Sets the `dictation_prompts_migrated` marker (`docs/design/42-prompt-overrides.md` §7.1).
+    /// Called by `DictationPromptMigration` only after every attempted override write succeeded --
+    /// a partial failure must leave the marker unset so the next launch retries (§8 #14).
+    func markDictationPromptsMigrated() {
+        update { data in
+            data.dictationPromptsMigrated = true
         }
     }
 }

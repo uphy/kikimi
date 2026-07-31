@@ -1,17 +1,29 @@
 import AppKit
+import OSLog
 import SwiftUI
 
 // MARK: - DictationAppContextSection
 
 /// "アプリ別コンテキスト" section of the "入力" Settings tab (`docs/design/25-dictation-mode.md`
-/// §14.5): `dictation.context.global`'s editor, the registered per-app list, and the
-/// add/edit/reset flows around it. Split out of `SettingsView.swift`'s `DictationSettingsTab` into
-/// its own file purely to keep that file under the project's `file_length` lint limit (same
+/// §14.5, rewired onto `PromptStore` by `docs/design/42-prompt-overrides.md` §7.3): the
+/// `prompts/dictation.md` global editor, the registered per-app list (`prompts/dictation/apps/*.md`),
+/// and the add/edit/reset flows around it. Split out of `SettingsView.swift`'s `DictationSettingsTab`
+/// into its own file purely to keep that file under the project's `file_length` lint limit (same
 /// rationale as `DiarizationConfig`'s doc comment for its own file split).
 ///
-/// Binds directly to `AppConfig.shared`, mirroring `DictationSettingsTab`'s own binding style --
-/// this section has no derived state beyond what `config.yaml` already holds.
+/// Binds directly to `PromptStore.shared`, mirroring `DictationSettingsTab`'s own `AppConfig.shared`
+/// binding style -- this section has no derived state beyond what the store already holds. Unlike
+/// the pre-42 `AppConfig`-backed version, every write here goes through `PromptStore`'s throwing
+/// `writeOverride`/`removeOverride` (file I/O), so failures can now occur where they couldn't before.
+/// They are logged rather than surfaced via an `.alert` (unlike e.g. `ProfilesSettingsTab`'s
+/// rename/delete or this same tab's `deleteAllHistory`): the global editor's `TextEditor` writes
+/// through on *every keystroke* (`globalBinding`'s `set`), so wiring the same helper to an
+/// error-message `@State` would pop an alert per keystroke on a sustained I/O failure. Discrete
+/// actions (reset/add/edit/delete below) share this same silent-log helper for simplicity; rare I/O
+/// failures there are a knowingly-accepted gap versus the alert-based sibling pattern.
 struct DictationAppContextSection: View {
+    private static let logger = Logger(subsystem: "io.github.uphy.Kikimi", category: "DictationAppContextSection")
+
     /// A single `item:`-driven sheet identity so at most one of "add" / "edit" is ever presented at
     /// once. Deliberately *not* two separate `@State` bools + two `.sheet(isPresented:)` modifiers on
     /// this view: switching `editingBundleID` from nil to non-nil in the same action that calls the
@@ -30,7 +42,7 @@ struct DictationAppContextSection: View {
         }
     }
 
-    @ObservedObject private var appConfig = AppConfig.shared
+    @ObservedObject private var promptStore = PromptStore.shared
 
     @State private var activeSheet: ActiveSheet?
 
@@ -40,14 +52,19 @@ struct DictationAppContextSection: View {
                 Text("グローバルコンテキスト（全アプリ共通）")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                // R17: this starts pre-filled with the default rule body (not a placeholder-hidden
-                // empty field) so the user can always see exactly what is being sent to the LLM.
+                // R17: this always shows the currently-effective body -- override if
+                // `prompts/dictation.md` is active, otherwise the built-in default -- so the user
+                // can always see exactly what is being sent to the LLM (§7.3's "送っている内容が
+                // 常に見える" carry-over).
                 TextEditor(text: globalBinding)
                     .font(.body.monospaced())
                     .frame(minHeight: 140)
                     .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.3)))
                 Button("既定に戻す") {
-                    appConfig.update { $0.dictation.context.global = DictationContextConfig.default.global }
+                    // §7.3: "既定に戻す" removes the override file entirely (default restored),
+                    // which is *not* the same as writing an empty-body override (that means "inject
+                    // no context", the R17 escape hatch below).
+                    removeOverride(.builtin(.dictation))
                 }
             }
             .padding(.vertical, 4)
@@ -63,26 +80,30 @@ struct DictationAppContextSection: View {
                     switch sheet {
                     case .add:
                         DictationAddAppContextSheet(
-                            existingBundleIDs: Set(appConfig.data.dictation.context.apps.map(\.bundleID)),
+                            existingBundleIDs: Set(promptStore.dictationAppBundleIDs()),
                             onAdd: { bundleID in
-                                appConfig.update {
-                                    $0.dictation.context.apps.append(DictationAppContext(bundleID: bundleID, context: ""))
+                                // "追加" = an empty-body override file (§7.3: "追加シートは空本文
+                                // ファイルを作成"), immediately followed by the edit sheet (R16).
+                                // Validated construction, not `.dictationApp(bundleID:)` directly:
+                                // `NSRunningApplication.bundleIdentifier` is not guaranteed to fit
+                                // `[A-Za-z0-9._-]+`, and an out-of-charset id would write a file that
+                                // `discoverDictationAppBundleIDs` then silently ignores.
+                                guard let ref = PromptRef(dictationAppBundleID: bundleID) else {
+                                    Self.logger.warning("Ignoring add for invalid bundle id: \(bundleID, privacy: .public)")
+                                    return
                                 }
+                                writeOverride(ref, body: "")
                                 activeSheet = .edit(bundleID: bundleID)
                             }
                         )
                     case let .edit(bundleID):
-                        if let app = appConfig.data.dictation.context.apps.first(where: { $0.bundleID == bundleID }) {
-                            DictationEditAppContextSheet(
-                                app: app,
-                                onSave: { text in
-                                    appConfig.update { config in
-                                        guard let index = config.dictation.context.apps.firstIndex(where: { $0.bundleID == bundleID }) else { return }
-                                        config.dictation.context.apps[index].context = text
-                                    }
-                                }
-                            )
-                        }
+                        DictationEditAppContextSheet(
+                            bundleID: bundleID,
+                            initialBody: promptStore.policyBody(for: .dictationApp(bundleID: bundleID)),
+                            onSave: { text in
+                                writeOverride(.dictationApp(bundleID: bundleID), body: text)
+                            }
+                        )
                     }
                 }
         }
@@ -90,17 +111,22 @@ struct DictationAppContextSection: View {
 
     @ViewBuilder
     private var appList: some View {
-        if appConfig.data.dictation.context.apps.isEmpty {
+        let bundleIDs = promptStore.dictationAppBundleIDs()
+        if bundleIDs.isEmpty {
             Text("登録済みのアプリはありません。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         } else {
-            ForEach(appConfig.data.dictation.context.apps, id: \.bundleID) { app in
+            ForEach(bundleIDs, id: \.self) { bundleID in
                 DictationAppContextRow(
-                    app: app,
-                    onEdit: { activeSheet = .edit(bundleID: app.bundleID) },
+                    bundleID: bundleID,
+                    context: promptStore.policyBody(for: .dictationApp(bundleID: bundleID)),
+                    onEdit: { activeSheet = .edit(bundleID: bundleID) },
                     onDelete: {
-                        appConfig.update { $0.dictation.context.apps.removeAll { $0.bundleID == app.bundleID } }
+                        // "削除" = deleting `prompts/dictation/apps/<bundle-id>.md` (§7.3), which
+                        // both removes the entry from `dictationAppBundleIDs()` and drops any
+                        // context this app was injecting.
+                        removeOverride(.dictationApp(bundleID: bundleID))
                     }
                 )
             }
@@ -109,9 +135,32 @@ struct DictationAppContextSection: View {
 
     private var globalBinding: Binding<String> {
         Binding(
-            get: { appConfig.data.dictation.context.global },
-            set: { newValue in appConfig.update { $0.dictation.context.global = newValue } }
+            get: { promptStore.policyBody(for: .builtin(.dictation)) },
+            // §7.3: an empty save writes an empty-body override (dictation's R17 escape hatch --
+            // "文脈を注入しない" -- `PromptStore` accepts this only for dictation refs), it does
+            // *not* map to `removeOverride` (that would flip the meaning back to "use default").
+            set: { newValue in writeOverride(.builtin(.dictation), body: newValue) }
         )
+    }
+
+    private func writeOverride(_ ref: PromptRef, body: String) {
+        do {
+            try promptStore.writeOverride(ref, body: body)
+        } catch {
+            Self.logger.error(
+                "Failed to write prompt override for \(String(describing: ref), privacy: .public): \(String(describing: error), privacy: .public)"
+            )
+        }
+    }
+
+    private func removeOverride(_ ref: PromptRef) {
+        do {
+            try promptStore.removeOverride(ref)
+        } catch {
+            Self.logger.error(
+                "Failed to remove prompt override for \(String(describing: ref), privacy: .public): \(String(describing: error), privacy: .public)"
+            )
+        }
     }
 }
 
@@ -121,20 +170,21 @@ struct DictationAppContextSection: View {
 /// .runningApplications` has no "look up by bundle id, running or not" API) + display name + the
 /// context's first line as a preview + `[編集]`/`[削除]` (§14.5).
 private struct DictationAppContextRow: View {
-    let app: DictationAppContext
+    let bundleID: String
+    let context: String
     let onEdit: () -> Void
     let onDelete: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
-            if let icon = Self.runningIcon(for: app.bundleID) {
+            if let icon = Self.runningIcon(for: bundleID) {
                 Image(nsImage: icon)
                     .resizable()
                     .frame(width: 20, height: 20)
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text(Self.displayName(for: app.bundleID))
-                Text(Self.firstLinePreview(app.context))
+                Text(Self.displayName(for: bundleID))
+                Text(Self.firstLinePreview(context))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -242,21 +292,23 @@ private struct DictationAddAppContextSheet: View {
 /// 絵文字は使わない"). Saves on "保存" only -- unlike the global editor's live-binding `TextEditor`,
 /// this is a draft so cancelling a half-written edit doesn't leave a partial string persisted.
 private struct DictationEditAppContextSheet: View {
-    let app: DictationAppContext
+    let bundleID: String
+    let initialBody: String
     let onSave: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var draft: String
 
-    init(app: DictationAppContext, onSave: @escaping (String) -> Void) {
-        self.app = app
+    init(bundleID: String, initialBody: String, onSave: @escaping (String) -> Void) {
+        self.bundleID = bundleID
+        self.initialBody = initialBody
         self.onSave = onSave
-        _draft = State(initialValue: app.context)
+        _draft = State(initialValue: initialBody)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(app.bundleID)
+            Text(bundleID)
                 .font(.headline)
             TextEditor(text: $draft)
                 .font(.body.monospaced())

@@ -6,9 +6,10 @@ import Foundation
 /// (same rationale/pattern as `+ParticipantsMerge.swift`). Only needs `SummaryUpdater`'s
 /// already-internal surface (`sessionHandle`/`llm`/`config`/`now`/`logger`/`eventsContinuation`/
 /// `isRegenerating`/`segmentsSinceLastUpdate`/`lastUpdateAt`/`applyAutomaticTitle(proposal:)`/
-/// `loadComposedContext()` (`docs/design/22-participant-hints.md` §9) -- each widened from `private`
-/// to internal in `SummaryUpdater.swift` for exactly this split), not any genuinely private member of
-/// the primary actor declaration.
+/// `loadComposedContext()` (`docs/design/22-participant-hints.md` §9)/`promptBodyProvider`
+/// (`docs/design/42-prompt-overrides.md` §4.3) -- each widened from `private` to internal in
+/// `SummaryUpdater.swift` for exactly this split), not any genuinely private member of the primary
+/// actor declaration.
 extension SummaryUpdater {
     /// Chunk size for full regeneration (§6: "例 40 セグメントずつ複数回").
     private static let regenerationChunkSize = 40
@@ -40,7 +41,7 @@ extension SummaryUpdater {
                 )
                 let result: LLMResult<SummaryPatch> = try await llm.complete(
                     LLMRequest(
-                        system: SummaryPromptBuilder.systemPrompt,
+                        system: SummaryPromptBuilder.systemPrompt(policyBody: promptBodyProvider(.summary)),
                         user: userPrompt,
                         schema: SummaryJSONSchema.patchSchemaJSON,
                         model: config.model,

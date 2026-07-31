@@ -5,7 +5,8 @@ import Foundation
 /// Split out of `SummaryUpdater.swift` to keep that file under the project's `file_length` lint limit
 /// (mirrors `+Regeneration.swift`/`+ParticipantsMerge.swift`'s own splits). Only needs
 /// `SummaryUpdater`'s already-`internal` surface (`sessionHandle`/`llm`/`config`/`logger`/
-/// `eventsContinuation`), not any genuinely `private` member of the primary actor declaration.
+/// `eventsContinuation`/`promptBodyProvider`, the last per `docs/design/42-prompt-overrides.md`
+/// §4.3), not any genuinely `private` member of the primary actor declaration.
 extension SummaryUpdater {
     /// `on_session_end` final title proposal (§3.4): generates one title from the final
     /// `summary.state.json` and stores it as a proposal (never auto-reflected, see
@@ -28,7 +29,7 @@ extension SummaryUpdater {
         do {
             let result: LLMResult<TitleOnly> = try await llm.complete(
                 LLMRequest(
-                    system: Self.finalTitleSystemPrompt,
+                    system: promptBodyProvider(.finalTitle),
                     user: prompt,
                     schema: SummaryJSONSchema.titleSchemaJSON,
                     model: config.model,
@@ -66,10 +67,6 @@ extension SummaryUpdater {
         }
         return changed
     }
-
-    private static let finalTitleSystemPrompt = """
-    あなたは会議サマリからタイトルを提案する専門家です。会議の内容を最もよく表す簡潔なタイトルを日本語で1つ返してください。
-    """
 
     private static func finalTitlePrompt(state: SummaryState) -> String {
         """

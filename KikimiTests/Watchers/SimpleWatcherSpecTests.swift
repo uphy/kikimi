@@ -10,6 +10,11 @@ import Testing
 /// including the known `"# "`-prefixed-line mismatch case §7/§8.2 document.
 @Suite("SimpleWatcherSpec")
 struct SimpleWatcherSpecTests {
+    /// The built-in default `# System` template, used throughout this suite wherever a test isn't
+    /// specifically exercising a non-default `promptTemplate` (`docs/design/42-prompt-overrides.md`
+    /// §4.2's `desugar(promptTemplate:)`/`desugaredFullText(promptTemplate:)` signatures).
+    private let defaultTemplate = SimpleWatcherSpec.defaultSystemPromptTemplate
+
     private func spec(
         id: String = "simple-3f2a9c",
         name: String = "論点整理",
@@ -36,7 +41,7 @@ struct SimpleWatcherSpecTests {
 
     @Test("desugar() maps to a snapshot WatcherDefinition with the fixed markdown schema/view and no initial_state")
     func desugarProducesFixedSchemaAndView() {
-        let definition = spec().desugar()
+        let definition = spec().desugar(promptTemplate: defaultTemplate)
 
         #expect(definition.id == "simple-3f2a9c")
         #expect(definition.name == "論点整理")
@@ -51,7 +56,7 @@ struct SimpleWatcherSpecTests {
 
     @Test("desugar()'s systemPrompt embeds the observation prompt inside the fixed preamble/output-rules")
     func desugarSystemPromptEmbedsViewpoint() {
-        let definition = spec(prompt: "いま議論している論点を3つ以内で整理してください。").desugar()
+        let definition = spec(prompt: "いま議論している論点を3つ以内で整理してください。").desugar(promptTemplate: defaultTemplate)
 
         #expect(definition.systemPrompt.hasPrefix("あなたは会議のリアルタイム書き起こしを観察するアシスタントです。"))
         #expect(definition.systemPrompt.contains("【観点】\nいま議論している論点を3つ以内で整理してください。"))
@@ -60,7 +65,7 @@ struct SimpleWatcherSpecTests {
 
     @Test("desugar()'s userPromptTemplate has summary/recent_segments but never state")
     func desugarUserPromptTemplateOmitsState() {
-        let definition = spec().desugar()
+        let definition = spec().desugar(promptTemplate: defaultTemplate)
 
         #expect(definition.userPromptTemplate.contains("{{summary}}"))
         #expect(definition.userPromptTemplate.contains("{{recent_segments}}"))
@@ -70,7 +75,7 @@ struct SimpleWatcherSpecTests {
     @Test("desugar() carries the spec itself as simpleSpec")
     func desugarCarriesSimpleSpec() {
         let originatingSpec = spec()
-        let definition = originatingSpec.desugar()
+        let definition = originatingSpec.desugar(promptTemplate: defaultTemplate)
 
         #expect(definition.simpleSpec == originatingSpec)
     }
@@ -155,10 +160,10 @@ struct SimpleWatcherSpecTests {
             prompt: "会議が脱線していないか確認してください。"
         )
 
-        let fullText = originatingSpec.desugaredFullText()
+        let fullText = originatingSpec.desugaredFullText(promptTemplate: defaultTemplate)
         let parsed = try WatcherDefinitionParser.parse(text: fullText, expectedId: originatingSpec.id)
 
-        #expect(equalIgnoringSimpleSpec(parsed, originatingSpec.desugar()))
+        #expect(equalIgnoringSimpleSpec(parsed, originatingSpec.desugar(promptTemplate: defaultTemplate)))
         // Full-format text declares no `kind: simple`, so it parses via the full-definition path.
         #expect(parsed.simpleSpec == nil)
     }
@@ -166,7 +171,7 @@ struct SimpleWatcherSpecTests {
     @Test("desugaredFullText()'s view is a double-quoted scalar that parses back to the triple-mustache template verbatim")
     func desugaredFullTextViewSurvivesDoubleQuoting() throws {
         let originatingSpec = spec(id: "simple-eject2")
-        let parsed = try WatcherDefinitionParser.parse(text: originatingSpec.desugaredFullText(), expectedId: originatingSpec.id)
+        let parsed = try WatcherDefinitionParser.parse(text: originatingSpec.desugaredFullText(promptTemplate: defaultTemplate), expectedId: originatingSpec.id)
 
         #expect(parsed.view == "{{{markdown}}}")
     }
@@ -178,29 +183,63 @@ struct SimpleWatcherSpecTests {
             prompt: "見出し\n# 重要な論点\nここも見てほしい内容です。"
         )
 
-        let fullText = originatingSpec.desugaredFullText()
+        let fullText = originatingSpec.desugaredFullText(promptTemplate: defaultTemplate)
         // Parsing itself must still succeed (this is a silent content mismatch, not a parse failure --
         // §8.2's rationale for why the injection risk is a round-trip check, not a rejected character).
         let parsed = try WatcherDefinitionParser.parse(text: fullText, expectedId: originatingSpec.id)
 
-        #expect(!equalIgnoringSimpleSpec(parsed, originatingSpec.desugar()))
-        #expect(parsed.systemPrompt != originatingSpec.desugar().systemPrompt)
+        #expect(!equalIgnoringSimpleSpec(parsed, originatingSpec.desugar(promptTemplate: defaultTemplate)))
+        #expect(parsed.systemPrompt != originatingSpec.desugar(promptTemplate: defaultTemplate).systemPrompt)
     }
 
     @Test("desugaredFullText() omits the model line when model is nil and includes it (double-quoted) when present")
     func desugaredFullTextModelLine() {
-        let withModel = spec(id: "simple-eject4", model: "claude-haiku-4-5-20251001").desugaredFullText()
+        let withModel = spec(id: "simple-eject4", model: "claude-haiku-4-5-20251001").desugaredFullText(promptTemplate: defaultTemplate)
         #expect(withModel.contains("model: \"claude-haiku-4-5-20251001\"\n"))
 
-        let withoutModel = spec(id: "simple-eject5", model: nil).desugaredFullText()
+        let withoutModel = spec(id: "simple-eject5", model: nil).desugaredFullText(promptTemplate: defaultTemplate)
         #expect(!withoutModel.contains("model:"))
     }
 
     @Test("desugaredFullText() emits the fixed 2-line markdown schema and state_mode: snapshot")
     func desugaredFullTextFixedSchemaAndStateMode() {
-        let text = spec(id: "simple-eject6").desugaredFullText()
+        let text = spec(id: "simple-eject6").desugaredFullText(promptTemplate: defaultTemplate)
 
         #expect(text.contains("state_mode: snapshot\n"))
         #expect(text.contains("schema:\n  markdown: string\n"))
+    }
+
+    // MARK: - Non-default promptTemplate (`docs/design/42-prompt-overrides.md` §4.2/§4.3)
+
+    /// A deliberately non-default template with distinctive fixed text around `{{viewpoint}}`, so
+    /// assertions below can tell "the override's own wording" apart from `defaultTemplate`'s.
+    private let overrideTemplate = """
+    CUSTOM PREAMBLE
+    {{viewpoint}}
+    CUSTOM FOOTER
+    """
+
+    @Test("systemPrompt(template:viewpoint:) expands {{viewpoint}} into the given template, not the built-in default")
+    func systemPromptExpandsIntoGivenTemplate() {
+        let result = SimpleWatcherSpec.systemPrompt(template: overrideTemplate, viewpoint: "論点を整理して")
+        #expect(result == "CUSTOM PREAMBLE\n論点を整理して\nCUSTOM FOOTER")
+        #expect(!result.contains("あなたは会議のリアルタイム書き起こしを観察するアシスタントです。"))
+    }
+
+    @Test("desugar(promptTemplate:) embeds the observation prompt into a caller-supplied non-default template")
+    func desugarUsesProvidedNonDefaultTemplate() {
+        let definition = spec(prompt: "論点を整理して").desugar(promptTemplate: overrideTemplate)
+        #expect(definition.systemPrompt == "CUSTOM PREAMBLE\n論点を整理して\nCUSTOM FOOTER")
+    }
+
+    @Test("desugaredFullText(promptTemplate:) round-trips through parse into a WatcherDefinition matching desugar(promptTemplate:) for a non-default template")
+    func desugaredFullTextRoundTripsForNonDefaultTemplate() throws {
+        let originatingSpec = spec(id: "simple-eject7", prompt: "論点を整理して")
+
+        let fullText = originatingSpec.desugaredFullText(promptTemplate: overrideTemplate)
+        let parsed = try WatcherDefinitionParser.parse(text: fullText, expectedId: originatingSpec.id)
+
+        #expect(parsed.systemPrompt == "CUSTOM PREAMBLE\n論点を整理して\nCUSTOM FOOTER")
+        #expect(equalIgnoringSimpleSpec(parsed, originatingSpec.desugar(promptTemplate: overrideTemplate)))
     }
 }

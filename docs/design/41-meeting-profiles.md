@@ -520,20 +520,21 @@ Chirami はノートアプリであり、**会議セッション・プロファ�
 - **Raycast 向けプロファイル一覧 API**（`kikimi://` での列挙 or CLI）: Quicklink 手書き運用で
   不足が出てから
 
-## 13. Claude Code 連携（kikimi-prepare-meeting skill）
+## 13. Claude Code 連携（kikimi skill の prepare-meeting ドメイン）
 
 本機能の起点となった要望は「会議情報を渡すと、その会議のための context / Watcher / サマリ構成を
 外部（Claude Code）から自動で準備できること」。アプリ側は §2〜§7 のファイル形式と URL scheme を
 提供するだけで、生成の知能はリポジトリ同梱の skill が担う。
 
-- **場所**: `.claude/skills/kikimi-prepare-meeting/`。仕様の正は本文書（§2 データモデル）で、
-  skill は形式に迷ったらここを参照する
+- **場所**: `.claude/skills/kikimi/references/prepare-meeting.md`（ユーザー操作系をまとめた `kikimi`
+  skill の 1 ドメイン。当初は独立の `kikimi-prepare-meeting` skill だったが router 方式へ統合された）。
+  仕様の正は本文書（§2 データモデル）で、skill は形式に迷ったらここを参照する
 - **発動**: Kikimi リポジトリ内ではそのまま使える。日常の作業ディレクトリから使う場合は
   `~/.claude/skills/` へ symlink を張る（手順は README と SKILL.md に記載）
 - **生成先**: `profiles/<id>/`（profile.yaml / context.md / summary_template.md）と、会議固有
   Watcher の preset `watchers/<id>-*.md`。プロファイルは Watcher 定義を同梱できない（§2.1）ため、
   **preset の id をプロファイル id で prefix する**のが skill の掃除規約
-- **検証**: skill 同梱の `scripts/validate.rb` が profile.yaml の必須キー・id 規則・
+- **検証**: skill 同梱の `scripts/validate_profile.rb` が profile.yaml の必須キー・id 規則・
   enabled_watchers の解決可能性・Watcher frontmatter（full / simple 両形式）・view の Mustache
   section 整合と schema 変数参照・summary_template の固定 schema 変数を機械検証する。
   アプリ側の読み込み時検証（§8）と二層で、録音開始後に初めて壊れに気付く事故を防ぐ

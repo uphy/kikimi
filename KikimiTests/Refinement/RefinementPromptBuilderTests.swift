@@ -11,7 +11,7 @@ struct RefinementPromptBuilderTests {
 
     @Test("embeds the context verbatim under 【事前知識】 and reports no clamping when it fits")
     func systemPromptEmbedsContextUnderLimit() {
-        let (prompt, wasClamped) = RefinementPromptBuilder.buildSystemPrompt(context: "用語集: PJX = 案件コード")
+        let (prompt, wasClamped) = RefinementPromptBuilder.buildSystemPrompt(ruleBody: defaultRuleBody, context: "用語集: PJX = 案件コード")
 
         #expect(!wasClamped)
         #expect(prompt.contains("【事前知識】\n用語集: PJX = 案件コード"))
@@ -21,7 +21,7 @@ struct RefinementPromptBuilderTests {
 
     @Test("instructs the LLM to return an empty refined_text for meaningless segments")
     func systemPromptIncludesMeaninglessSegmentDropRule() {
-        let (prompt, _) = RefinementPromptBuilder.buildSystemPrompt(context: "")
+        let (prompt, _) = RefinementPromptBuilder.buildSystemPrompt(ruleBody: defaultRuleBody, context: "")
 
         #expect(prompt.contains("refined_text を空文字にする"))
         #expect(prompt.contains("{\"id\": \"seg_XXXXX\", \"refined_text\": \"\"}"))
@@ -29,14 +29,14 @@ struct RefinementPromptBuilderTests {
 
     @Test("dedupSystemLeakSegments defaults to true and includes the leak-dedup rule (24-system-audio-leak-mitigation.md §4.2)")
     func systemPromptDefaultsToIncludingLeakDedupRule() {
-        let (prompt, _) = RefinementPromptBuilder.buildSystemPrompt(context: "")
+        let (prompt, _) = RefinementPromptBuilder.buildSystemPrompt(ruleBody: defaultRuleBody, context: "")
 
         #expect(prompt.contains("スピーカーの音がマイクに回り込んで二重に書き起こされたものとみなし"))
     }
 
     @Test("dedupSystemLeakSegments: true includes the leak-dedup rule")
     func systemPromptIncludesLeakDedupRuleWhenEnabled() {
-        let (prompt, _) = RefinementPromptBuilder.buildSystemPrompt(context: "", dedupSystemLeakSegments: true)
+        let (prompt, _) = RefinementPromptBuilder.buildSystemPrompt(ruleBody: defaultRuleBody, context: "", dedupSystemLeakSegments: true)
 
         #expect(prompt.contains("(mic) セグメントの内容が、直前の文脈または今回のバッチ内にある近い時刻の (system) セグメントとほぼ同じ内容の場合"))
         #expect(prompt.contains("その (mic) セグメントの refined_text を空文字にする（対応する (system) セグメント側は変更しない）"))
@@ -44,7 +44,7 @@ struct RefinementPromptBuilderTests {
 
     @Test("dedupSystemLeakSegments: false omits the leak-dedup rule")
     func systemPromptOmitsLeakDedupRuleWhenDisabled() {
-        let (prompt, _) = RefinementPromptBuilder.buildSystemPrompt(context: "", dedupSystemLeakSegments: false)
+        let (prompt, _) = RefinementPromptBuilder.buildSystemPrompt(ruleBody: defaultRuleBody, context: "", dedupSystemLeakSegments: false)
 
         #expect(!prompt.contains("スピーカーの音がマイクに回り込んで二重に書き起こされたものとみなし"))
         #expect(!prompt.contains("(system) セグメントとほぼ同じ内容の場合"))
@@ -55,7 +55,7 @@ struct RefinementPromptBuilderTests {
 
     @Test("instructs the LLM on the joins_next hint (§15.2.2)")
     func systemPromptIncludesJoinsNextRule() {
-        let (prompt, _) = RefinementPromptBuilder.buildSystemPrompt(context: "")
+        let (prompt, _) = RefinementPromptBuilder.buildSystemPrompt(ruleBody: defaultRuleBody, context: "")
 
         #expect(prompt.contains("joins_next"))
         #expect(prompt.contains("文が不自然に途切れて次のセグメントに続いている場合は joins_next を true にする"))
@@ -63,7 +63,7 @@ struct RefinementPromptBuilderTests {
 
     @Test("empty context still produces a valid prompt")
     func systemPromptWithEmptyContext() {
-        let (prompt, wasClamped) = RefinementPromptBuilder.buildSystemPrompt(context: "")
+        let (prompt, wasClamped) = RefinementPromptBuilder.buildSystemPrompt(ruleBody: defaultRuleBody, context: "")
 
         #expect(!wasClamped)
         #expect(prompt.contains("【事前知識】"))
@@ -75,7 +75,7 @@ struct RefinementPromptBuilderTests {
     func systemPromptClampsOversizedContext() {
         let oversized = String(repeating: "a", count: RefinementPromptBuilder.maxContextBytes + 100)
 
-        let (prompt, wasClamped) = RefinementPromptBuilder.buildSystemPrompt(context: oversized)
+        let (prompt, wasClamped) = RefinementPromptBuilder.buildSystemPrompt(ruleBody: defaultRuleBody, context: oversized)
 
         #expect(wasClamped)
         // The embedded context (between the two known headers) should be exactly at the byte limit.
@@ -87,16 +87,54 @@ struct RefinementPromptBuilderTests {
     func systemPromptExactlyAtLimitIsNotClamped() {
         let exact = String(repeating: "a", count: RefinementPromptBuilder.maxContextBytes)
 
-        let (_, wasClamped) = RefinementPromptBuilder.buildSystemPrompt(context: exact)
+        let (_, wasClamped) = RefinementPromptBuilder.buildSystemPrompt(ruleBody: defaultRuleBody, context: exact)
 
         #expect(!wasClamped)
+    }
+
+    // MARK: - ruleBody (`docs/design/42-prompt-overrides.md` §2.2/§4.2)
+
+    @Test("a custom ruleBody replaces the built-in policy layer, contract layer stays fixed")
+    func systemPromptUsesCustomRuleBody() {
+        let customRuleBody = "カスタム方針: 常に敬語で整形する。{{leak_dedup_rule}}"
+
+        let (prompt, _) = RefinementPromptBuilder.buildSystemPrompt(ruleBody: customRuleBody, context: "アジェンダ: 進捗確認")
+
+        #expect(prompt.hasPrefix("カスタム方針: 常に敬語で整形する。"))
+        #expect(!prompt.contains("あなたは会議書き起こしを整形する専門家です"))
+        // The app-owned contract layer (【事前知識】/【出力形式】) is unaffected by a custom ruleBody.
+        #expect(prompt.contains("【事前知識】\nアジェンダ: 進捗確認"))
+        #expect(prompt.contains("【出力形式】"))
+    }
+
+    @Test("{{leak_dedup_rule}} in a custom ruleBody expands per dedupSystemLeakSegments, same as the default body")
+    func systemPromptExpandsLeakDedupTokenInCustomRuleBody() {
+        let customRuleBody = "カスタム方針。{{leak_dedup_rule}}"
+
+        let (enabled, _) = RefinementPromptBuilder.buildSystemPrompt(ruleBody: customRuleBody, context: "", dedupSystemLeakSegments: true)
+        let (disabled, _) = RefinementPromptBuilder.buildSystemPrompt(ruleBody: customRuleBody, context: "", dedupSystemLeakSegments: false)
+
+        #expect(enabled.contains("スピーカーの音がマイクに回り込んで二重に書き起こされたものとみなし"))
+        #expect(!disabled.contains("スピーカーの音がマイクに回り込んで二重に書き起こされたものとみなし"))
+        #expect(!enabled.contains("{{leak_dedup_rule}}"))
+        #expect(!disabled.contains("{{leak_dedup_rule}}"))
+    }
+
+    @Test("a ruleBody without {{leak_dedup_rule}} simply never includes the leak-dedup rule")
+    func systemPromptWithoutTokenOmitsLeakDedupRuleEvenWhenEnabled() {
+        let customRuleBody = "このルールボディには leak_dedup トークンがありません。"
+
+        let (prompt, _) = RefinementPromptBuilder.buildSystemPrompt(ruleBody: customRuleBody, context: "", dedupSystemLeakSegments: true)
+
+        #expect(prompt.contains("このルールボディには leak_dedup トークンがありません。"))
+        #expect(!prompt.contains("スピーカーの音がマイクに回り込んで二重に書き起こされたものとみなし"))
     }
 
     // MARK: - glossaryBlock (`docs/design/28-glossary.md` §3)
 
     @Test("glossaryBlock defaults to nil, so omitting it leaves the prompt exactly as before")
     func systemPromptOmitsGlossarySectionWhenNil() {
-        let (prompt, _) = RefinementPromptBuilder.buildSystemPrompt(context: "アジェンダ: 進捗確認")
+        let (prompt, _) = RefinementPromptBuilder.buildSystemPrompt(ruleBody: defaultRuleBody, context: "アジェンダ: 進捗確認")
 
         #expect(prompt.contains("【事前知識】\nアジェンダ: 進捗確認\n\n【出力形式】"))
     }
@@ -105,7 +143,7 @@ struct RefinementPromptBuilderTests {
     func systemPromptAppendsGlossaryBlockAfterContext() {
         let glossaryBlock = GlossaryRenderer.render(entries: [GlossaryEntry(term: "nekosuke", reading: "ねこすけ")])!
 
-        let (prompt, _) = RefinementPromptBuilder.buildSystemPrompt(context: "アジェンダ: 進捗確認", glossaryBlock: glossaryBlock)
+        let (prompt, _) = RefinementPromptBuilder.buildSystemPrompt(ruleBody: defaultRuleBody, context: "アジェンダ: 進捗確認", glossaryBlock: glossaryBlock)
 
         #expect(prompt.contains("【事前知識】\nアジェンダ: 進捗確認\n\n\(glossaryBlock)\n\n【出力形式】"))
     }
@@ -114,9 +152,33 @@ struct RefinementPromptBuilderTests {
     func systemPromptAppendsGlossaryBlockWithEmptyContext() {
         let glossaryBlock = GlossaryRenderer.render(entries: [GlossaryEntry(term: "nekosuke", reading: "ねこすけ")])!
 
-        let (prompt, _) = RefinementPromptBuilder.buildSystemPrompt(context: "", glossaryBlock: glossaryBlock)
+        let (prompt, _) = RefinementPromptBuilder.buildSystemPrompt(ruleBody: defaultRuleBody, context: "", glossaryBlock: glossaryBlock)
 
         #expect(prompt.contains("【事前知識】\n\n\n\(glossaryBlock)\n\n【出力形式】"))
+    }
+
+    // MARK: - Default equivalence (`docs/design/42-prompt-overrides.md` §9.1's regression requirement)
+
+    @Test("with the default ruleBody, the assembled system prompt is byte-identical to the pre-refactor hardcoded prompt (dedup enabled)")
+    func systemPromptWithDefaultRuleBodyMatchesLegacyOutputWhenDedupEnabled() {
+        let (prompt, _) = RefinementPromptBuilder.buildSystemPrompt(
+            ruleBody: defaultRuleBody,
+            context: "アジェンダ: 進捗確認",
+            dedupSystemLeakSegments: true
+        )
+
+        #expect(prompt == legacySystemPrompt(context: "アジェンダ: 進捗確認", dedupSystemLeakSegments: true))
+    }
+
+    @Test("with the default ruleBody, the assembled system prompt is byte-identical to the pre-refactor hardcoded prompt (dedup disabled)")
+    func systemPromptWithDefaultRuleBodyMatchesLegacyOutputWhenDedupDisabled() {
+        let (prompt, _) = RefinementPromptBuilder.buildSystemPrompt(
+            ruleBody: defaultRuleBody,
+            context: "アジェンダ: 進捗確認",
+            dedupSystemLeakSegments: false
+        )
+
+        #expect(prompt == legacySystemPrompt(context: "アジェンダ: 進捗確認", dedupSystemLeakSegments: false))
     }
 
     // MARK: clampToByteLimit (multi-byte safety)
@@ -210,6 +272,48 @@ struct RefinementPromptBuilderTests {
     }
 
     // MARK: - Helpers
+
+    /// `PromptSpec.spec(for: .refinement).defaultBody` (`Kikimi/Prompts/PromptSpec.swift`,
+    /// `docs/design/42-prompt-overrides.md` §4.1) -- the built-in 方針層 body `ruleBodyProvider`'s
+    /// default closure returns in production (`RefinementQueue.init`). Every test above that used to
+    /// call `buildSystemPrompt(context:...)` without a `ruleBody` argument now passes this explicitly,
+    /// per the design's §9.2 "期待出力は不変" requirement.
+    private var defaultRuleBody: String {
+        PromptSpec.spec(for: .refinement).defaultBody
+    }
+
+    /// Hand-written copy of the full default system prompt assembly, kept as this suite's
+    /// independent oracle for the default-render regression tests above (originally §9.1's
+    /// pre-refactor equivalence check; the rule list has since evolved with
+    /// `PromptSpec.refinementDefaultBody` and this oracle is updated in lockstep) -- comparing the
+    /// implementation's output against `defaultRuleBody` fed back through itself would be
+    /// tautological, so this reproduces the expected string assembly by hand instead.
+    private func legacySystemPrompt(context: String, dedupSystemLeakSegments: Bool) -> String {
+        let leakDedupRule = dedupSystemLeakSegments
+            ? "\n- (mic) セグメントの内容が、直前の文脈または今回のバッチ内にある近い時刻の (system) セグメントとほぼ同じ内容の場合、スピーカーの音がマイクに回り込んで二重に書き起こされたものとみなし、その (mic) セグメントの refined_text を空文字にする（対応する (system) セグメント側は変更しない）"
+            : ""
+        return """
+        あなたは会議書き起こしを整形する専門家です。以下のルールに従ってください。
+
+        【整形ルール】
+        - フィラー（「えーと」「あの」など）を除去する
+        - 言い直しがある場合は言い直した後の内容を採用し、言い直し前の断片は削除する（例:「明日、いや明後日の会議」→「明後日の会議」）
+        - 句読点を補い、自然な日本語にする
+        - 入力は音声認識の書き起こしのため、同音・近音の誤変換があり得る。文脈から明らかな誤変換は正しい表記に直す（例:「駅存の実装」→「既存の実装」）
+        - 意味を変えない範囲での軽微な言い換えは可。話者の口調（です・ます調/常体）は変えない
+        - 意味の解釈が不明瞭な箇所は元の表現を残す
+        - フィラー・相槌・言い直しの断片のみで、除去すると意味のある内容が何も残らないセグメントは、refined_text を空文字にする（そのセグメントを削除する扱い）\(leakDedupRule)
+
+        【事前知識】
+        \(context)
+
+        【出力形式】
+        schema の "segments" 配列で、対象セグメント数分の整形結果を返す。
+        segments の各要素: {"id": "seg_XXXXX", "refined_text": "...", "joins_next": false}
+        意味のある内容がないセグメントは refined_text を空文字（{"id": "seg_XXXXX", "refined_text": ""}）にする。
+        文が不自然に途切れて次のセグメントに続いている場合は joins_next を true にする。意味的に独立していれば false にする。
+        """
+    }
 
     private func makeContextSegment(id: String, startMs: Int, speaker: AudioSourceKind, text: String) -> RefinementContextSegment {
         RefinementContextSegment(

@@ -44,6 +44,13 @@ private actor RecordingChatLLM: LLMCompleting {
 struct ChatRunnerTests {
     // MARK: - Fixtures
 
+    /// `runOneQuestion`'s default `promptBodyProvider` return value. A fixed sentinel string rather
+    /// than `ChatPromptBuilder`/`PromptSpec` text -- these tests only need to prove `ChatRunner`
+    /// forwards whatever `promptBodyProvider` returns into `LLMRequest.system` on every call
+    /// (`docs/design/42-prompt-overrides.md` §4.3: "chat: 送信ごとに system が変わっても実害なし"),
+    /// not what that text says.
+    private static let testSystemPrompt = "テスト用システムプロンプト"
+
     private func makeTemporaryDirectory(prefix: String) -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
@@ -105,7 +112,8 @@ struct ChatRunnerTests {
         history: [ChatTurn] = [],
         question: String = "決まったことは？",
         config: ChatConfig = .default,
-        llm: RecordingChatLLM = RecordingChatLLM()
+        llm: RecordingChatLLM = RecordingChatLLM(),
+        promptBodyProvider: @escaping @Sendable (PromptID) -> String = { _ in ChatRunnerTests.testSystemPrompt }
     ) async throws -> (answer: ChatAnswer, request: LLMRequest) {
         let sessionDir = makeTemporaryDirectory(prefix: prefix)
         defer { try? FileManager.default.removeItem(at: sessionDir) }
@@ -130,7 +138,8 @@ struct ChatRunnerTests {
         let runner = ChatRunner(
             llm: llm,
             source: TranscriptMarkdownSource(diarization: .default, voiceprintStore: voiceprintStore),
-            config: config
+            config: config,
+            promptBodyProvider: promptBodyProvider
         )
         let answer = try await runner.ask(question: question, history: history, sessionHandle: handle)
         let request = try #require(await llm.receivedRequests.last)
@@ -259,7 +268,49 @@ struct ChatRunnerTests {
         #expect(result.request.model == "configured-model")
         #expect(result.request.schema == ChatPromptBuilder.answerSchema)
         #expect(result.request.user == "決まったことは？", "the latest question rides alone in `user`")
-        #expect(result.request.system == ChatPromptBuilder.buildSystem())
+        #expect(result.request.system == ChatRunnerTests.testSystemPrompt)
+    }
+
+    // MARK: - (f) prompt override injection (docs/design/42-prompt-overrides.md §4.3)
+
+    @Test("system is read from promptBodyProvider(.chat), not from ChatPromptBuilder")
+    func systemComesFromPromptBodyProvider() async throws {
+        let result = try await runOneQuestion(
+            prefix: "ChatRunnerTests-f",
+            segmentCount: 1,
+            promptBodyProvider: { id in id == .chat ? "override 本文" : "unexpected id: \(id)" }
+        )
+
+        #expect(result.request.system == "override 本文")
+    }
+
+    @Test("promptBodyProvider is read fresh on every ask(), not snapshotted at init")
+    func promptBodyProviderIsReadPerSend() async throws {
+        let sessionDir = makeTemporaryDirectory(prefix: "ChatRunnerTests-f2")
+        defer { try? FileManager.default.removeItem(at: sessionDir) }
+        let handle = makeSessionHandle(directory: sessionDir)
+        _ = try await handle.appendTranscriptSegment(source: .mic, startMs: 0, endMs: 900, text: "発言#0", confidence: 0.9)
+
+        let (voiceprintStore, voiceprintFileURL) = makeVoiceprintStore()
+        defer { try? FileManager.default.removeItem(at: voiceprintFileURL) }
+
+        var currentPrompt = "1回目"
+        let llm = RecordingChatLLM()
+        let runner = ChatRunner(
+            llm: llm,
+            source: TranscriptMarkdownSource(diarization: .default, voiceprintStore: voiceprintStore),
+            config: .default,
+            promptBodyProvider: { _ in currentPrompt }
+        )
+
+        _ = try await runner.ask(question: "質問1", history: [], sessionHandle: handle)
+        currentPrompt = "2回目"
+        _ = try await runner.ask(question: "質問2", history: [], sessionHandle: handle)
+
+        let requests = await llm.receivedRequests
+        #expect(requests.count == 2)
+        #expect(requests[0].system == "1回目")
+        #expect(requests[1].system == "2回目", "a later ask() must see the updated prompt body, not a cached one")
     }
 
     @Test("an empty transcript still produces a well-formed request")

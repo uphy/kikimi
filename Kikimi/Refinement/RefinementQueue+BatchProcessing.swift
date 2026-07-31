@@ -237,14 +237,21 @@ extension RefinementQueue {
         }
         batchesSinceContextLoad += 1
         // `docs/design/28-glossary.md` §3: rendered fresh on every batch, not gated by the
-        // context-reload cadence above -- `glossaryProvider()` returns an in-memory snapshot already
-        // (see its doc comment), so there is no I/O to throttle, and its output is stable for the
-        // lifetime of a production queue anyway (re-rendering it doesn't change cache-hit behavior).
+        // context-reload cadence above -- `glossaryProvider()`/`glossaryCategoriesProvider()` return an
+        // in-memory snapshot already (see their doc comments), so there is no I/O to throttle, and their
+        // output is stable for the lifetime of a production queue anyway (re-rendering it doesn't change
+        // cache-hit behavior). `glossaryHeaderProvider()` and `ruleBodyProvider()` below are the same
+        // shape: called fresh every batch, but each always returns the same session-start-snapshotted
+        // value for this queue's lifetime (`docs/design/42-prompt-overrides.md` §4.2/§4.3 -- see
+        // `RefinementQueue.ruleBodyProvider`'s doc comment for why the snapshotting itself happens at
+        // the caller, not here).
         let glossaryBlock = GlossaryRenderer.render(
             entries: glossaryProvider(),
-            categories: glossaryCategoriesProvider()
+            categories: glossaryCategoriesProvider(),
+            header: glossaryHeaderProvider()
         )
         return RefinementPromptBuilder.buildSystemPrompt(
+            ruleBody: ruleBodyProvider(),
             context: cachedContextText ?? "",
             glossaryBlock: glossaryBlock,
             dedupSystemLeakSegments: config.dedupSystemLeakSegments

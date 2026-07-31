@@ -117,6 +117,25 @@ final class DictationController: ObservableObject {
     let glossaryProvider: @MainActor () -> [GlossaryEntry]
     /// `docs/design/28-glossary.md` §1.2: the `glossary_categories` half of the same section.
     let glossaryCategoriesProvider: @MainActor () -> [GlossaryCategory]
+    /// `docs/design/42-prompt-overrides.md` §7.2: the `dictation` prompt's resolved policy body
+    /// (active `prompts/dictation.md` override, or the built-in default when there is none). Read
+    /// fresh on every utterance -- `dictation` reloads `immediate` (§5.2). `internal` for
+    /// `DictationController+Refine.swift` (see `refiner`).
+    let dictationGlobalBodyProvider: @MainActor () -> String
+    /// `docs/design/42-prompt-overrides.md` §7.2: every registered `dictation/apps/<bundle-id>`
+    /// override's bundle id, matched against the captured frontmost app *by this controller* (exact
+    /// match only, R14) rather than inside `DictationContextResolver` -- that type has no
+    /// `PromptStore` dependency at all (see its doc comment). `internal` for `+Refine.swift`.
+    let dictationAppBundleIDsProvider: @MainActor () -> [String]
+    /// `docs/design/42-prompt-overrides.md` §7.2: the resolved policy body for a
+    /// `dictation/apps/<bundle-id>` override, looked up only after
+    /// `dictationAppBundleIDsProvider()` has confirmed that bundle id is registered. `internal` for
+    /// `+Refine.swift`.
+    let dictationAppBodyProvider: @MainActor (String) -> String
+    /// `docs/design/42-prompt-overrides.md` §2.1: the `glossary-header` prompt's resolved policy
+    /// body, passed through to `DictationContextResolver.resolve(glossaryHeader:)`. `internal` for
+    /// `+Refine.swift`.
+    let dictationGlossaryHeaderProvider: @MainActor () -> String
     private let transcriberFactory: (SttEngineConfig) async throws -> DictationTranscriber
     /// `docs/design/31-dictation-two-pass-decode.md` §3.1's test seam: builds the warm batch
     /// decoder from the *resolved* language (`resolveSttEngineConfig`'s output, TP1).
@@ -145,6 +164,18 @@ final class DictationController: ObservableObject {
         watchersDefaultModelProvider: @escaping @MainActor () -> String = { AppConfig.shared.data.watchers.defaultModel },
         glossaryProvider: @escaping @MainActor () -> [GlossaryEntry] = { AppConfig.shared.data.glossary },
         glossaryCategoriesProvider: @escaping @MainActor () -> [GlossaryCategory] = { AppConfig.shared.data.glossaryCategories },
+        dictationGlobalBodyProvider: @escaping @MainActor () -> String = {
+            PromptStore.shared.policyBody(for: .builtin(.dictation))
+        },
+        dictationAppBundleIDsProvider: @escaping @MainActor () -> [String] = {
+            PromptStore.shared.dictationAppBundleIDs()
+        },
+        dictationAppBodyProvider: @escaping @MainActor (String) -> String = { bundleID in
+            PromptStore.shared.policyBody(for: .dictationApp(bundleID: bundleID))
+        },
+        dictationGlossaryHeaderProvider: @escaping @MainActor () -> String = {
+            PromptStore.shared.policyBody(for: .builtin(.glossaryHeader))
+        },
         transcriberFactory: @escaping (SttEngineConfig) async throws -> DictationTranscriber = DictationTranscriber.make,
         batchTranscriberFactory: @escaping (String) async throws -> any DictationBatchTranscribing = { language in
             try await DictationBatchTranscriber.make(language: language)
@@ -161,6 +192,10 @@ final class DictationController: ObservableObject {
         self.watchersDefaultModelProvider = watchersDefaultModelProvider
         self.glossaryProvider = glossaryProvider
         self.glossaryCategoriesProvider = glossaryCategoriesProvider
+        self.dictationGlobalBodyProvider = dictationGlobalBodyProvider
+        self.dictationAppBundleIDsProvider = dictationAppBundleIDsProvider
+        self.dictationAppBodyProvider = dictationAppBodyProvider
+        self.dictationGlossaryHeaderProvider = dictationGlossaryHeaderProvider
         self.audioInputEnumerator = audioInputEnumerator
         self.transcriberFactory = transcriberFactory
         self.trailingCaptureDelayMs = trailingCaptureDelayMs

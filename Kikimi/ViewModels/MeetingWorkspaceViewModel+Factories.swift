@@ -111,16 +111,30 @@ extension MeetingWorkspaceViewModel {
     /// itself is a one-time snapshot, not a live `AppConfig` reference (see
     /// `RefinementQueue.glossaryProvider`'s doc comment for why this must not read `AppConfig.shared`
     /// from inside the actor instead).
+    ///
+    /// `docs/design/42-prompt-overrides.md` §4.3/§5.2: `PromptStore.shared.refreshIfStale()` is called
+    /// first (the session-start safety net against a missed/coalesced filesystem watch event -- §5.1),
+    /// then `refinement`'s policy body and `glossary-header`'s body are each read once, here, on the
+    /// main actor, and captured by `ruleBodyProvider`/`glossaryHeaderProvider`. This -- not anything
+    /// inside `RefinementQueue` itself -- is "session-start スナップショット"'s actual mechanism: both
+    /// providers are `let`s for this queue's entire lifetime, so a `prompts/refinement.md` /
+    /// `prompts/glossary-header.md` edit mid-session is only ever picked up by the *next* session's
+    /// queue (§5.2's table, "次のセッション開始時"), exactly like `glossary`/`glossaryCategories` above.
     @MainActor
     static func defaultRefinementQueueFactory(_ sessionHandle: SessionHandle) -> RefinementQueue {
         let glossary = AppConfig.shared.data.glossary
         let glossaryCategories = AppConfig.shared.data.glossaryCategories
+        PromptStore.shared.refreshIfStale()
+        let ruleBody = PromptStore.shared.policyBody(for: .builtin(.refinement))
+        let glossaryHeader = PromptStore.shared.policyBody(for: .builtin(.glossaryHeader))
         return RefinementQueue(
             sessionHandle: sessionHandle,
             llm: UsageRecordingLLM(base: LLMClient.shared, sessionHandle: sessionHandle),
             config: AppConfig.shared.data.refinement,
             glossaryProvider: { glossary },
-            glossaryCategoriesProvider: { glossaryCategories }
+            glossaryCategoriesProvider: { glossaryCategories },
+            ruleBodyProvider: { ruleBody },
+            glossaryHeaderProvider: { glossaryHeader }
         )
     }
 
@@ -150,13 +164,24 @@ extension MeetingWorkspaceViewModel {
     /// `UsageRecordingLLM`, same rationale as the other two factories above -- `WatcherRunner`'s own
     /// `completeRaw` calls get the identical `llm_usage.jsonl` bookkeeping without knowing this
     /// decorator exists (`UsageRecordingLLM.completeRaw(_:)`'s own doc comment).
+    ///
+    /// `docs/design/42-prompt-overrides.md` §4.3/§5.1: `PromptStore.shared.refreshIfStale()` runs
+    /// synchronously right before the `simple-watcher` prompt override is read, so a watch event this
+    /// process somehow missed (kqueue's own limits, §8 #12) still can't leave a stale session-start
+    /// snapshot -- then that one `policyBody(for:)` read is captured into `WatcherRunner`'s own
+    /// `simpleWatcherTemplate`, fixed for this runner's entire lifetime (§5.2's "次のセッション開始時"
+    /// reload timing; a mid-recording `prompts/simple-watcher.md` edit only takes effect for the *next*
+    /// session's runner).
     @MainActor
     static func defaultWatcherRunnerFactory(_ sessionHandle: SessionHandle) -> WatcherRunner {
-        WatcherRunner(
+        PromptStore.shared.refreshIfStale()
+        let simpleWatcherTemplate = PromptStore.shared.policyBody(for: .builtin(.simpleWatcher))
+        return WatcherRunner(
             sessionHandle: sessionHandle,
             llm: UsageRecordingLLM(base: LLMClient.shared, sessionHandle: sessionHandle),
             library: defaultWatcherLibrary(),
-            defaultModel: AppConfig.shared.data.watchers.defaultModel
+            defaultModel: AppConfig.shared.data.watchers.defaultModel,
+            simpleWatcherTemplate: simpleWatcherTemplate
         )
     }
 

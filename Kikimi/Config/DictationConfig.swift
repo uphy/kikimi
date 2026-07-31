@@ -34,10 +34,14 @@ struct DictationAppContext: Codable, Equatable, Sendable {
 
 // MARK: - DictationContextConfig
 
-/// `dictation.context` section (`docs/design/25-dictation-mode.md` §14.2/R12): the "global" context
-/// applied to every dictation call, plus a list of per-app additions. Resolved at call time by
-/// `DictationContextResolver.resolve(bundleID:config:glossary:)` -- this type only models the config
-/// data, it never decides what to inject.
+/// `dictation.context` section (`docs/design/25-dictation-mode.md` §14.2/R12, **incompatibly
+/// migrated away by `docs/design/42-prompt-overrides.md` §7**): the "global" context applied to
+/// every dictation call, plus a list of per-app additions. This type is kept around purely so an
+/// old `config.yaml` still decodes -- `DictationPromptMigration` reads it exactly once (at
+/// `PromptStore` init, gated by `state.yaml`'s `dictation_prompts_migrated` marker) to seed
+/// `prompts/dictation.md` / `prompts/dictation/apps/<bundle-id>.md`, and nothing else ever reads
+/// these fields again: runtime resolution now goes through `PromptStore.policyBody(for:)` /
+/// `DictationContextResolver.resolve(globalBody:appBody:...)` instead (§4.2/§7.2).
 ///
 /// Note: `glossary` (§15/R19) used to live here as `dictation.context.glossary`, but was promoted to
 /// a top-level, feature-independent `glossary:` section (`KikimiConfigData.glossary`,
@@ -46,12 +50,16 @@ struct DictationAppContext: Codable, Equatable, Sendable {
 /// `dictation.context.glossary` key in an old `config.yaml` decode without error (unrecognized keys
 /// are ignored, not migrated); see that design doc's §2 for the back-compat rationale.
 struct DictationContextConfig: Codable, Equatable, Sendable {
-    /// Applied to every dictation refinement call regardless of the focused app (R12). Any string is
-    /// accepted, including empty (R17's escape hatch for a user who wants no injected context at
-    /// all) -- this field is deliberately not validated.
-    var global: String
-    /// Per-app additions, matched by exact bundle identifier (R14). Append-only in spirit: the
-    /// resolver never lets an app entry replace or suppress `global`.
+    /// `nil` when the `global` key is absent from `config.yaml` entirely, distinct from an explicit
+    /// empty string (R17's escape hatch for "inject no context at all", still meaningful to
+    /// `DictationPromptMigration` -- §7.1's migration rules treat "key absent" and "key present but
+    /// empty" differently, so `init(from:)` below decodes this with `decodeIfPresent` only and does
+    /// **not** fall back to `Self.default.global` (which is itself `nil` now that the migrated-away
+    /// default body lives in `PromptSpec(.dictation).defaultBody` instead, §7.2). This field is
+    /// otherwise unvalidated -- any string, including empty, decodes verbatim.
+    var global: String?
+    /// Per-app additions, matched by exact bundle identifier (R14). Read only by
+    /// `DictationPromptMigration` now (see this type's doc comment).
     var apps: [DictationAppContext]
 
     enum CodingKeys: String, CodingKey {
@@ -59,50 +67,37 @@ struct DictationContextConfig: Codable, Equatable, Sendable {
         case apps
     }
 
-    /// R17: `global`'s default is the filler-removal/punctuation/grammatical-gap-filling rule body
-    /// that used to be hardcoded into `DictationRefiner.systemPrompt`, promoted here so it round-trips
-    /// through `config.yaml` and is directly editable from Settings (§14.5) instead of being a hidden
-    /// literal.
-    static let `default` = DictationContextConfig(
-        global: """
-        【前提】
-        - 入力は音声認識（ASR）の書き起こし結果である
-        - 漢字変換・カタカナ表記・アルファベット表記は認識エンジンによる推測に過ぎず、誤っていることがある
-        - 正しいのは「読み（発音）」であり、表記は前後の文脈から最も自然なものに再決定してよい
+    /// `global` is `nil`: the filler-removal/punctuation/grammatical-gap-filling rule body that used
+    /// to live here (R17) was promoted to `PromptSpec(.dictation).defaultBody`
+    /// (`docs/design/42-prompt-overrides.md` §7.2) so it is defined in exactly one place. Comparing
+    /// a decoded `global` against *this* `.default` would be wrong for `DictationPromptMigration`'s
+    /// purposes -- see that type's doc comment for why the comparison basis must always be
+    /// `PromptSpec(.dictation).defaultBody` instead.
+    static let `default` = DictationContextConfig(global: nil, apps: [])
 
-        【整形ルール】
-        - フィラー（「えーと」「あの」など）を除去する
-        - 句読点を補い、自然な日本語にする
-        - 表記の置換は「読みが同じ・近い範囲」に限り自由に行ってよい。読みから離れた書き換えや新しい情報の追加は禁止する（ただし、アプリ向けの追加指示がある場合はそちらを優先する）
-        - 同音・近音の誤変換は積極的に正しい表記へ修正する（例:「駅存」→「既存」、「支持」→「指示」）
-        - 技術用語は文脈から判断できる場合、正式な表記に直す（例:「エルエルエム」→「LLM」、「ピーディエフ」→「PDF」）
-        - 良い例:「駅存の実装」→「既存の実装」（読みが近く、文脈上「既存」が妥当）。悪い例:「ピーディf」→「prデータ」（読みが一致しない、ただの推測でしてはいけない）
-        - 音声認識により助詞や単語が部分的に欠落し、文法的に不自然な箇所がある場合は、前後の文脈から自然に補って文法的に整った文章にする（例:「明日 会議 資料」→「明日の会議の資料」）
-        - 欠落補完はあくまで文法的な穴埋めに留め、話者が言っていない新しい情報や結論を創作しない
-        - 確信が持てない箇所（表記の候補に自信が持てない、または欠落補完で文意が推測できない場合など）は元の表現を残す
-        """,
-        apps: []
-    )
-
-    init(global: String, apps: [DictationAppContext]) {
+    init(global: String?, apps: [DictationAppContext]) {
         self.global = global
         self.apps = apps
     }
 
     private static let logger = Logger(subsystem: "io.github.uphy.Kikimi", category: "DictationContextConfig")
 
-    /// Custom decoder mirroring `DictationConfig.init(from:)`'s "壊れていたら warning + 既定値" style.
-    /// `global` accepts any string verbatim (no validation, R12/§14.2). `apps` is all-or-nothing: if
-    /// decoding the array throws at all (a single malformed entry is enough, since
-    /// `[DictationAppContext]` decodes as one JSON/YAML array), the *whole* array falls back to empty
-    /// rather than attempting a per-entry partial recovery -- §14.2's rationale is that this list is
-    /// short and Settings-UI-authored, not hand-edited, so the extra partial-recovery complexity is
-    /// not worth it. A `glossary` key present in this container (from an old `config.yaml` predating
-    /// its promotion to the top level, see this type's doc comment) is simply not looked up here and
-    /// is therefore ignored, not an error.
+    /// Custom decoder mirroring `DictationConfig.init(from:)`'s "壊れていたら warning + 既定値" style
+    /// for `apps`, but **not** for `global`: `global` decodes with `decodeIfPresent` only (no `??`
+    /// fallback), so a `config.yaml` predating this key (or one where it was removed) decodes to
+    /// `nil`, distinguishable from an explicit `global: ""` (`docs/design/42-prompt-overrides.md`
+    /// §7.2 -- this distinction is what lets `DictationPromptMigration` tell "never set" apart from
+    /// R17's empty-string escape hatch). `apps` is all-or-nothing: if decoding the array throws at
+    /// all (a single malformed entry is enough, since `[DictationAppContext]` decodes as one
+    /// JSON/YAML array), the *whole* array falls back to empty rather than attempting a per-entry
+    /// partial recovery -- §14.2's rationale is that this list is short and Settings-UI-authored, not
+    /// hand-edited, so the extra partial-recovery complexity is not worth it. A `glossary` key
+    /// present in this container (from an old `config.yaml` predating its promotion to the top
+    /// level, see this type's doc comment) is simply not looked up here and is therefore ignored,
+    /// not an error.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        global = try container.decodeIfPresent(String.self, forKey: .global) ?? Self.default.global
+        global = try container.decodeIfPresent(String.self, forKey: .global)
 
         do {
             apps = try container.decodeIfPresent([DictationAppContext].self, forKey: .apps) ?? Self.default.apps
@@ -217,8 +212,11 @@ struct DictationConfig: Codable, Equatable, Sendable {
     /// D2 scope: single-shot refinement call timeout in milliseconds. Exceeding it (or any
     /// error/offline condition) falls back to inserting the raw STT text unchanged.
     var refineTimeoutMs: Int
-    /// R12/§14: the global + per-app context injected into `DictationRefiner`'s system prompt,
-    /// resolved at call time by `DictationContextResolver.resolve(bundleID:config:)`.
+    /// R12/§14, **migrated away by `docs/design/42-prompt-overrides.md` §7**: no longer read at
+    /// call time. Kept only so `DictationPromptMigration` can seed `prompts/dictation.md` /
+    /// `prompts/dictation/apps/<bundle-id>.md` from it once; runtime resolution reads
+    /// `PromptStore.policyBody(for:)` via `DictationContextResolver.resolve(globalBody:appBody:...)`
+    /// instead (see `DictationContextConfig`'s doc comment).
     var context: DictationContextConfig
     /// DH1/DH7 (`docs/design/29-dictation-history.md` §7.1): whether per-utterance history is
     /// persisted, and how many entries are retained.

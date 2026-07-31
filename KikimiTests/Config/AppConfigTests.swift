@@ -1497,7 +1497,10 @@ struct AppConfigTests {
         #expect(appConfig.data.dictation.model == "")
         #expect(appConfig.data.dictation.refineTimeoutMs == 3_000)
         #expect(appConfig.data.dictation.context == .default)
-        #expect(appConfig.data.dictation.context.global == DictationContextConfig.default.global)
+        #expect(
+            appConfig.data.dictation.context.global == nil,
+            "docs/design/42-prompt-overrides.md §7.2: an absent key decodes to nil, not the (now-nil) DictationContextConfig.default.global"
+        )
         #expect(appConfig.data.dictation.context.apps == [])
     }
 
@@ -1609,8 +1612,8 @@ struct AppConfigTests {
 
     // MARK: - DictationContextConfig (`docs/design/25-dictation-mode.md` §14.2/§14.6, R12/R17)
 
-    @Test("a dictation: section without a context: key falls back to DictationContextConfig.default")
-    func missingDictationContextKeyFallsBackToDefault() throws {
+    @Test("a dictation: section without a context: key decodes global as nil (§7.2: no default fallback)")
+    func missingDictationContextKeyDecodesGlobalAsNil() throws {
         let dir = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
 
@@ -1623,7 +1626,8 @@ struct AppConfigTests {
         let appConfig = makeAppConfig(in: dir)
         #expect(!appConfig.loadFailed)
         #expect(appConfig.data.dictation.context == .default)
-        #expect(appConfig.data.dictation.context.global == DictationContextConfig.default.global)
+        #expect(appConfig.data.dictation.context.global == nil)
+        #expect(appConfig.data.dictation.context.apps == [])
     }
 
     @Test("a partial dictation.context section (only global) fills apps from DictationContextConfig.default")
@@ -1644,7 +1648,7 @@ struct AppConfigTests {
         #expect(appConfig.data.dictation.context.apps == [])
     }
 
-    @Test("dictation.context.global accepts an explicit empty string verbatim (no validation, R17's escape hatch)")
+    @Test("dictation.context.global accepts an explicit empty string verbatim (no validation, R17's escape hatch), distinct from an absent key")
     func emptyGlobalContextIsAcceptedVerbatim() throws {
         let dir = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -1659,9 +1663,32 @@ struct AppConfigTests {
         let appConfig = makeAppConfig(in: dir)
         #expect(!appConfig.loadFailed)
         #expect(appConfig.data.dictation.context.global == "")
+        #expect(appConfig.data.dictation.context.global != nil, "an explicit empty string must not collapse into the 'key absent' nil case")
     }
 
-    @Test("a partial dictation.context section (only apps) fills global from DictationContextConfig.default")
+    @Test("a nil dictation.context.global round-trips as an omitted key, not a re-materialized default")
+    func nilGlobalRoundTripsAsOmittedKey() throws {
+        let dir = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let appConfig = makeAppConfig(in: dir)
+        #expect(appConfig.data.dictation.context.global == nil)
+        appConfig.save()
+
+        let onDisk = try String(contentsOf: fileURL(in: dir), encoding: .utf8)
+        let root = try Yams.load(yaml: onDisk) as? [String: Any]
+        let context = (root?["dictation"] as? [String: Any])?["context"] as? [String: Any]
+        #expect(
+            context?.keys.contains("global") != true,
+            "docs/design/42-prompt-overrides.md §7.2: a nil global must not round-trip as a materialized default/empty-string key"
+        )
+
+        let reloaded = makeAppConfig(in: dir)
+        #expect(!reloaded.loadFailed)
+        #expect(reloaded.data.dictation.context.global == nil)
+    }
+
+    @Test("a partial dictation.context section (only apps) decodes global as nil, not DictationContextConfig.default.global")
     func partialDictationContextFillsGlobalFromDefault() throws {
         let dir = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -1677,7 +1704,7 @@ struct AppConfigTests {
 
         let appConfig = makeAppConfig(in: dir)
         #expect(!appConfig.loadFailed)
-        #expect(appConfig.data.dictation.context.global == DictationContextConfig.default.global)
+        #expect(appConfig.data.dictation.context.global == nil)
         #expect(appConfig.data.dictation.context.apps == [
             DictationAppContext(bundleID: "com.tinyspeck.slackmacgap", context: "絵文字は使わない")
         ])

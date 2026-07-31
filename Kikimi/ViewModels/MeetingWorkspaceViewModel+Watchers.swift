@@ -62,7 +62,7 @@ extension MeetingWorkspaceViewModel {
             guard seenIds.insert(id).inserted else { continue }
             let previous = previousById[id]
             if let resolved = try? await watcherLibrary.resolveDefinitionText(id: id, sessionHandle: sessionHandle),
-               let definition = try? WatcherDefinitionParser.parse(text: resolved.text, expectedId: id) {
+               let definition = try? WatcherDefinitionParser.parse(text: resolved.text, expectedId: id, simpleWatcherTemplate: currentSimpleWatcherTemplate()) {
                 items.append(WatcherPanelItem(
                     id: id,
                     name: definition.name,
@@ -109,7 +109,7 @@ extension MeetingWorkspaceViewModel {
     /// preview) and renders it through the current `view` template.
     private func renderExistingState(for id: String) async {
         guard let resolved = try? await watcherLibrary.resolveDefinitionText(id: id, sessionHandle: sessionHandle),
-              let definition = try? WatcherDefinitionParser.parse(text: resolved.text, expectedId: id) else {
+              let definition = try? WatcherDefinitionParser.parse(text: resolved.text, expectedId: id, simpleWatcherTemplate: currentSimpleWatcherTemplate()) else {
             return
         }
         let stateText = try? await sessionHandle.readText(.watcherState(id: id))
@@ -354,7 +354,7 @@ extension MeetingWorkspaceViewModel {
         }
         await refreshWatcherItems()
         do {
-            _ = try WatcherDefinitionParser.parse(text: text, expectedId: id)
+            _ = try WatcherDefinitionParser.parse(text: text, expectedId: id, simpleWatcherTemplate: currentSimpleWatcherTemplate())
             return nil
         } catch {
             return (error as? LocalizedError)?.errorDescription ?? "定義の解析に失敗しました。"
@@ -397,23 +397,29 @@ extension MeetingWorkspaceViewModel {
     /// but this stays a query rather than throwing so a stale/racing call degrades quietly).
     func simpleWatcherSpec(id: String) async -> SimpleWatcherSpec? {
         guard let resolved = try? await watcherLibrary.resolveDefinitionText(id: id, sessionHandle: sessionHandle),
-              let definition = try? WatcherDefinitionParser.parse(text: resolved.text, expectedId: id) else {
+              let definition = try? WatcherDefinitionParser.parse(text: resolved.text, expectedId: id, simpleWatcherTemplate: currentSimpleWatcherTemplate()) else {
             return nil
         }
         return definition.simpleSpec
     }
 
     /// "詳細形式に変換…" (§7): one-way eject from a session-local simple Watcher to a full-format
-    /// `.md`. Generates `SimpleWatcherSpec.desugaredFullText()` and round-trip-verifies it *before*
-    /// touching disk -- parses the generated text and compares the result against `spec.desugar()`
-    /// (ignoring `simpleSpec`, which the generated text can never carry since it has no `kind:
-    /// simple`). Both failure branches throw without writing:
+    /// `.md`. Generates `SimpleWatcherSpec.desugaredFullText(promptTemplate:)` and round-trip-verifies
+    /// it *before* touching disk -- parses the generated text and compares the result against
+    /// `spec.desugar(promptTemplate:)` (ignoring `simpleSpec`, which the generated text can never
+    /// carry since it has no `kind: simple`). Both failure branches throw without writing:
     /// - the generated text fails to parse at all -> `.parseFailed` (wraps the parse error's own
     ///   message so the cause -- almost always a YAML-hostile character `fileText()`'s escaping
     ///   missed -- isn't hidden)
-    /// - parsing succeeds but disagrees with `desugar()` -> `.roundTripMismatch` (the known cause is
-    ///   a `# `-prefixed line in the prompt colliding with the `# System`/`# User` section split,
-    ///   §8.2)
+    /// - parsing succeeds but disagrees with `desugar(promptTemplate:)` -> `.roundTripMismatch` (the
+    ///   known cause is a `# `-prefixed line in the prompt colliding with the `# System`/`# User`
+    ///   section split, §8.2)
+    ///
+    /// `template` is read once, up front, and reused for every step below
+    /// (`docs/design/42-prompt-overrides.md` §4.3): `desugaredFullText`/`parse`/`desugar` must all see
+    /// the *same* `simple-watcher` prompt template value, or a live `prompts/simple-watcher.md` edit
+    /// racing this conversion could fail the round-trip comparison on an unrelated `systemPrompt`
+    /// mismatch that has nothing to do with the `# `-prefixed-line bug it exists to catch.
     ///
     /// Only on success is `watchers/<id>.md` overwritten and `watcherItems` refreshed.
     func convertSimpleWatcherToFull(id: String) async throws {
@@ -422,11 +428,12 @@ extension MeetingWorkspaceViewModel {
                 detail: "Watcher \"\(id)\" は簡易形式として解決できませんでした。"
             )
         }
-        let fullText = spec.desugaredFullText()
+        let template = currentSimpleWatcherTemplate()
+        let fullText = spec.desugaredFullText(promptTemplate: template)
 
         let parsed: WatcherDefinition
         do {
-            parsed = try WatcherDefinitionParser.parse(text: fullText, expectedId: id)
+            parsed = try WatcherDefinitionParser.parse(text: fullText, expectedId: id, simpleWatcherTemplate: template)
         } catch {
             throw SimpleWatcherConversionError.parseFailed(
                 detail: (error as? LocalizedError)?.errorDescription ?? String(describing: error)
@@ -434,7 +441,7 @@ extension MeetingWorkspaceViewModel {
         }
         var parsedIgnoringSimpleSpec = parsed
         parsedIgnoringSimpleSpec.simpleSpec = nil
-        var expectedIgnoringSimpleSpec = spec.desugar()
+        var expectedIgnoringSimpleSpec = spec.desugar(promptTemplate: template)
         expectedIgnoringSimpleSpec.simpleSpec = nil
         guard parsedIgnoringSimpleSpec == expectedIgnoringSimpleSpec else {
             throw SimpleWatcherConversionError.roundTripMismatch
@@ -442,6 +449,16 @@ extension MeetingWorkspaceViewModel {
 
         try await sessionHandle.writeText(fullText, to: .watcherDefinition(id: id))
         await refreshWatcherItems()
+    }
+
+    /// The `simple-watcher` prompt override's currently-active body (or the built-in default if none
+    /// is active), read fresh at each call site rather than cached (`docs/design/42-prompt-overrides.md`
+    /// §4.3/§5.2): a live `prompts/simple-watcher.md` edit shows up immediately in every Prep-tab
+    /// parse/preview/convert path this file drives. `WatcherRunner` deliberately does *not* use this --
+    /// it holds its own session-start snapshot instead, so a live recording's Watcher executions stay
+    /// on the prompt-cache-friendly "System は実行間で完全固定" template for the session's duration.
+    private func currentSimpleWatcherTemplate() -> String {
+        PromptStore.shared.policyBody(for: .builtin(.simpleWatcher))
     }
 
     /// `createSimpleWatcher(_:)`'s id-uniqueness loop: keeps drawing candidates from

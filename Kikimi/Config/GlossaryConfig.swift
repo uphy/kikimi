@@ -12,7 +12,7 @@ import Foundation
 /// `reading` covers both a mis-transcription STT commonly produces (`term: "nekosuke", reading:
 /// "ねこすけ"`) and a perfectly faithful transcription the user simply wants normalized (`term:
 /// "stg環境", reading: "ステージング環境"`). These are the same operation to the model -- "see A, write
-/// B" -- so they share one field and one rule; see `GlossaryRenderer.header`'s doc comment for why
+/// B" -- so they share one field and one rule; see `GlossaryRenderer.defaultHeader`'s doc comment for why
 /// splitting them into a 種別 field would have been the wrong axis.
 ///
 /// `reading` empty means there is nothing to replace: the term is listed bare, purely so the LLM
@@ -21,7 +21,7 @@ import Foundation
 /// One term with several source notations is a single entry with a comma-separated `reading`
 /// (`term: "yamada", reading: "山田, やまだ"`), not one entry per notation -- the rendered
 /// prompt spends one bullet (and one repetition of the term) instead of N, and
-/// `GlossaryRenderer.header` tells the LLM how to read the commas.
+/// `GlossaryRenderer.defaultHeader` tells the LLM how to read the commas.
 struct GlossaryEntry: Codable, Equatable, Sendable {
     var term: String
     var reading: String
@@ -65,7 +65,7 @@ struct GlossaryEntry: Codable, Equatable, Sendable {
 /// `instruction` is optional extra prompt text rendered under the heading, before the term list --
 /// e.g. 「以下は人物名です。敬称（さん・様）は原文のまま残してください。」. This is the axis categories
 /// exist on: a *domain hint*, not a replacement mode. Whether a given entry is a mis-transcription fix
-/// or a notation normalization is settled once, for all entries, by `GlossaryRenderer.header`.
+/// or a notation normalization is settled once, for all entries, by `GlossaryRenderer.defaultHeader`.
 struct GlossaryCategory: Codable, Equatable, Sendable, Identifiable {
     var id: String
     var name: String

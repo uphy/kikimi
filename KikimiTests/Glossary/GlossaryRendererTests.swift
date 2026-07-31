@@ -16,14 +16,14 @@ struct GlossaryRendererTests {
     func entryWithoutReading() {
         let rendered = GlossaryRenderer.render(entries: [GlossaryEntry(term: "Acme Works", reading: "")])
 
-        #expect(rendered == "\(GlossaryRenderer.header)\n\n- Acme Works")
+        #expect(rendered == "\(GlossaryRenderer.defaultHeader)\n\n- Acme Works")
     }
 
     @Test("an entry with a reading is rendered as \"reading → term\"")
     func entryWithReading() {
         let rendered = GlossaryRenderer.render(entries: [GlossaryEntry(term: "nekosuke", reading: "ねこすけ")])
 
-        #expect(rendered == "\(GlossaryRenderer.header)\n\n- ねこすけ → nekosuke")
+        #expect(rendered == "\(GlossaryRenderer.defaultHeader)\n\n- ねこすけ → nekosuke")
     }
 
     @Test("multiple entries preserve their original order, one bullet per line")
@@ -39,7 +39,7 @@ struct GlossaryRendererTests {
 
         #expect(
             rendered == """
-            \(GlossaryRenderer.header)
+            \(GlossaryRenderer.defaultHeader)
 
             - ねこすけ → nekosuke
             - デブ環境 → dev環境
@@ -57,7 +57,7 @@ struct GlossaryRendererTests {
             GlossaryEntry(term: "Entitlement", reading: "")
         ]
 
-        #expect(GlossaryRenderer.render(entries: entries) == "\(GlossaryRenderer.header)\n\n- Entitlement")
+        #expect(GlossaryRenderer.render(entries: entries) == "\(GlossaryRenderer.defaultHeader)\n\n- Entitlement")
     }
 
     @Test("if every entry's term is blank, the result is nil (not a header with no terms under it)")
@@ -71,7 +71,7 @@ struct GlossaryRendererTests {
     func termAndReadingAreTrimmed() {
         let rendered = GlossaryRenderer.render(entries: [GlossaryEntry(term: "  Claude Agent  ", reading: "  ")])
 
-        #expect(rendered == "\(GlossaryRenderer.header)\n\n- Claude Agent")
+        #expect(rendered == "\(GlossaryRenderer.defaultHeader)\n\n- Claude Agent")
     }
 
     /// Regression guard for `docs/design/28-glossary.md` §2.1: the header must instruct substitution
@@ -82,14 +82,14 @@ struct GlossaryRendererTests {
     /// still be tuned without rewriting this test.
     @Test("the header instructs substitution even when the reading was transcribed correctly")
     func headerFramesTheListAsASubstitutionRule() {
-        #expect(GlossaryRenderer.header.contains("正しく書き起こされていても"))
+        #expect(GlossaryRenderer.defaultHeader.contains("正しく書き起こされていても"))
     }
 
     /// The bare-term case used to have no rule at all in the prompt -- its meaning lived only in
     /// `GlossaryEntry`'s doc comment, where no LLM could read it (§2.1).
     @Test("the header explains what a bare term (no reading) means")
     func headerExplainsBareTerms() {
-        #expect(GlossaryRenderer.header.contains("用語のみの行"))
+        #expect(GlossaryRenderer.defaultHeader.contains("用語のみの行"))
     }
 
     /// Regression guard for §2.2: with the `A: B` colon format, gpt-5.4-nano emitted the *left*
@@ -97,14 +97,14 @@ struct GlossaryRendererTests {
     /// colon as "headword: gloss". The header must state the substitution direction outright.
     @Test("the header states that only the right side of the arrow may appear in the output")
     func headerStatesSubstitutionDirection() {
-        #expect(GlossaryRenderer.header.contains("「→」の右側"))
+        #expect(GlossaryRenderer.defaultHeader.contains("「→」の右側"))
     }
 
     /// Regression guard for §2.2's other failure: a name with no matching row (`konken` had no
     /// reading yet) was force-matched onto a *different* entry's reading (「根建さん」→「ねこかくさん」).
     @Test("the header forbids force-matching a word that matches no row")
     func headerForbidsForceMatching() {
-        #expect(GlossaryRenderer.header.contains("無理に寄せてはいけません"))
+        #expect(GlossaryRenderer.defaultHeader.contains("無理に寄せてはいけません"))
     }
 
     // MARK: - categories (`docs/design/28-glossary.md` §1.2)
@@ -134,7 +134,7 @@ struct GlossaryRendererTests {
 
         #expect(
             rendered == """
-            \(GlossaryRenderer.header)
+            \(GlossaryRenderer.defaultHeader)
 
             - Acme Works
 
@@ -164,7 +164,7 @@ struct GlossaryRendererTests {
     func categoryWithoutInstruction() {
         let entries = [GlossaryEntry(term: "stg環境", reading: "", category: "env")]
 
-        #expect(GlossaryRenderer.render(entries: entries, categories: [Self.env]) == "\(GlossaryRenderer.header)\n\n## 環境名\n- stg環境")
+        #expect(GlossaryRenderer.render(entries: entries, categories: [Self.env]) == "\(GlossaryRenderer.defaultHeader)\n\n## 環境名\n- stg環境")
     }
 
     @Test("a category with no renderable entries emits nothing at all, heading included")
@@ -187,14 +187,14 @@ struct GlossaryRendererTests {
     func danglingCategoryIdRendersAsUncategorized() {
         let entries = [GlossaryEntry(term: "Entitlement", reading: "", category: "消えたカテゴリ")]
 
-        #expect(GlossaryRenderer.render(entries: entries, categories: [Self.person]) == "\(GlossaryRenderer.header)\n\n- Entitlement")
+        #expect(GlossaryRenderer.render(entries: entries, categories: [Self.person]) == "\(GlossaryRenderer.defaultHeader)\n\n- Entitlement")
     }
 
     @Test("an entry with a blank category string renders as uncategorized")
     func blankCategoryStringRendersAsUncategorized() {
         let entries = [GlossaryEntry(term: "LLM", reading: "", category: "  ")]
 
-        #expect(GlossaryRenderer.render(entries: entries, categories: [Self.person]) == "\(GlossaryRenderer.header)\n\n- LLM")
+        #expect(GlossaryRenderer.render(entries: entries, categories: [Self.person]) == "\(GlossaryRenderer.defaultHeader)\n\n- LLM")
     }
 
     @Test("blank-term entries inside a category are still skipped, without emptying the category")
@@ -204,7 +204,7 @@ struct GlossaryRendererTests {
             GlossaryEntry(term: "stg環境", reading: "", category: "env")
         ]
 
-        #expect(GlossaryRenderer.render(entries: entries, categories: [Self.env]) == "\(GlossaryRenderer.header)\n\n## 環境名\n- stg環境")
+        #expect(GlossaryRenderer.render(entries: entries, categories: [Self.env]) == "\(GlossaryRenderer.defaultHeader)\n\n## 環境名\n- stg環境")
     }
 
     @Test("if every entry is blank across all buckets, the result is nil")
@@ -215,5 +215,38 @@ struct GlossaryRendererTests {
         ]
 
         #expect(GlossaryRenderer.render(entries: entries, categories: [Self.env]) == nil)
+    }
+
+    // MARK: - header (`docs/design/42-prompt-overrides.md` §2.2/§4.2 "glossary-header")
+
+    @Test("omitting header renders with defaultHeader, same as passing it explicitly")
+    func omittingHeaderMatchesExplicitDefaultHeader() {
+        let entries = [GlossaryEntry(term: "nekosuke", reading: "ねこすけ")]
+
+        #expect(
+            GlossaryRenderer.render(entries: entries)
+                == GlossaryRenderer.render(entries: entries, header: GlossaryRenderer.defaultHeader)
+        )
+    }
+
+    @Test("a custom header replaces defaultHeader, but bullets/category rendering stay unaffected")
+    func customHeaderReplacesDefaultHeader() {
+        let entries = [GlossaryEntry(term: "nekosuke", reading: "ねこすけ")]
+        let customHeader = "# Custom Glossary Header\n\nカスタムの置換ルール本文。"
+
+        let rendered = GlossaryRenderer.render(entries: entries, header: customHeader)
+
+        #expect(rendered == "\(customHeader)\n\n- ねこすけ → nekosuke")
+        #expect(rendered?.contains(GlossaryRenderer.defaultHeader) != true)
+    }
+
+    @Test("a custom header still precedes category headings and bullets")
+    func customHeaderWithCategories() {
+        let entries = [GlossaryEntry(term: "stg環境", reading: "ステージング環境", category: "env")]
+        let customHeader = "# Custom Glossary Header"
+
+        let rendered = GlossaryRenderer.render(entries: entries, categories: [Self.env], header: customHeader)
+
+        #expect(rendered == "\(customHeader)\n\n## 環境名\n- ステージング環境 → stg環境")
     }
 }

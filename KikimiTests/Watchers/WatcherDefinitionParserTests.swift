@@ -305,6 +305,30 @@ struct WatcherDefinitionParserTests {
         }
     }
 
+    // MARK: - simpleWatcherTemplate (`docs/design/42-prompt-overrides.md` §4.2/§4.3)
+
+    @Test("kind: simple with a non-default simpleWatcherTemplate embeds the viewpoint into that template instead of the built-in default")
+    func simpleKindUsesNonDefaultTemplate() throws {
+        let customTemplate = "CUSTOM PREAMBLE\n{{viewpoint}}\nCUSTOM FOOTER"
+        let definition = try WatcherDefinitionParser.parse(
+            text: simpleDefinitionText(),
+            expectedId: "pre-check",
+            simpleWatcherTemplate: customTemplate
+        )
+        #expect(definition.systemPrompt == "CUSTOM PREAMBLE\nいま議論している論点を3つ以内で整理してください。\nCUSTOM FOOTER")
+        #expect(!definition.systemPrompt.contains("あなたは会議のリアルタイム書き起こしを観察するアシスタントです。"))
+    }
+
+    @Test("simpleWatcherTemplate is not used on the kind: nil/full parse path")
+    func simpleWatcherTemplateIsUnusedForFullDefinitions() throws {
+        let definition = try WatcherDefinitionParser.parse(
+            text: validDefinitionText(),
+            expectedId: "pre-check",
+            simpleWatcherTemplate: "SHOULD NEVER APPEAR {{viewpoint}}"
+        )
+        #expect(definition.systemPrompt == "システムプロンプト本文")
+    }
+
     // MARK: - trigger (§2.1)
 
     @Test("parses each fixed trigger keyword")

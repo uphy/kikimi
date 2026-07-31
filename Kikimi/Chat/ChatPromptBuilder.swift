@@ -29,34 +29,15 @@ enum ChatPromptBuilder {
     {"type":"object","properties":{"answer":{"type":"string","description":"回答の Markdown 本文"}},"required":["answer"]}
     """
 
-    /// The system prompt: role, how far the transcript can be trusted, and the output rules.
-    ///
-    /// The "do not guess" rule is the important one. A transcript is speech recognition plus LLM
-    /// refinement, so mishearings and misattributed speakers are normal; a model that fills gaps
-    /// plausibly produces answers that read as confident and are wrong about who said what.
-    ///
-    /// The instruction that steered diagrams to tables and lists (CH6) is gone: the chat history is
-    /// rendered by `ChatWebView` now, which draws mermaid (`docs/design/39-webview-markdown.md`).
-    /// Keeping that restriction in the prompt rather than in the view is what made removing it a
-    /// one-line change, as CH6 intended.
-    static func buildSystem() -> String {
-        """
-        あなたは、ある会議の書き起こしについて質問に答えるアシスタントです。与えられた会議の記録だけを\
-        根拠に、簡潔に答えてください。
-
-        書き起こしの性質:
-
-        - 音声認識と LLM 整形を経ているため、誤変換・話者の取り違えがあり得ます
-        - `*(raw)*` が付いた行は未整形の生テキストです
-        - 記録から読み取れないことは推測で埋めず、「書き起こしからは読み取れない」と答えてください
-
-        回答の形式:
-
-        - Markdown で書いてください
-        - 図で示したほうが分かりやすいときは mermaid のコードブロックを使ってください
-        - 発言を引用するときは `HH:MM:SS` と話者名を添えてください
-        """
-    }
+    // The system prompt (role, how far the transcript can be trusted, the output rules) used to
+    // live here as `buildSystem()`. It is now the chat prompt's policy-layer default body,
+    // `PromptSpec.spec(for: .chat).defaultBody` (`Kikimi/Prompts/`,
+    // `docs/design/42-prompt-overrides.md` §4.2/§4.3): `ChatRunner` reads it (or a
+    // `prompts/chat.md` override, immediate) through `promptBodyProvider` and hands the result to
+    // `LLMRequest.system` itself, so this builder no longer owns any system-prompt text.
+    //
+    // `buildUser(_:)` and `buildMessages(_:)` below are unaffected -- they build the non-system
+    // parts of the request, which stay fixed regardless of prompt overrides.
 
     /// `LLMRequest.user`: the latest question and nothing else. The context and the history belong
     /// to `buildMessages(_:)`.

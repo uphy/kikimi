@@ -5,7 +5,7 @@
 # Spec: docs/design/41-meeting-profiles.md (profile format), kikimi.md ch.9 and
 # docs/design/34-simple-watchers.md (watcher file formats).
 #
-# Usage: ruby validate.rb <profile-id>
+# Usage: ruby validate_profile.rb <profile-id>
 # Exit code: 0 = no errors (warnings allowed), 1 = errors found or usage error.
 
 require "yaml"
@@ -155,7 +155,7 @@ end
 # --- main ---
 
 profile_id = ARGV[0]
-abort("usage: validate.rb <profile-id>") if profile_id.nil? || profile_id.empty?
+abort("usage: validate_profile.rb <profile-id>") if profile_id.nil? || profile_id.empty?
 
 config_path = File.expand_path("~/.config/kikimi/config.yaml")
 config = File.exist?(config_path) ? (YAML.safe_load(File.read(config_path)) || {}) : {}
