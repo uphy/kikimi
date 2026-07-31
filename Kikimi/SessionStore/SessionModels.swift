@@ -195,6 +195,12 @@ struct SessionMeta: Codable, Sendable, Equatable {
     var recordings: [RecordingSegment]
     /// Source session id if this session was created via "duplicate as new workspace".
     var basedOnSession: String?
+    /// Meeting profile id this session's Draft was seeded from (`docs/design/41-meeting-profiles.md`
+    /// §2.3), if any. Provenance only -- never consulted by any behavior after Draft creation, and
+    /// never rewritten if the profile is later renamed or deleted (a stale id just fails to resolve
+    /// at display time). Exclusive with `basedOnSession` (`DraftSeed` is an enum, so a Draft is
+    /// seeded from at most one of "based on session" / "profile" / neither).
+    var profileId: String?
     var segmentCount: Int
     var refinedCount: Int
     var appVersion: String
@@ -212,6 +218,7 @@ struct SessionMeta: Codable, Sendable, Equatable {
         durationMs: Int,
         recordings: [RecordingSegment] = [],
         basedOnSession: String?,
+        profileId: String? = nil,
         segmentCount: Int,
         refinedCount: Int,
         appVersion: String
@@ -228,6 +235,7 @@ struct SessionMeta: Codable, Sendable, Equatable {
         self.durationMs = durationMs
         self.recordings = recordings
         self.basedOnSession = basedOnSession
+        self.profileId = profileId
         self.segmentCount = segmentCount
         self.refinedCount = refinedCount
         self.appVersion = appVersion
@@ -250,7 +258,9 @@ struct SessionMeta: Codable, Sendable, Equatable {
     /// crashing: no real `meta.json` on disk predates this change (this project has no users yet,
     /// so no on-disk migration is needed), but a hand-edited or partially-written fixture missing
     /// either key should still decode as "no segments yet" / "no accumulated duration" rather than
-    /// throwing.
+    /// throwing. `profileId` (`docs/design/41-meeting-profiles.md` §2.3) is decoded the same
+    /// defensive way for the same reason: a pre-profiles `meta.json` has no `profile_id` key at all
+    /// and should decode that back as `nil` rather than throwing.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
@@ -265,6 +275,7 @@ struct SessionMeta: Codable, Sendable, Equatable {
         durationMs = try container.decodeIfPresent(Int.self, forKey: .durationMs) ?? 0
         recordings = try container.decodeIfPresent([RecordingSegment].self, forKey: .recordings) ?? []
         basedOnSession = try container.decodeIfPresent(String.self, forKey: .basedOnSession)
+        profileId = try container.decodeIfPresent(String.self, forKey: .profileId)
         segmentCount = try container.decode(Int.self, forKey: .segmentCount)
         refinedCount = try container.decode(Int.self, forKey: .refinedCount)
         appVersion = try container.decode(String.self, forKey: .appVersion)

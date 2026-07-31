@@ -106,6 +106,17 @@ final class MenuBarStatusModel: ObservableObject {
 /// containing `timerText`) directly -- only this `timerText`-free `Equatable` value, published
 /// through the separate `MenuBarMenuModel` below only when it actually changes.
 struct MenuBarMenuContent: Equatable {
+    /// One "新規セッション" submenu row for a saved meeting profile
+    /// (`docs/design/41-meeting-profiles.md` §6.2). `name` is `MeetingProfile.name` verbatim and may
+    /// be empty -- `MeetingProfile` itself never applies the "空なら id で表示" fallback (§2.2;
+    /// `Kikimi/Profiles/MeetingProfile.swift`'s own doc comment names "menu items" as one of the
+    /// callers responsible for it), so `MenuBarMenuView` applies it at render time, the same way
+    /// `SessionListView.displayName(for:)` does for the equivalent Session List pulldown (§6.1).
+    struct ProfileItem: Equatable, Identifiable {
+        var id: String // profile id
+        var name: String
+    }
+
     /// Non-`nil` only while Recording -- backs both the disabled "録音中: <title>" info row and the
     /// "会議を終了…" item's visibility (§3.3). No elapsed time here by design: the live count is the
     /// menu bar label's job (`MenuBarStatus.timerText`/`MenuBarLabelView`), not the menu body's.
@@ -113,9 +124,18 @@ struct MenuBarMenuContent: Equatable {
     /// Every currently-stowed session's "<タイトル> を表示" row, Recording-session-first --
     /// unchanged pass-through of `MenuBarStatus.hiddenWindows`.
     var hiddenWindows: [MenuBarStatus.HiddenWindowItem]
+    /// The menu bar's cached snapshot of `MeetingProfileStore.shared.list()`
+    /// (`docs/design/41-meeting-profiles.md` §6.2: `WindowManager.profileMenuItems`, refreshed only
+    /// at defined points, never read live from `derive`). Empty means "no profiles saved" --
+    /// `MenuBarMenuView` falls back to the flat, non-submenu "新規セッション" button in that case.
+    var profiles: [ProfileItem]
 
-    static func derive(from status: MenuBarStatus) -> MenuBarMenuContent {
-        MenuBarMenuContent(recordingTitle: status.recordingTitle, hiddenWindows: status.hiddenWindows)
+    static func derive(from status: MenuBarStatus, profiles: [ProfileItem]) -> MenuBarMenuContent {
+        MenuBarMenuContent(
+            recordingTitle: status.recordingTitle,
+            hiddenWindows: status.hiddenWindows,
+            profiles: profiles
+        )
     }
 }
 
@@ -131,7 +151,9 @@ struct MenuBarMenuContent: Equatable {
 /// second even if the menu body only ever read `content`.
 @MainActor
 final class MenuBarMenuModel: ObservableObject {
-    @Published private(set) var content: MenuBarMenuContent = MenuBarMenuContent(recordingTitle: nil, hiddenWindows: [])
+    @Published private(set) var content: MenuBarMenuContent = MenuBarMenuContent(
+        recordingTitle: nil, hiddenWindows: [], profiles: []
+    )
 
     /// Publishes only when `newValue` actually differs from the current `content` (§4.2: "値が実際に
     /// 変わったときだけ publish する"). This is what makes the once-a-second `recomputeMenuBarStatus()`

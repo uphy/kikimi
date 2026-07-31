@@ -7,10 +7,11 @@ import Foundation
 /// are responsible for logging when `parse(_:)` returns `nil` and for actually invoking
 /// `WindowManager`.
 enum KikimiURLRoute: Equatable {
-    /// `kikimi://window/new` / `kikimi://window/new?based_on=<session-id>`. `basedOn` is passed
-    /// through unvalidated (existence/format checks happen downstream in
-    /// `SessionStore.createDraftSession(basedOn:)`, design doc section 4).
-    case newWindow(basedOn: String?)
+    /// `kikimi://window/new` / `?based_on=<session-id>` / `?profile=<profile-id>`
+    /// (`docs/design/41-meeting-profiles.md` §7). `seed` is passed through unvalidated
+    /// (existence/format checks happen downstream in `SessionStore.createDraftSession(seed:)`,
+    /// design doc section 4).
+    case newWindow(seed: DraftSeed)
     /// `kikimi://record/quick`.
     case recordQuick
     /// `kikimi://debug/webview?target=<surface>&action=dump&out=<path>` /
@@ -48,17 +49,34 @@ enum KikimiURLRoute: Equatable {
 
         switch (components.host, components.path) {
         case ("window", "/new"):
-            // An explicitly empty `?based_on=` is normalized to `nil` (design doc section 3):
-            // otherwise it would reach `SessionIdValidation.validate` downstream and fail as
-            // `.invalidSessionId("")`, which is surprising for what is effectively "no based_on".
-            let rawBasedOn = components.queryItems?.first(where: { $0.name == "based_on" })?.value
-            let basedOn = (rawBasedOn?.isEmpty ?? true) ? nil : rawBasedOn
-            return .newWindow(basedOn: basedOn)
+            return parseNewWindow(components)
         case ("record", "/quick"):
             return .recordQuick
         case ("debug", "/webview"):
             return parseDebugWebView(components)
         default:
+            return nil
+        }
+    }
+
+    /// Returns `nil` when both `based_on` and `profile` are specified (design doc §7): letting
+    /// either one silently win would misrepresent the caller's intent, so this fails loudly the
+    /// same way `parseDebugWebView` does for a malformed target/action.
+    private static func parseNewWindow(_ components: URLComponents) -> KikimiURLRoute? {
+        // An explicitly empty value is normalized to absent (design doc section 3 / §7):
+        // otherwise it would reach downstream validation and fail as e.g. `.invalidSessionId("")`,
+        // which is surprising for what is effectively "no based_on" / "no profile".
+        let basedOn = nonEmptyQueryValue("based_on", in: components)
+        let profile = nonEmptyQueryValue("profile", in: components)
+
+        switch (basedOn, profile) {
+        case (nil, nil):
+            return .newWindow(seed: .none)
+        case let (basedOn?, nil):
+            return .newWindow(seed: .basedOn(sessionId: basedOn))
+        case let (nil, profile?):
+            return .newWindow(seed: .profile(id: profile))
+        case (.some, .some):
             return nil
         }
     }
@@ -85,6 +103,14 @@ enum KikimiURLRoute: Equatable {
         default:
             return nil
         }
+    }
+
+    /// The first value of the named query item, with an explicitly empty value normalized to
+    /// absent. Shared by `parseNewWindow`'s `based_on` / `profile` handling (design doc §3 / §7):
+    /// an empty query value and an omitted one both mean "not specified".
+    private static func nonEmptyQueryValue(_ name: String, in components: URLComponents) -> String? {
+        let raw = components.queryItems?.first(where: { $0.name == name })?.value
+        return (raw?.isEmpty ?? true) ? nil : raw
     }
 }
 

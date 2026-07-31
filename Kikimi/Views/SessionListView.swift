@@ -157,14 +157,45 @@ struct SessionListView: View {
             .frame(width: 160)
             .labelsHidden()
 
+            newSessionButton
+        }
+        .padding(10)
+    }
+
+    /// "+ 新規" (`docs/design/41-meeting-profiles.md` §6.1): a click always creates a Draft with
+    /// global defaults, exactly like before this module existed. When at least one profile exists,
+    /// the button additionally grows a pulldown listing every profile (already `name`-sorted by
+    /// `SessionListViewModel.profiles`/`MeetingProfileStore.list()`) plus a leading
+    /// "プロファイルなしで新規" entry that duplicates the click behavior for discoverability. With
+    /// zero profiles the pulldown is omitted entirely, leaving the plain button from before this
+    /// module (§6.1: "空状態で UI を複雑にしない").
+    @ViewBuilder
+    private var newSessionButton: some View {
+        if viewModel.profiles.isEmpty {
             Button {
                 performCreateNew()
             } label: {
                 Label("新規", systemImage: "plus")
             }
             .disabled(isPerformingAction)
+        } else {
+            Menu {
+                Button("プロファイルなしで新規") {
+                    performCreateNew()
+                }
+                Divider()
+                ForEach(viewModel.profiles) { profile in
+                    Button(displayName(for: profile)) {
+                        performCreateNew(profileId: profile.id)
+                    }
+                }
+            } label: {
+                Label("新規", systemImage: "plus")
+            } primaryAction: {
+                performCreateNew()
+            }
+            .disabled(isPerformingAction)
         }
-        .padding(10)
     }
 
     // MARK: Crash recovery banner (design doc section 7 "起動時のクラッシュ復旧バナー")
@@ -331,6 +362,12 @@ struct SessionListView: View {
         session.title.isEmpty ? session.id : session.title
     }
 
+    /// `MeetingProfile.name`'s display fallback is deliberately the caller's responsibility, not
+    /// the type's own (`Kikimi/Profiles/MeetingProfile.swift`); §2.2 "表示名（必須。空なら id で表示）".
+    private func displayName(for profile: MeetingProfile) -> String {
+        profile.name.isEmpty ? profile.id : profile.name
+    }
+
     // MARK: Actions
 
     private func performOpen(_ sessionId: String) {
@@ -342,6 +379,17 @@ struct SessionListView: View {
     private func performCreateNew() {
         runAction {
             try await viewModel.createNew()
+        }
+    }
+
+    /// A profile entry from `newSessionButton`'s pulldown (`docs/design/41-meeting-profiles.md`
+    /// §6.1). Routed through `runAction` like every other operation here, so an actual thrown
+    /// error (e.g. `WindowManager` failing to open the workspace window) still surfaces as a
+    /// toast -- only the profile-not-resolved *fallback* is silent here, and that case never
+    /// throws in the first place (see `SessionListViewModel.createNew(profileId:)`).
+    private func performCreateNew(profileId: String) {
+        runAction {
+            try await viewModel.createNew(profileId: profileId)
         }
     }
 

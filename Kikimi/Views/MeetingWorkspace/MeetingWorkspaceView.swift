@@ -163,6 +163,12 @@ struct MeetingWorkspaceView: View {
             participantHintError: viewModel.participantHintError,
             onAddParticipant: { submission in Task { await viewModel.addParticipantHint(submission) } },
             onRemoveParticipant: { id in Task { await viewModel.removeParticipantHint(id: id) } },
+            // `docs/design/41-meeting-profiles.md` §5/§6.3: the reverse "セッション -> プロファイル"
+            // direction, wired the same way `duplicatePrepFiles` above wires the forward one.
+            loadProfileSaveSourceSession: { await viewModel.profileSaveSourceSession() },
+            loadExistingProfileIds: { await viewModel.existingProfileIds() },
+            onSaveProfile: { draft, overwrite in try await viewModel.saveMeetingProfile(draft, overwrite: overwrite) },
+            loadProfileProvenanceLabel: { await viewModel.profileProvenanceLabel() },
             // §5.2 B-2: the persistence-lag hint is shown only while this session is actively
             // Recording/Paused -- `blocksWindowClose` already answers exactly that question (see
             // `PrepContentView.isRecordingActive`'s own doc comment for why this property, not a new
@@ -442,6 +448,9 @@ private struct WorkspaceBannerRow: View {
             return "録音を開始できませんでした: \(message)"
         case .builtInSpeakerOutputDetected:
             return "内蔵スピーカーで会議音声を再生していると、マイクが音を拾って二重に書き起こされることがあります。イヤホン/ヘッドホンの使用をお勧めします"
+        case .profileFallback(let requestedProfileId):
+            // `docs/design/41-meeting-profiles.md` §3.3/§6.5
+            return "プロファイル \(requestedProfileId) が見つからないため既定で作成しました"
         }
     }
 

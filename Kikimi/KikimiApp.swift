@@ -85,12 +85,23 @@ struct MenuBarMenuView: View {
                 Divider()
             }
 
-            Button("新規セッション") {
-                Task { @MainActor in
-                    do {
-                        try await WindowManager.shared.createDraftWorkspace()
-                    } catch {
-                        logger.error("Failed to create draft workspace from menu bar: \(error, privacy: .public)")
+            // §6.2: a flat button when no profiles are saved (the pre-existing, unchanged path);
+            // a "既定で新規" + profile-list submenu once `menuModel.content.profiles` is non-empty.
+            // `menuModel.content` only republishes when it actually changes (`MenuBarMenuModel.update`
+            // §4.2/failure mode #15), so switching between the two shapes here never fights that guard.
+            if menuModel.content.profiles.isEmpty {
+                Button("新規セッション") {
+                    createDraftWorkspace(seed: .none)
+                }
+            } else {
+                Menu("新規セッション") {
+                    Button("既定で新規") {
+                        createDraftWorkspace(seed: .none)
+                    }
+                    ForEach(menuModel.content.profiles) { profile in
+                        Button(displayName(for: profile)) {
+                            createDraftWorkspace(seed: .profile(id: profile.id))
+                        }
                     }
                 }
             }
@@ -111,6 +122,28 @@ struct MenuBarMenuView: View {
                 NSApp.terminate(nil)
             }
         }
+    }
+
+    /// Shared by both the flat button (no profiles) and the submenu's "既定で新規"/per-profile rows
+    /// above -- `seed` is `.none` or `.profile(id:)` either way (`docs/design/
+    /// 41-meeting-profiles.md` §3.1/§6.2). Fire-and-forget from a non-`async` `Button` action, same
+    /// error-handling shape the pre-existing plain "新規セッション" button already used.
+    private func createDraftWorkspace(seed: DraftSeed) {
+        Task { @MainActor in
+            do {
+                try await WindowManager.shared.createDraftWorkspace(seed: seed)
+            } catch {
+                logger.error("Failed to create draft workspace from menu bar: \(error, privacy: .public)")
+            }
+        }
+    }
+
+    /// `MeetingProfile.name`'s display fallback is deliberately the caller's responsibility, not
+    /// the type's own (`Kikimi/Profiles/MeetingProfile.swift`); §2.2 "表示名（必須。空なら id で表示）".
+    /// Same rule `SessionListView.displayName(for:)` applies for the equivalent Session List
+    /// pulldown (§6.1) -- kept in sync here for the menu bar submenu (§6.2).
+    private func displayName(for profile: MenuBarMenuContent.ProfileItem) -> String {
+        profile.name.isEmpty ? profile.id : profile.name
     }
 }
 
@@ -178,9 +211,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// present a dialog to for a non-interactive Raycast-triggered call (section 4).
     private func handle(_ route: KikimiURLRoute) async {
         switch route {
-        case .newWindow(let basedOn):
+        case .newWindow(let seed):
             do {
-                try await WindowManager.shared.createDraftWorkspace(basedOn: basedOn)
+                try await WindowManager.shared.createDraftWorkspace(seed: seed)
             } catch {
                 logger.warning("kikimi://window/new failed: \(error.localizedDescription, privacy: .public)")
             }

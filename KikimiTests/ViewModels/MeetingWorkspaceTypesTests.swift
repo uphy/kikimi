@@ -139,11 +139,32 @@ struct WorkspaceBannerTests {
             .sttModelDownloading(source: .mic, progress: 0.5),
             .sttModelDownloadFailed(source: .mic, message: "boom"),
             .recordingStartFailed(message: "boom"),
-            .builtInSpeakerOutputDetected
+            .builtInSpeakerOutputDetected,
+            .profileFallback(requestedProfileId: "daily-scrum")
         ]
         let ids = banners.map(\.id)
 
         #expect(Set(ids).count == ids.count)
+    }
+
+    // MARK: - profileFallback (`docs/design/41-meeting-profiles.md` §3.3/§6.5)
+
+    @Test("id embeds requestedProfileId, unlike sttModelDownloading's progress: two different requested ids produce different ids")
+    func profileFallbackIdIncorporatesRequestedProfileId() {
+        let first = WorkspaceBanner.profileFallback(requestedProfileId: "daily-scrum")
+        let second = WorkspaceBanner.profileFallback(requestedProfileId: "one-on-one")
+
+        #expect(first.id != second.id)
+        #expect(first != second)
+    }
+
+    @Test("id (and Equatable) agree for two profileFallback banners with the same requestedProfileId")
+    func profileFallbackIdAndEquatableAgreeForSameRequestedProfileId() {
+        let first = WorkspaceBanner.profileFallback(requestedProfileId: "daily-scrum")
+        let second = WorkspaceBanner.profileFallback(requestedProfileId: "daily-scrum")
+
+        #expect(first.id == second.id)
+        #expect(first == second)
     }
 
     @Test("id ignores the continuously-varying progress value, unlike Equatable")

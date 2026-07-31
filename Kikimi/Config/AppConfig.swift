@@ -371,11 +371,12 @@ struct WatchersConfig: Codable, Equatable, Sendable {
 // MARK: - KikimiConfigData
 
 /// The full contents of `~/.config/kikimi/config.yaml` (kikimi.md 12 章). Only `diarization`,
-/// `refinement`, `llm`, `stt`, `summary`, `watchers`, `export`, `audio`, `dictation`, `defaults`, and
-/// `glossary` are modeled so far -- see `DiarizationConfig`'s, `RefinementConfig`'s, `LLMConfig`'s,
-/// `SttConfig`'s, `SummaryConfig`'s (`Kikimi/Summary/SummaryUpdater.swift`), `WatchersConfig`'s,
-/// `ExportConfig`'s, `AudioConfig`'s (`Kikimi/Config/AudioConfig.swift`), `DictationConfig`'s
-/// (`Kikimi/Config/DictationConfig.swift`), `DefaultsConfig`'s, and `GlossaryEntry`'s
+/// `refinement`, `llm`, `stt`, `summary`, `watchers`, `export`, `audio`, `dictation`, `defaults`,
+/// `profiles`, and `glossary` are modeled so far -- see `DiarizationConfig`'s, `RefinementConfig`'s,
+/// `LLMConfig`'s, `SttConfig`'s, `SummaryConfig`'s (`Kikimi/Summary/SummaryUpdater.swift`),
+/// `WatchersConfig`'s, `ExportConfig`'s, `AudioConfig`'s (`Kikimi/Config/AudioConfig.swift`),
+/// `DictationConfig`'s (`Kikimi/Config/DictationConfig.swift`), `DefaultsConfig`'s, `ProfilesConfig`'s
+/// (`docs/design/41-meeting-profiles.md` §2.4), and `GlossaryEntry`'s
 /// (`Kikimi/Config/GlossaryConfig.swift`) doc comments.
 ///
 /// `glossary` is a top-level, feature-independent section (`docs/design/28-glossary.md` §2): it used
@@ -398,13 +399,15 @@ struct KikimiConfigData: Codable, Equatable, Sendable {
     /// `docs/design/38-session-chat.md` §6: the session chat tab's model/budget/timeout.
     var chat: ChatConfig
     var defaults: DefaultsConfig
+    /// `docs/design/41-meeting-profiles.md` §2.4: the meeting profile library's directory reference.
+    var profiles: ProfilesConfig
     var glossary: [GlossaryEntry]
     var glossaryCategories: [GlossaryCategory]
 
     /// Every other field's Swift name already matches its `config.yaml` key verbatim, so this type had
     /// no `CodingKeys` at all until `glossaryCategories` -- the first one needing a snake_case mapping.
     enum CodingKeys: String, CodingKey {
-        case diarization, refinement, llm, stt, summary, watchers, export, audio, dictation, chat, defaults, glossary
+        case diarization, refinement, llm, stt, summary, watchers, export, audio, dictation, chat, defaults, profiles, glossary
         case glossaryCategories = "glossary_categories"
     }
 
@@ -420,6 +423,7 @@ struct KikimiConfigData: Codable, Equatable, Sendable {
         dictation: DictationConfig = .default,
         chat: ChatConfig = .default,
         defaults: DefaultsConfig = .default,
+        profiles: ProfilesConfig = .default,
         glossary: [GlossaryEntry] = [],
         glossaryCategories: [GlossaryCategory] = []
     ) {
@@ -434,6 +438,7 @@ struct KikimiConfigData: Codable, Equatable, Sendable {
         self.dictation = dictation
         self.chat = chat
         self.defaults = defaults
+        self.profiles = profiles
         self.glossary = glossary
         self.glossaryCategories = glossaryCategories
     }
@@ -457,6 +462,7 @@ struct KikimiConfigData: Codable, Equatable, Sendable {
         dictation = try container.decodeIfPresent(DictationConfig.self, forKey: .dictation) ?? .default
         chat = try container.decodeIfPresent(ChatConfig.self, forKey: .chat) ?? .default
         defaults = try container.decodeIfPresent(DefaultsConfig.self, forKey: .defaults) ?? .default
+        profiles = try container.decodeIfPresent(ProfilesConfig.self, forKey: .profiles) ?? .default
 
         // Mirrors `DictationContextConfig.init(from:)`'s glossary-array handling (now superseded by
         // this top-level section): a single malformed entry throws for the whole array, so the whole

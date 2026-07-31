@@ -2164,6 +2164,72 @@ struct AppConfigTests {
         #expect(defaultsSection?.keys.contains("summary_template_file") == true)
     }
 
+    // MARK: - ProfilesConfig defaults (`docs/design/41-meeting-profiles.md` §2.4)
+
+    @Test("missing config.yaml starts with design 41 §2.4's documented profiles section default")
+    func missingFileStartsWithProfilesSectionDefault() {
+        let dir = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let appConfig = makeAppConfig(in: dir)
+        #expect(!appConfig.loadFailed)
+        #expect(appConfig.data.profiles == .default)
+        #expect(appConfig.data.profiles.dir == "~/.config/kikimi/profiles/")
+    }
+
+    @Test("a config.yaml without a profiles: key falls back to ProfilesConfig.default (backward compatible)")
+    func missingProfilesKeyFallsBackToDefault() throws {
+        let dir = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try "{}".write(to: fileURL(in: dir), atomically: true, encoding: .utf8)
+
+        let appConfig = makeAppConfig(in: dir)
+        #expect(!appConfig.loadFailed, "a missing profiles: key must not fail the whole decode")
+        #expect(appConfig.data.profiles == .default)
+    }
+
+    @Test("a profiles: section without dir falls back to ProfilesConfig.default's dir")
+    func profilesSectionWithoutDirFallsBackToDefault() throws {
+        let dir = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try "profiles: {}".write(to: fileURL(in: dir), atomically: true, encoding: .utf8)
+
+        let appConfig = makeAppConfig(in: dir)
+        #expect(!appConfig.loadFailed, "a partial profiles: section must not fail the whole config.yaml decode")
+        #expect(appConfig.data.profiles.dir == ProfilesConfig.default.dir)
+    }
+
+    @Test("update() writes and persists a custom profiles.dir across a fresh AppConfig instance")
+    func profilesSettingsPersistAcrossInstances() {
+        let dir = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let appConfig = makeAppConfig(in: dir)
+        appConfig.update { config in
+            config.profiles = ProfilesConfig(dir: "~/custom/profiles/")
+        }
+
+        let reloaded = makeAppConfig(in: dir)
+        #expect(!reloaded.loadFailed)
+        #expect(reloaded.data.profiles == ProfilesConfig(dir: "~/custom/profiles/"))
+    }
+
+    @Test("saved YAML uses snake_case keys for profiles")
+    func savedYAMLUsesSnakeCaseForProfiles() throws {
+        let dir = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let appConfig = makeAppConfig(in: dir)
+        appConfig.save()
+
+        let onDisk = try String(contentsOf: fileURL(in: dir), encoding: .utf8)
+        let root = try Yams.load(yaml: onDisk) as? [String: Any]
+        let profilesSection = root?["profiles"] as? [String: Any]
+        #expect(profilesSection?.keys.contains("dir") == true)
+    }
+
     // MARK: - API key Keychain migration (`docs/design/26-settings-ui.md` §3.1)
 
     @Test("a config.yaml with a plaintext llm.openai.api_key migrates it to the credential store on load, leaving config.yaml's field empty")

@@ -19,26 +19,61 @@ struct KikimiURLRouteTests {
 
     // MARK: window/new
 
-    @Test("kikimi://window/new with no query parses to .newWindow(basedOn: nil)")
+    @Test("kikimi://window/new with no query parses to .newWindow(seed: .none)")
     func newWindowWithoutBasedOn() {
-        #expect(KikimiURLRoute.parse(url("kikimi://window/new")) == .newWindow(basedOn: nil))
+        #expect(KikimiURLRoute.parse(url("kikimi://window/new")) == .newWindow(seed: .none))
     }
 
-    @Test("kikimi://window/new?based_on=<id> parses to .newWindow(basedOn: <id>)")
+    @Test("kikimi://window/new?based_on=<id> parses to .newWindow(seed: .basedOn(sessionId:))")
     func newWindowWithBasedOn() {
         let route = KikimiURLRoute.parse(url("kikimi://window/new?based_on=2026-07-01T14-30-00_a1b2c3d4"))
-        #expect(route == .newWindow(basedOn: "2026-07-01T14-30-00_a1b2c3d4"))
+        #expect(route == .newWindow(seed: .basedOn(sessionId: "2026-07-01T14-30-00_a1b2c3d4")))
     }
 
-    @Test("kikimi://window/new?based_on= (empty value) normalizes to .newWindow(basedOn: nil)")
+    @Test("kikimi://window/new?based_on= (empty value) normalizes to .newWindow(seed: .none)")
     func newWindowWithEmptyBasedOnNormalizesToNil() {
-        #expect(KikimiURLRoute.parse(url("kikimi://window/new?based_on=")) == .newWindow(basedOn: nil))
+        #expect(KikimiURLRoute.parse(url("kikimi://window/new?based_on=")) == .newWindow(seed: .none))
     }
 
     @Test("unrelated query parameters are ignored")
     func newWindowIgnoresUnrelatedQueryParameters() {
         let route = KikimiURLRoute.parse(url("kikimi://window/new?foo=bar&based_on=abc"))
-        #expect(route == .newWindow(basedOn: "abc"))
+        #expect(route == .newWindow(seed: .basedOn(sessionId: "abc")))
+    }
+
+    // MARK: window/new?profile= (docs/design/41-meeting-profiles.md §7)
+
+    @Test("kikimi://window/new?profile=<id> parses to .newWindow(seed: .profile(id:))")
+    func newWindowWithProfile() {
+        let route = KikimiURLRoute.parse(url("kikimi://window/new?profile=daily-scrum"))
+        #expect(route == .newWindow(seed: .profile(id: "daily-scrum")))
+    }
+
+    @Test("kikimi://window/new?profile= (empty value) normalizes to .newWindow(seed: .none)")
+    func newWindowWithEmptyProfileNormalizesToNone() {
+        #expect(KikimiURLRoute.parse(url("kikimi://window/new?profile=")) == .newWindow(seed: .none))
+    }
+
+    @Test("both based_on and profile specified is malformed and returns nil (whichever wins would misrepresent intent)")
+    func newWindowWithBothBasedOnAndProfileReturnsNil() {
+        let route = KikimiURLRoute.parse(
+            url("kikimi://window/new?based_on=2026-07-01T14-30-00_a1b2c3d4&profile=daily-scrum")
+        )
+        #expect(route == nil)
+    }
+
+    @Test("both based_on and profile specified but one is an empty value still normalizes before the exclusivity check, so it resolves to the non-empty one")
+    func newWindowWithOneEmptyAndOneNonEmptyResolvesToTheNonEmptyOne() {
+        let basedOnEmpty = KikimiURLRoute.parse(url("kikimi://window/new?based_on=&profile=daily-scrum"))
+        #expect(basedOnEmpty == .newWindow(seed: .profile(id: "daily-scrum")))
+
+        let profileEmpty = KikimiURLRoute.parse(url("kikimi://window/new?based_on=abc&profile="))
+        #expect(profileEmpty == .newWindow(seed: .basedOn(sessionId: "abc")))
+    }
+
+    @Test("both based_on and profile given as empty values normalizes to .newWindow(seed: .none)")
+    func newWindowWithBothEmptyNormalizesToNone() {
+        #expect(KikimiURLRoute.parse(url("kikimi://window/new?based_on=&profile=")) == .newWindow(seed: .none))
     }
 
     // MARK: record/quick

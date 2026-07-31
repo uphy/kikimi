@@ -65,6 +65,23 @@ final class WindowManager: ObservableObject {
     /// must observe this instance instead of `menuBarStatus`.
     let menuBarMenu = MenuBarMenuModel()
 
+    /// `docs/design/41-meeting-profiles.md` §3.3/§6.2: the menu bar's cached meeting-profile list,
+    /// fed into `MenuBarMenuContent.derive(from:profiles:)` by `publish(_:)` below. Deliberately
+    /// **not** `@Published` -- propagation to the menu bar goes through the existing
+    /// `recomputeMenuBarStatus()` -> `MenuBarMenuContent.derive` -> `MenuBarMenuModel.update`
+    /// pipeline (§4.2/§6.2), not a second observation point on `WindowManager` itself. Only
+    /// `refreshProfileMenu()` (`WindowManager+Profiles.swift`, split out for `file_length`) writes
+    /// this, at the three defined refresh points (§6.2: 起動時 / 保存シート完了後 / Settings
+    /// プロファイルタブの rename・delete 後) -- never read synchronously off disk from
+    /// `MenuBarMenuContent.derive`'s pure body, since `MeetingProfileStore.list()` is `async` on an
+    /// actor and cannot be called from a synchronous SwiftUI `body`.
+    ///
+    /// Not `private(set)` (unlike most of this type's other state): `private`'s file-scoping would
+    /// block `WindowManager+Profiles.swift`'s writes, matching the same "not `private`, a sibling
+    /// file needs it" carve-out `SessionStore.swift`'s `sessionsRootDirectory`/etc. use for
+    /// `SessionStore+Defaults.swift`.
+    var profileMenuItems: [MenuBarMenuContent.ProfileItem] = []
+
     /// One controller per currently open Session Window window, keyed by `sessionId`. A given
     /// session never has two windows open simultaneously (section 5.2: "同一セッションに対して二重に
     /// ウィンドウが開くことはない").
@@ -121,15 +138,22 @@ final class WindowManager: ObservableObject {
     /// Call exactly once, from `AppDelegate.applicationDidFinishLaunching` (section 5.2/9):
     /// 1. Starts the `recordingSessionId` subscription (idempotent; safe even if called more than
     ///    once, though callers should not rely on that).
-    /// 2. Checks `SessionStore.detectIncompleteSessions()`; if any are found, opens the Session List
+    /// 2. Kicks off `refreshProfileMenu()` (`docs/design/41-meeting-profiles.md` §6.2's 起動時 refresh
+    ///    point), so the menu bar's プロファイル submenu is populated without waiting for a later
+    ///    save/rename/delete.
+    /// 3. Checks `SessionStore.detectIncompleteSessions()`; if any are found, opens the Session List
     ///    window with its crash-recovery banner populated (section 7/9).
-    /// 3. Restores every `AppState.shared.data.windows` entry with `visible == true`
+    /// 4. Restores every `AppState.shared.data.windows` entry with `visible == true`
     ///    (`WindowRestorationPlan`, above). A restoration target whose session folder no longer
     ///    exists (`.sessionNotFound`, e.g. manually deleted while the app was quit) is skipped with
     ///    a `.warning` log rather than surfaced to the user — there is no UI to surface it to at
     ///    this point in startup (section 9, failure mode #6's "起動時復元は `.warning`").
     func launch() async {
         startRecordingSubscription()
+        // `docs/design/41-meeting-profiles.md` §6.2: one of the three defined `profileMenuItems`
+        // refresh points (the other two are the プロファイル保存シート and the Settings プロファイル
+        // タブ's rename/delete, both outside this type).
+        refreshProfileMenu()
 
         let incompleteSessions = await sessionStore.detectIncompleteSessions()
         if !incompleteSessions.isEmpty {
@@ -175,13 +199,28 @@ final class WindowManager: ObservableObject {
         return controller
     }
 
-    /// Creates a new Draft session (optionally seeded from `sourceSessionId`'s `context.md`/
-    /// `summary_template.md`) and opens its Session Window (kikimi.md 10 章 "+ 新規" /
-    /// "複製して新規セッション", `kikimi://window/new[?based_on=]`).
+    /// Creates a new Draft session seeded per `seed` -- global defaults / an existing session's
+    /// `context.md`/`summary_template.md`/watchers/participants / a saved meeting profile
+    /// (`docs/design/41-meeting-profiles.md` §3.1/§4) -- and opens its Session Window (kikimi.md
+    /// 10 章 "+ 新規" / "複製して新規セッション" / プロファイルから新規, `kikimi://window/new[?based_on=|
+    /// ?profile=]`). Generalizes the previous `createDraftWorkspace(basedOn:)` (§3.3).
+    ///
+    /// `SessionStore.createDraftSession(seed:)` never fails outright over an unresolved `.profile`
+    /// seed -- it soft-falls-back to global defaults and reports that fact as data
+    /// (`DraftCreationResult.appliedSeed == .profileFallback`, §4's "黙って間違った準備で始まるのを
+    /// 防ぐ"). `SessionStore` itself never touches any UI surface, so translating that data into
+    /// something visible is this method's job: once the fallback Draft's Session Window is open, its
+    /// `MeetingWorkspaceViewModel.banners` gets a `WorkspaceBanner.profileFallback` appended,
+    /// consolidating every seed-my-Draft-from-a-profile entry point (Session List pulldown, menu bar
+    /// submenu, `?profile=` URL scheme) onto the single Session Window banner surface (§6.5).
     @discardableResult
-    func createDraftWorkspace(basedOn sourceSessionId: String? = nil) async throws -> MeetingWorkspaceWindowController {
-        let meta = try await sessionStore.createDraftSession(basedOn: sourceSessionId)
-        return try await openWorkspace(sessionId: meta.id)
+    func createDraftWorkspace(seed: DraftSeed = .none) async throws -> MeetingWorkspaceWindowController {
+        let result = try await sessionStore.createDraftSession(seed: seed)
+        let controller = try await openWorkspace(sessionId: result.meta.id)
+        if case .profileFallback(let requestedId) = result.appliedSeed {
+            controller.viewModel.banners.append(.profileFallback(requestedProfileId: requestedId))
+        }
+        return controller
     }
 
     /// `kikimi://record/quick` (section 5.2, kikimi.md 10 章): creates a new default-context Draft
@@ -457,8 +496,10 @@ final class WindowManager: ObservableObject {
     /// `MenuBarStatus.derive` に委譲する"). Called after every event that could change any of them:
     /// a `recordingSessionId` transition, a stow/show/close/delete, or (via
     /// `rebuildRecordingStatusSubscriptions()`'s subscriptions) a change to the Recording session's
-    /// `recordingButtonState`/`banners`/`meta`.
-    private func recomputeMenuBarStatus() {
+    /// `recordingButtonState`/`banners`/`meta`. Also the republish step `refreshProfileMenu()`
+    /// (`WindowManager+Profiles.swift`) calls once `profileMenuItems` is updated -- not `private` for
+    /// that reason (same file-scoping carve-out as `profileMenuItems` above).
+    func recomputeMenuBarStatus() {
         guard let recordingSessionId, let controller = workspaceControllers[recordingSessionId] else {
             publish(
                 MenuBarStatus.derive(
@@ -499,10 +540,13 @@ final class WindowManager: ObservableObject {
     /// `menuBarStatus` always republishes verbatim (the label needs every tick, including
     /// `timerText`-only changes); `menuBarMenu` goes through `MenuBarMenuContent.derive` and its own
     /// de-dup guard (`MenuBarMenuModel.update`), which is what keeps a Recording session's
-    /// once-a-second elapsed-time tick from ever reaching the open menu's `NSMenu`.
+    /// once-a-second elapsed-time tick from ever reaching the open menu's `NSMenu`. `profileMenuItems`
+    /// rides along on every call (not just the ones `refreshProfileMenu()` itself triggers) so a
+    /// Recording-status-driven recompute never regresses the menu's プロファイル一覧 back to empty
+    /// (`docs/design/41-meeting-profiles.md` §6.2).
     private func publish(_ status: MenuBarStatus) {
         menuBarStatus.update(status)
-        menuBarMenu.update(MenuBarMenuContent.derive(from: status))
+        menuBarMenu.update(MenuBarMenuContent.derive(from: status, profiles: profileMenuItems))
     }
 
     /// Every currently-stowed session's menu item (§3.3), Recording-session-first, in otherwise

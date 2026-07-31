@@ -71,6 +71,25 @@ struct PrepContentView: View {
     /// (already newest-first); overridable for previews/tests.
     var loadAvailableSessions: () async -> [SessionMeta] = { await SessionStore.shared.listSessions() }
 
+    // MARK: "プロファイルとして保存…" (`docs/design/41-meeting-profiles.md` §5, §6.3), forwarded verbatim
+    // to `ProfileSaveSheet` / wired by callers to `MeetingWorkspaceViewModel+Profiles.swift`.
+
+    /// `ProfileSaveSheet`'s save-target snapshot. Wired to `MeetingWorkspaceViewModel
+    /// .profileSaveSourceSession()`.
+    var loadProfileSaveSourceSession: () async -> ProfileSaveComposer.SourceSession = {
+        ProfileSaveComposer.SourceSession(
+            context: "", summaryTemplate: "", enabledWatcherIds: [], presetWatcherIds: [], participantIds: []
+        )
+    }
+    /// Wired to `MeetingWorkspaceViewModel.existingProfileIds()`.
+    var loadExistingProfileIds: () async -> [String] = { [] }
+    /// Wired to `MeetingWorkspaceViewModel.saveMeetingProfile(_:overwrite:)`.
+    var onSaveProfile: (_ draft: MeetingProfileDraft, _ overwrite: Bool) async throws -> Void = { _, _ in }
+    /// The header-adjacent provenance line (§6.3: "プロファイル: <name>" / "<id>（削除済みプロファイル）").
+    /// `nil` (the default) renders nothing -- matches a session whose Draft was never seeded from a
+    /// profile. Wired to `MeetingWorkspaceViewModel.profileProvenanceLabel()`.
+    var loadProfileProvenanceLabel: () async -> String? = { nil }
+
     /// `docs/design/17-session-window-redesign.md` §5.2 B-2: the persistence-lag hint below the
     /// "事前メモ" editor is shown only while this session is actively Recording/Paused. Wired by the
     /// caller from `viewModel.recordingButtonState.blocksWindowClose` — the one existing property
@@ -107,6 +126,12 @@ struct PrepContentView: View {
     var onConvertSimpleWatcherToFull: (_ id: String) async throws -> Void = { _ in }
 
     @State private var isPresentingDuplicateSheet = false
+    @State private var isPresentingProfileSaveSheet = false
+    /// Set from `loadProfileProvenanceLabel()` by the `.task` below, once, when this view first
+    /// appears (`docs/design/41-meeting-profiles.md` §6.3). Not re-resolved on every render -- see
+    /// `MeetingWorkspaceViewModel.profileProvenanceLabel()`'s own doc comment on why a stale snapshot
+    /// is acceptable here.
+    @State private var profileProvenanceLabel: String?
 
     /// kikimi.md 7 章: "ファイルサイズ上限は 32KB". Mirrors `SessionHandle.contextSizeLimitBytes`
     /// (`SessionHandle+Prep.swift`), which is `private` to that file; kept as a separate constant
@@ -127,6 +152,14 @@ struct PrepContentView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                // §6.3: displayed only once this session's provenance actually resolves to
+                // something -- a session never seeded from a profile shows nothing here at all.
+                if let profileProvenanceLabel {
+                    Text(profileProvenanceLabel)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 contextSection
 
                 ParticipantsSectionView(
@@ -175,6 +208,16 @@ struct PrepContentView: View {
                 loadAvailableSessions: loadAvailableSessions,
                 onApply: duplicatePrepFiles
             )
+        }
+        .sheet(isPresented: $isPresentingProfileSaveSheet) {
+            ProfileSaveSheet(
+                loadSourceSession: loadProfileSaveSourceSession,
+                loadExistingProfileIds: loadExistingProfileIds,
+                onSave: onSaveProfile
+            )
+        }
+        .task {
+            profileProvenanceLabel = await loadProfileProvenanceLabel()
         }
     }
 
@@ -231,6 +274,12 @@ struct PrepContentView: View {
             // `AppConfig.shared`-backed settings feature exists yet to revert to) rather than kept
             // as permanently-disabled chrome.
             Spacer()
+
+            // `docs/design/41-meeting-profiles.md` §6.3: added alongside "他セッションから複製…" --
+            // the reverse direction (session -> named preset instead of session -> session).
+            Button("プロファイルとして保存…") {
+                isPresentingProfileSaveSheet = true
+            }
 
             Button("他セッションから複製…") {
                 isPresentingDuplicateSheet = true
