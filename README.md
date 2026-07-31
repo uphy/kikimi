@@ -18,6 +18,19 @@ macOS 14 (Sonoma) 以降が必要。メニューバー常駐アプリなので D
 配布物は Developer ID 署名・notarization を行っていないため、cask のインストール時に quarantine 属性を
 外している（詳細は `brew info --cask uphy/tap/kikimi` の caveats）。
 
+## 会議前の自動準備（Claude Code）
+
+会議情報（議題・参加者・確認したいこと）を Claude Code に渡すと、その会議専用の
+プロファイル（context / summary template / watchers）を生成して録音ウィンドウまで開ける。
+リポジトリ同梱の `kikimi-prepare-meeting` skill が担う（仕様は
+[`docs/design/41-meeting-profiles.md`](docs/design/41-meeting-profiles.md)）。
+
+リポジトリの外の作業ディレクトリから使う場合は、user-level skills へ symlink を張る:
+
+```bash
+ln -s /path/to/kikimi/.claude/skills/kikimi-prepare-meeting ~/.claude/skills/kikimi-prepare-meeting
+```
+
 ## リリース
 
 `v*` タグを push すると [`.github/workflows/release.yml`](.github/workflows/release.yml) が lint・テスト →
