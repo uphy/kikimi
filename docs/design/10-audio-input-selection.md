@@ -438,7 +438,8 @@ private let appState: AppState                        // default: .shared
 | 6 | システム音声が唯一の有効ソースで tap 失敗 / `selectedAppNotRunning` | fatal（新設 `.systemAudioStartFailed`） | error | `recordingStartFailed` バナー「システム音声を開始できませんでした: <詳細>」 |
 | 7 | 両ソース有効で system のみ失敗（`selectedAppNotRunning` 含む） | 既存どおり `[.mic]` へ縮退 | warn | 既存 `systemAudioUnavailable` バナー |
 | 8 | `MicrophoneSource` 内で UID→DeviceID 解決失敗（start 直前に抜かれた） | デフォルト入力にフォールバックして続行 | warn | なし |
-| 9 | Recording 中に選択デバイスが抜かれた / 選択アプリが終了・再起動した | 本設計では検出しない（mic: AVAudioEngine の挙動に依存 / system: include-list はスナップショットのため無音継続、stall 検出にも掛からない）。10章 Open Questions | — | （system 全体停止で `activeSources` が空になる場合は 5.2章の文言分岐） |
+| 9 | Recording 中にマイクのシステムデフォルト入力が切り替わった（Sound 設定・AirPods 接続等）、または選択デバイスが抜かれた | `MicrophoneSource` が `AVAudioEngine.configurationChangeNotification` を購読し、tap を外して `configureInputDevice` を再適用 → 新 `inputFormat` で converter を作り直し → tap 再インストール → `engine.start()` で自動追従する（数百ms の欠落は許容。`elapsed` はホスト時刻ベースのため再起動をまたいでも一貫）。再構築が失敗した場合（フォーマット無効 / converter 生成失敗 / `engine.start()` 失敗）はリトライせずそのまま tap を停止し、以後は無音のまま Recording が継続する（`AudioSourceCapturing` に mic 向けの mid-stream 失敗通知はまだ無いため、この失敗は UI に表示されない — 実戦で問題になれば `SystemAudioSource.onDegraded` 相当を mic 側にも広げる） | 再構築成功: info / 再構築失敗: error | なし（system 側の失敗のみ 5.2章の文言分岐で通知される） |
+| 9a | Recording 中に選択アプリが終了・再起動した（システム音声） | 本設計では検出しない（include-list はスナップショットのため無音継続、stall 検出にも掛からない）。10章 Open Questions | — | （system 全体停止で `activeSources` が空になる場合は 5.2章の文言分岐） |
 | 10 | `state.yaml` に `last_audio_input` キーがない（アップグレード初回起動の正常系） | custom `init(from:)` の `decodeIfPresent ?? .default` で補完。`windows` 等は保持され、以後の save も成功する（3章「後方互換」） | なし | なし |
 | 11 | `last_audio_input` の値が型不一致等で真に壊れている | `YAMLStore` の既存デコード失敗パス（`loadFailed`、save 拒否） | 既存 | なし |
 
@@ -480,9 +481,13 @@ private let appState: AppState                        // default: .shared
 2. **録音中の対象アプリ再起動への追従**: include-list tap は start 時点のスナップショットのため、
    アプリ再起動（新 PID）後の音声は捕捉されず無音になる（既存 stall 検出にも掛からない）。
    プロセスリスト変更の監視 + tap 再生成で追従するかは Phase 4 実戦後に判断
-3. **Recording 中のマイクデバイス抜去**: AVAudioEngine の挙動
-   （`AVAudioEngineConfigurationChange` でデフォルトに自動追従するか、停止するか）を実機確認。
-   停止する場合、デフォルト入力への自動再接続を入れるかは Phase 4 実戦後に判断
+3. **Recording 中のマイクデバイス抜去**（解決済み）: `MicrophoneSource` が
+   `AVAudioEngine.configurationChangeNotification` を購読し、tap 除去 → `configureInputDevice`
+   再適用 → 新フォーマットで converter/tap 再構築 → `engine.start()` で自動追従する（8章
+   失敗モード#9）。再構築自体が失敗した場合（フォーマット無効・converter 生成失敗・
+   `engine.start()` 失敗）はリトライせず tap を停止し、以後は無音のまま Recording が継続する
+   （UI 通知は無い）。この「再構築失敗を UI に出すか」「無限に無音のまま録音を続けさせて
+   良いか」は Phase 4 実戦で再評価
 4. **システム音声が唯一のソースで stall した場合の自動停止**: 現設計は「録音は止めない」を
    優先しバナーのみ。無音録音が長時間続く問題が実戦で出たら再検討
 5. **入力増減のリアルタイム監視**: ポップオーバー表示中の抜き差し・アプリ起動の反映
