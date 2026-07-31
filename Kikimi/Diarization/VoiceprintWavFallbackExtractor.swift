@@ -58,14 +58,15 @@ actor VoiceprintWavFallbackExtractor {
     ///   - voiceprintExtractor: Defaults to a real, lazily-loaded `VoiceprintExtractor()` (design
     ///     section 5). Injectable so tests never trigger a real CoreML load/network download.
     ///   - minEnrollSpeechMs: `config.yaml`'s `diarization.min_enroll_speech_ms` (design section 4.4's
-    ///     fallback-specific gate). The production call site
+    ///     fallback-specific gate; default kept in step with `DiarizationConfig.default`, raised to
+    ///     10000ms on 2026-08-01 — design section 7's 追記). The production call site
     ///     (`MeetingWorkspaceViewModel.defaultVoiceprintWavFallbackExtractorFactory`) always passes
     ///     the resolved `AppConfig.shared` value instead of relying on this default.
     init(
         sessionHandle: SessionHandle,
         audioReader: any SessionAudioSampleReading = AVAudioFileSampleReader(),
         voiceprintExtractor: any VoiceprintEmbeddingExtracting = VoiceprintExtractor(),
-        minEnrollSpeechMs: Int = 5_000
+        minEnrollSpeechMs: Int = 10_000
     ) {
         self.sessionHandle = sessionHandle
         self.audioReader = audioReader

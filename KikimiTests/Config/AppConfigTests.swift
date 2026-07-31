@@ -44,9 +44,15 @@ struct AppConfigTests {
         #expect(appConfig.data.diarization.enabled == true)
         #expect(appConfig.data.diarization.selfName == "自分")
         #expect(appConfig.data.diarization.stepMs == 500)
-        #expect(appConfig.data.diarization.minEnrollSpeechMs == 5_000)
+        // 10_000, not the design's original 5_000: WeSpeaker's input window is a fixed 10 seconds, so
+        // a shorter gate enrolls voiceprints from half-zero-padded audio (`DiarizationConfig.default`).
+        #expect(appConfig.data.diarization.minEnrollSpeechMs == 10_000)
         #expect(appConfig.data.diarization.speakerMatchThreshold == 0.45)
         #expect(appConfig.data.diarization.speakerMatchMargin == 0.05)
+        #expect(appConfig.data.diarization.onsetThreshold == 0.5)
+        #expect(appConfig.data.diarization.offsetThreshold == 0.5)
+        #expect(appConfig.data.diarization.minDurationOnMs == 250)
+        #expect(appConfig.data.diarization.minDurationOffMs == 250)
     }
 
     // MARK: - Round-trip
@@ -98,6 +104,10 @@ struct AppConfigTests {
         #expect(diarization?.keys.contains("min_enroll_speech_ms") == true)
         #expect(diarization?.keys.contains("speaker_match_threshold") == true)
         #expect(diarization?.keys.contains("speaker_match_margin") == true)
+        #expect(diarization?.keys.contains("onset_threshold") == true)
+        #expect(diarization?.keys.contains("offset_threshold") == true)
+        #expect(diarization?.keys.contains("min_duration_on_ms") == true)
+        #expect(diarization?.keys.contains("min_duration_off_ms") == true)
     }
 
     // MARK: - Sample YAML compatibility
@@ -112,8 +122,12 @@ struct AppConfigTests {
           enabled: true
           self_name: 自分
           step_ms: 500
-          min_enroll_speech_ms: 5000
+          min_enroll_speech_ms: 10000
           speaker_match_threshold: 0.45
+          onset_threshold: 0.5
+          offset_threshold: 0.5
+          min_duration_on_ms: 250
+          min_duration_off_ms: 250
         """
         try sampleYAML.write(to: fileURL(in: dir), atomically: true, encoding: .utf8)
 
@@ -161,6 +175,106 @@ struct AppConfigTests {
         #expect(appConfig.data.diarization.minEnrollSpeechMs == DiarizationConfig.default.minEnrollSpeechMs)
         #expect(appConfig.data.diarization.speakerMatchThreshold == DiarizationConfig.default.speakerMatchThreshold)
         #expect(appConfig.data.diarization.speakerMatchMargin == DiarizationConfig.default.speakerMatchMargin)
+        #expect(appConfig.data.diarization.onsetThreshold == DiarizationConfig.default.onsetThreshold)
+        #expect(appConfig.data.diarization.offsetThreshold == DiarizationConfig.default.offsetThreshold)
+        #expect(appConfig.data.diarization.minDurationOnMs == DiarizationConfig.default.minDurationOnMs)
+        #expect(appConfig.data.diarization.minDurationOffMs == DiarizationConfig.default.minDurationOffMs)
+    }
+
+    // MARK: - LS-EEND timeline post-processing decode (design section 7, 2026-08-01)
+
+    @Test("onset_threshold/offset_threshold and min_duration_on_ms/min_duration_off_ms round-trip when in range")
+    func timelinePostProcessingKeysRoundTrip() throws {
+        let dir = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let yaml = """
+        diarization:
+          onset_threshold: 0.7
+          offset_threshold: 0.4
+          min_duration_on_ms: 400
+          min_duration_off_ms: 120
+        """
+        try yaml.write(to: fileURL(in: dir), atomically: true, encoding: .utf8)
+
+        let appConfig = makeAppConfig(in: dir)
+        #expect(!appConfig.loadFailed)
+        #expect(appConfig.data.diarization.onsetThreshold == 0.7)
+        #expect(appConfig.data.diarization.offsetThreshold == 0.4)
+        #expect(appConfig.data.diarization.minDurationOnMs == 400)
+        #expect(appConfig.data.diarization.minDurationOffMs == 120)
+    }
+
+    @Test(
+        "an out-of-range onset_threshold falls back to the 0.5 default (0 and 1 are both rejected, not clamped)",
+        arguments: [-0.1, 0.0, 1.0, 1.5]
+    )
+    func outOfRangeOnsetThresholdFallsBackToDefault(value: Double) throws {
+        let dir = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let yaml = """
+        diarization:
+          onset_threshold: \(value)
+        """
+        try yaml.write(to: fileURL(in: dir), atomically: true, encoding: .utf8)
+
+        let appConfig = makeAppConfig(in: dir)
+        #expect(!appConfig.loadFailed, "an out-of-range threshold must not fail the whole config.yaml decode")
+        #expect(appConfig.data.diarization.onsetThreshold == DiarizationConfig.default.onsetThreshold)
+    }
+
+    @Test(
+        "an out-of-range offset_threshold falls back to the 0.5 default",
+        arguments: [0.0, 1.0, 2.0]
+    )
+    func outOfRangeOffsetThresholdFallsBackToDefault(value: Double) throws {
+        let dir = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let yaml = """
+        diarization:
+          offset_threshold: \(value)
+        """
+        try yaml.write(to: fileURL(in: dir), atomically: true, encoding: .utf8)
+
+        let appConfig = makeAppConfig(in: dir)
+        #expect(!appConfig.loadFailed)
+        #expect(appConfig.data.diarization.offsetThreshold == DiarizationConfig.default.offsetThreshold)
+    }
+
+    @Test("a negative min_duration_on_ms/min_duration_off_ms is clamped to 0 (gate disabled), not restored to the 250 default")
+    func negativeMinDurationsAreClampedToZero() throws {
+        let dir = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let yaml = """
+        diarization:
+          min_duration_on_ms: -1
+          min_duration_off_ms: -500
+        """
+        try yaml.write(to: fileURL(in: dir), atomically: true, encoding: .utf8)
+
+        let appConfig = makeAppConfig(in: dir)
+        #expect(!appConfig.loadFailed, "a negative duration must not fail the whole config.yaml decode")
+        #expect(appConfig.data.diarization.minDurationOnMs == 0)
+        #expect(appConfig.data.diarization.minDurationOffMs == 0)
+    }
+
+    @Test("min_duration_on_ms: 0 round-trips as exactly 0 (FluidAudio's pass-through behavior, not clamped away)")
+    func zeroMinDurationOnRoundTrips() throws {
+        let dir = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let yaml = """
+        diarization:
+          min_duration_on_ms: 0
+        """
+        try yaml.write(to: fileURL(in: dir), atomically: true, encoding: .utf8)
+
+        let appConfig = makeAppConfig(in: dir)
+        #expect(!appConfig.loadFailed)
+        #expect(appConfig.data.diarization.minDurationOnMs == 0)
     }
 
     // MARK: - speakerMatchMargin decode (design section 20 §3.4)

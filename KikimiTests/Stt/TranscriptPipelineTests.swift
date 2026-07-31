@@ -130,9 +130,14 @@ struct TranscriptPipelineTests {
 
     private actor SampleRecorder {
         private(set) var forwarded: [[Float]] = []
+        /// The `elapsedAtBufferStart` handed alongside each buffer (`docs/design/13-speaker
+        /// -diarization.md` section 5.1's "実装時の追記 2026-08-01"): the diarization coordinator anchors its
+        /// turn timestamps on this, so the pipeline must forward the *same* value it gave `SttEngine`.
+        private(set) var forwardedElapsed: [TimeInterval] = []
 
-        func record(_ samples: [Float]) {
+        func record(_ samples: [Float], _ elapsedAtBufferStart: TimeInterval) {
             forwarded.append(samples)
+            forwardedElapsed.append(elapsedAtBufferStart)
         }
     }
 
@@ -146,7 +151,7 @@ struct TranscriptPipelineTests {
         try await pipeline.prepare()
 
         let recorder = SampleRecorder()
-        pipeline.onSystemAudio = { samples in await recorder.record(samples) }
+        pipeline.onSystemAudio = { samples, elapsed in await recorder.record(samples, elapsed) }
 
         let dummyCapture = AudioCapture(sessionDirectory: makeTempSessionDirectory())
         let micBuffer = try makeMonoFloatBuffer(frameCount: 10)
@@ -161,6 +166,8 @@ struct TranscriptPipelineTests {
 
         let forwarded = await recorder.forwarded
         #expect(forwarded.map(\.count) == [10, 20], "only system-source buffers must reach onSystemAudio, never mic, in feed order")
+        let forwardedElapsed = await recorder.forwardedElapsed
+        #expect(forwardedElapsed == [0, 0.01], "each buffer's own capture-clock elapsed must be forwarded alongside its samples")
     }
 
     @Test("a nil onSystemAudio (the default, or diarization disabled) never crashes system-source feeding")
@@ -203,7 +210,7 @@ struct TranscriptPipelineTests {
         try await pipeline?.prepare()
 
         let recorder = SampleRecorder()
-        pipeline?.onSystemAudio = { samples in await recorder.record(samples) }
+        pipeline?.onSystemAudio = { samples, elapsed in await recorder.record(samples, elapsed) }
 
         for _ in 0..<300_000 {
             _ = pipeline?.onSystemAudio
@@ -212,9 +219,10 @@ struct TranscriptPipelineTests {
         // The last handler read back must still be callable and behave identically to the one set
         // above -- boxing must not change `onSystemAudio`'s externally observable semantics.
         let handler = try #require(pipeline?.onSystemAudio)
-        await handler([1, 2, 3])
+        await handler([1, 2, 3], 0.5)
         let forwarded = await recorder.forwarded
         #expect(forwarded == [[1, 2, 3]])
+        #expect(await recorder.forwardedElapsed == [0.5])
 
         await pipeline?.stopAndDrain()
         pipeline = nil // Would stack-overflow here if the fix regressed.

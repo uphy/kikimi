@@ -17,7 +17,12 @@ import OSLog
 /// `extension RealtimeDiarizationCoordinator: DiarizationCoordinating {}` below needs no extra glue.
 protocol DiarizationCoordinating: Sendable {
     func beginSegment(startMsOffset: Int, hasSystemAudio: Bool) async
-    func feed(samples: [Float]) async
+    /// - Parameter elapsedAtBufferStart: This buffer's capture-clock position, i.e. seconds since
+    ///   `AudioCapture.start()` for the recording segment that produced it -- the same value
+    ///   `SttEngine.feed(samples:elapsedAtBufferStart:)` receives for the same buffer. The coordinator
+    ///   uses it to anchor its turns onto the transcript's timeline (design section 5.1's "実装時の追記
+    ///   2026-08-01"); it never derives turn timestamps from the fed-sample count alone.
+    func feed(samples: [Float], elapsedAtBufferStart: TimeInterval) async
     func endSegment(reason: DiarizationSegmentEndReason) async
     var newTurns: AsyncStream<DiarizationTurn> { get }
     /// Yields once every time the coordinator writes a new `.auto` assignment to
@@ -80,7 +85,9 @@ extension MeetingWorkspaceViewModel {
     /// backed by `LSEENDDiarizationBackend`, with `stepSize`/`variant` resolved from
     /// `AppConfig.shared.data.diarization` (design section 7) via
     /// `LSEENDStepSize.fromDiarizationConfig(stepMs:logger:)`/`LSEENDVariant
-    /// .fromDiarizationConfig(name:logger:)` (`Kikimi/Diarization/DiarizationBackend.swift`), plus the
+    /// .fromDiarizationConfig(name:logger:)` (`Kikimi/Diarization/DiarizationBackend.swift`) and the
+    /// LS-EEND timeline post-processing group (`onset_threshold`/`offset_threshold`/
+    /// `min_duration_on_ms`/`min_duration_off_ms`) forwarded to the same backend, plus the
     /// same config's `min_enroll_speech_ms`/`speaker_match_threshold`/`speaker_match_margin` (design
     /// section 5/7, R2; margin added by `docs/design/20-voiceprint-misassignment-mitigation.md`
     /// section 3.4) wired straight through to the coordinator's voiceprint-matching parameters, and the
@@ -102,7 +109,14 @@ extension MeetingWorkspaceViewModel {
         )
         return RealtimeDiarizationCoordinator(
             sessionHandle: sessionHandle,
-            backend: LSEENDDiarizationBackend(variant: variant, stepSize: stepSize),
+            backend: LSEENDDiarizationBackend(
+                variant: variant,
+                stepSize: stepSize,
+                onsetThreshold: diarizationConfig.onsetThreshold,
+                offsetThreshold: diarizationConfig.offsetThreshold,
+                minDurationOnMs: diarizationConfig.minDurationOnMs,
+                minDurationOffMs: diarizationConfig.minDurationOffMs
+            ),
             voiceprintExtractor: VoiceprintExtractor(),
             voiceprintStore: .shared,
             minEnrollSpeechMs: diarizationConfig.minEnrollSpeechMs,
@@ -145,16 +159,21 @@ extension MeetingWorkspaceViewModel {
         return coordinator
     }
 
-    /// Forwards one buffer of system-audio samples to `diarizationCoordinator.feed(samples:)`, hopping
-    /// onto `@MainActor` first (this is invoked from `TranscriptPipeline.onSystemAudio`'s `@Sendable`
-    /// closure, which runs on that pipeline's own systemFeedTask, not the main thread). A no-op if no
-    /// coordinator exists (defensive; `runRecordingSegmentStart` only ever wires `pipeline
-    /// .onSystemAudio` when `diarizationCoordinatorIfEnabled()` returned non-`nil`).
+    /// Forwards one buffer of system-audio samples (plus its capture-clock `elapsedAtBufferStart`) to
+    /// `diarizationCoordinator.feed(samples:elapsedAtBufferStart:)`, hopping onto `@MainActor` first
+    /// (this is invoked from `TranscriptPipeline.onSystemAudio`'s `@Sendable` closure, which runs on
+    /// that pipeline's own systemFeedTask, not the main thread). A no-op if no coordinator exists
+    /// (defensive; `runRecordingSegmentStart` only ever wires `pipeline.onSystemAudio` when
+    /// `diarizationCoordinatorIfEnabled()` returned non-`nil`).
+    ///
+    /// `elapsedAtBufferStart` is passed straight through, unmodified: it is relative to *this recording
+    /// segment's* `AudioCapture.start()`, exactly like `SttEngine`'s own use of it, and the coordinator
+    /// adds this segment's `startMsOffset` itself (its `baseOffsetMs`, taken at `beginSegment`).
     ///
     /// Not `private`: called from `runRecordingSegmentStart`'s `pipeline.onSystemAudio` closure in
     /// `MeetingWorkspaceViewModel.swift`.
-    func feedDiarization(samples: [Float]) async {
-        await diarizationCoordinator?.feed(samples: samples)
+    func feedDiarization(samples: [Float], elapsedAtBufferStart: TimeInterval) async {
+        await diarizationCoordinator?.feed(samples: samples, elapsedAtBufferStart: elapsedAtBufferStart)
     }
 
     /// Consumes `coordinator.newTurns` for the rest of this ViewModel instance's lifetime (never

@@ -53,12 +53,14 @@ protocol RecordingTranscriptPipelining: AudioCaptureDelegate {
     /// themselves.
     var onDegrade: (@Sendable (AudioSourceKind, AudioCaptureError) -> Void)? { get set }
 
-    /// Forwards every `system`-source buffer this pipeline feeds to its `SttEngine`, in feed order
-    /// (`docs/design/13-speaker-diarization.md` section 5; `TranscriptPipeline.onSystemAudio`'s doc
-    /// comment). Set by `MeetingWorkspaceViewModel` to `RealtimeDiarizationCoordinator.feed(samples:)`
-    /// whenever diarization is enabled for this recording segment (section 5.1 "入力選択との関係"); left
-    /// `nil` otherwise, so this pipeline never has to know whether diarization exists at all.
-    var onSystemAudio: (@Sendable ([Float]) async -> Void)? { get set }
+    /// Forwards every `system`-source buffer this pipeline feeds to its `SttEngine`, in feed order,
+    /// together with that buffer's capture-clock `elapsedAtBufferStart`
+    /// (`docs/design/13-speaker-diarization.md` section 5 / 5.1's "実装時の追記 2026-08-01";
+    /// `TranscriptPipeline.onSystemAudio`'s doc comment). Set by `MeetingWorkspaceViewModel` to
+    /// `RealtimeDiarizationCoordinator.feed(samples:elapsedAtBufferStart:)` whenever diarization is
+    /// enabled for this recording segment (section 5.1 "入力選択との関係"); left `nil` otherwise, so this
+    /// pipeline never has to know whether diarization exists at all.
+    var onSystemAudio: (@Sendable ([Float], TimeInterval) async -> Void)? { get set }
 }
 
 extension TranscriptPipeline: RecordingTranscriptPipelining {}

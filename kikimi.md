@@ -1138,9 +1138,13 @@ diarization:
   self_name: 自分                    # mic セグメントの表示名
   step_ms: 500                      # LS-EEND step（100/500）
   variant: callhome                 # LS-EEND variant（callhome/dihard3/dihard2/ami）
-  min_enroll_speech_ms: 5000        # 声紋抽出に必要な最低発話量
+  min_enroll_speech_ms: 10000       # 声紋抽出に必要な最低発話量（WeSpeaker の入力窓が固定 10 秒のため 5000 から引き上げ）
   speaker_match_threshold: 0.45     # 声紋照合の cosine 距離閾値（実測データにより 0.65 から引き下げ）
   speaker_match_margin: 0.05        # 異名の次点話者との距離差がこれ未満なら曖昧として棄却。0 で無効
+  onset_threshold: 0.5              # LS-EEND の発話開始判定の事後確率閾値（0 < x < 1）
+  offset_threshold: 0.5             # LS-EEND の発話終了判定の事後確率閾値（0 < x < 1）
+  min_duration_on_ms: 250           # これ未満の turn は捨てる（0 で FluidAudio 既定の素通し）
+  min_duration_off_ms: 250          # これ未満の無音は閉じて前後の turn を連結する（0 で素通し）
 
 # 新規 Draft ウィンドウの初期値として使うファイル
 defaults:

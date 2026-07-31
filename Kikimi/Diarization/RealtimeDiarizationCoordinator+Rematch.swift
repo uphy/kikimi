@@ -18,8 +18,10 @@ extension RealtimeDiarizationCoordinator {
     /// `participantHintIds` (design section 3, steps 1-4). Idempotent (design section 3: "再照合はべき等
     /// （同じ名簿で 2 回呼んでも 2 回目は全滅 or 同一結果）") -- a slot this call already resolved now has a
     /// non-`nil` `displayName`, so a second call with the same roster finds no eligible slots left to
-    /// touch. Never mutates `extractedSlots`/triggers a new extraction: this only re-runs the *matching*
-    /// step against already-persisted embeddings.
+    /// touch. Never touches the extraction milestones (`slotExtractionAttempts`) or triggers a new
+    /// extraction: this only re-runs the *matching* step against already-persisted embeddings. The two
+    /// paths compose — a milestone re-extraction (design section 5's "実装時の追記 2026-08-01") refreshes the
+    /// persisted embedding, and a later rematch pass automatically matches against that newer one.
     ///
     /// Called from `updateParticipantHints(_:)` whenever the roster actually changes (live coordinator
     /// path); `MeetingWorkspaceViewModel+Participants.swift`'s §3.2 fallback reimplements this same

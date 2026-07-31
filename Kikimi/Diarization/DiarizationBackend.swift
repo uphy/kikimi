@@ -135,6 +135,10 @@ extension LSEENDVariant {
 actor LSEENDDiarizationBackend: DiarizationBackend {
     private let variant: LSEENDVariant
     private let stepSize: LSEENDStepSize
+    private let onsetThreshold: Double
+    private let offsetThreshold: Double
+    private let minDurationOnMs: Int
+    private let minDurationOffMs: Int
     private var diarizer: LSEENDDiarizer?
 
     /// - Parameters:
@@ -146,17 +150,102 @@ actor LSEENDDiarizationBackend: DiarizationBackend {
     ///     .defaultDiarizationCoordinatorFactory`) always passes the value derived from `config.yaml`'s
     ///     `diarization.step_ms` via `LSEENDStepSize.fromDiarizationConfig(stepMs:logger:)` above rather
     ///     than relying on this default.
-    init(variant: LSEENDVariant = .callhome, stepSize: LSEENDStepSize = .step500ms) {
+    ///   - onsetThreshold / offsetThreshold / minDurationOnMs / minDurationOffMs: `config.yaml`'s
+    ///     `diarization.onset_threshold`/`offset_threshold`/`min_duration_on_ms`/`min_duration_off_ms`
+    ///     (already range-validated by `DiarizationConfig.init(from:)`), turned into a
+    ///     `DiarizerTimelineConfig` by `makeTimelineConfig(frameDurationSeconds:)` below. Defaults
+    ///     mirror `DiarizationConfig.default`.
+    init(
+        variant: LSEENDVariant = .callhome,
+        stepSize: LSEENDStepSize = .step500ms,
+        onsetThreshold: Double = DiarizationConfig.default.onsetThreshold,
+        offsetThreshold: Double = DiarizationConfig.default.offsetThreshold,
+        minDurationOnMs: Int = DiarizationConfig.default.minDurationOnMs,
+        minDurationOffMs: Int = DiarizationConfig.default.minDurationOffMs
+    ) {
         self.variant = variant
         self.stepSize = stepSize
+        self.onsetThreshold = onsetThreshold
+        self.offsetThreshold = offsetThreshold
+        self.minDurationOnMs = minDurationOnMs
+        self.minDurationOffMs = minDurationOffMs
     }
 
-    /// `LSEENDDiarizer`'s async convenience initializer downloads/loads the model (FluidAudio's own
-    /// cache, `~/Library/Application Support/FluidAudio/Models/` — kikimi.md 4 章) with
+    /// Loads the model and hands `LSEENDDiarizer` an explicit `DiarizerTimelineConfig`.
+    ///
+    /// **Why this open-codes `LSEENDDiarizer`'s own convenience initializer** (`LSEENDDiarizer(variant:
+    /// stepSize:timelineConfig:)`, which does exactly this `loadFromHuggingFace` → `init(model:
+    /// timelineConfig:)` pair): `DiarizerTimelineConfig` stores its duration gates as **frame counts**,
+    /// and its seconds-valued accessors (`minDurationOn`, `onsetPadSeconds`, …) convert using whatever
+    /// `frameDurationSeconds` the struct holds *at assignment time*. `init(model:timelineConfig:)` then
+    /// overwrites `frameDurationSeconds` with the loaded model's metadata **without** recomputing those
+    /// frame counts — so any config built before the model is loaded ends up with gates measured
+    /// against the placeholder frame duration (0.08 s or 0.1 s), not the real one. Loading the model
+    /// first and only then converting ms → frames against `model.metadata.frameDurationSeconds`
+    /// (`timelineFrames(ms:frameDurationSeconds:)`) is the only way to get the durations the user
+    /// actually configured.
+    ///
+    /// `LSEENDModel.loadFromHuggingFace` downloads/loads into FluidAudio's own cache
+    /// (`~/Library/Application Support/FluidAudio/Models/` — kikimi.md 4 章) with
     /// `computeUnits: .cpuOnly` by default, matching design section 9's "LS-EEND = CPU（公式に CPU 実行
     /// 最速と明記）".
     func initialize() async throws {
-        diarizer = try await LSEENDDiarizer(variant: variant, stepSize: stepSize)
+        let model = try await LSEENDModel.loadFromHuggingFace(variant: variant, stepSize: stepSize)
+        let timelineConfig = Self.makeTimelineConfig(
+            frameDurationSeconds: model.metadata.frameDurationSeconds,
+            onsetThreshold: onsetThreshold,
+            offsetThreshold: offsetThreshold,
+            minDurationOnMs: minDurationOnMs,
+            minDurationOffMs: minDurationOffMs
+        )
+        diarizer = try LSEENDDiarizer(model: model, timelineConfig: timelineConfig)
+    }
+
+    /// Pure ms → frame-count conversion for `DiarizerTimelineConfig`'s `minFramesOn`/`minFramesOff`,
+    /// rounding to the nearest whole frame exactly the way FluidAudio's own seconds accessors do
+    /// (`Int(round(seconds / frameDurationSeconds))`, `DiarizerTimeline.swift`). Split out as a `static`
+    /// function purely so it is unit-testable without loading a real CoreML model (no network in tests
+    /// — `docs/design/13-speaker-diarization.md` section 11).
+    ///
+    /// Returns `0` (FluidAudio's "no post-processing" value) for a non-positive `ms` or a non-positive
+    /// `frameDurationSeconds`; the latter cannot happen with a real model's metadata but must not divide
+    /// by zero if it ever did.
+    ///
+    /// The division is deliberately done in `Float`, not `Double`: `frameDurationSeconds` *is* a
+    /// `Float` (it comes from `LSEENDMetadata`), and widening it to `Double` exposes its binary
+    /// representation error — e.g. a 0.1 s frame widens to 0.10000000149…, making 250 ms come out as
+    /// 2.499999… frames and round *down* to 2 where FluidAudio's own `Float` arithmetic gets a clean
+    /// 2.5 and rounds to 3. Staying in `Float` keeps `DiarizerTimelineConfig.minDurationOn` reading
+    /// back the duration that was configured.
+    static func timelineFrames(ms: Int, frameDurationSeconds: Float) -> Int {
+        guard ms > 0, frameDurationSeconds > 0 else {
+            return 0
+        }
+        return Int((Float(ms) / 1000.0 / frameDurationSeconds).rounded())
+    }
+
+    /// Builds the `DiarizerTimelineConfig` `initialize()` hands to `LSEENDDiarizer`. `numSpeakers` is
+    /// left at the struct's own default because `LSEENDDiarizer.init(model:timelineConfig:)` overwrites
+    /// it (and `frameDurationSeconds`) from the model metadata anyway — `frameDurationSeconds` is still
+    /// passed here so the frame counts computed alongside it stay self-consistent.
+    ///
+    /// The onset/offset **padding** frames are deliberately left at `0`: FluidAudio's pass-through
+    /// default. Padding widens every turn outward, which is the opposite of what the minimum-duration
+    /// gates are here for, and no measurement so far calls for it.
+    static func makeTimelineConfig(
+        frameDurationSeconds: Float,
+        onsetThreshold: Double,
+        offsetThreshold: Double,
+        minDurationOnMs: Int,
+        minDurationOffMs: Int
+    ) -> DiarizerTimelineConfig {
+        DiarizerTimelineConfig(
+            frameDurationSeconds: frameDurationSeconds,
+            onsetThreshold: Float(onsetThreshold),
+            offsetThreshold: Float(offsetThreshold),
+            minFramesOn: timelineFrames(ms: minDurationOnMs, frameDurationSeconds: frameDurationSeconds),
+            minFramesOff: timelineFrames(ms: minDurationOffMs, frameDurationSeconds: frameDurationSeconds)
+        )
     }
 
     func addAudio(_ samples: [Float]) async throws {
