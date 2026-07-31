@@ -253,7 +253,7 @@ struct MenuBarMenuContentDeriveTests {
             recordingTitle: "デイリースクラム",
             hiddenWindows: [hiddenItem("s1", "Paused会議")]
         )
-        let content = MenuBarMenuContent.derive(from: status)
+        let content = MenuBarMenuContent.derive(from: status, profiles: [])
 
         #expect(content.recordingTitle == "デイリースクラム")
         #expect(content.hiddenWindows == [hiddenItem("s1", "Paused会議")])
@@ -270,15 +270,45 @@ struct MenuBarMenuContentDeriveTests {
         var tickedLater = base
         tickedLater.timerText = "00:02"
 
-        #expect(MenuBarMenuContent.derive(from: base) == MenuBarMenuContent.derive(from: tickedLater))
+        #expect(MenuBarMenuContent.derive(from: base, profiles: []) == MenuBarMenuContent.derive(from: tickedLater, profiles: []))
     }
 
     @Test("idle status derives to nil recordingTitle and empty hiddenWindows")
     func idleStatusDerivesToEmptyContent() {
-        let content = MenuBarMenuContent.derive(from: .idle)
+        let content = MenuBarMenuContent.derive(from: .idle, profiles: [])
 
         #expect(content.recordingTitle == nil)
         #expect(content.hiddenWindows.isEmpty)
+    }
+
+    // MARK: - profiles pass-through (docs/design/41-meeting-profiles.md §6.2)
+
+    @Test("derive(from:profiles:) threads the given profiles list through unchanged")
+    func derivePassesThroughProfilesUnchanged() {
+        let items = [
+            MenuBarMenuContent.ProfileItem(id: "daily-scrum", name: "デイリースクラム"),
+            MenuBarMenuContent.ProfileItem(id: "one-on-one", name: "1on1")
+        ]
+        let content = MenuBarMenuContent.derive(from: .idle, profiles: items)
+
+        #expect(content.profiles == items)
+    }
+
+    @Test("derive(from:profiles:) with an empty profiles list yields an empty profiles array")
+    func deriveWithEmptyProfilesYieldsEmptyArray() {
+        let content = MenuBarMenuContent.derive(from: .idle, profiles: [])
+
+        #expect(content.profiles.isEmpty)
+    }
+
+    @Test("two statuses differing only in timerText, given the same profiles list, still derive to an equal MenuBarMenuContent")
+    func timerTextOnlyDifferenceWithProfilesStillDerivesEqualContent() {
+        let items = [MenuBarMenuContent.ProfileItem(id: "daily-scrum", name: "デイリースクラム")]
+        let base = MenuBarStatus(icon: .recording, timerText: "00:01", recordingTitle: "会議", hiddenWindows: [])
+        var tickedLater = base
+        tickedLater.timerText = "00:02"
+
+        #expect(MenuBarMenuContent.derive(from: base, profiles: items) == MenuBarMenuContent.derive(from: tickedLater, profiles: items))
     }
 }
 
@@ -290,17 +320,18 @@ struct MenuBarMenuContentDeriveTests {
 @Suite("MenuBarMenuModel")
 @MainActor
 struct MenuBarMenuModelTests {
-    @Test("starts with nil recordingTitle and empty hiddenWindows")
+    @Test("starts with nil recordingTitle, empty hiddenWindows, and empty profiles")
     func startsEmpty() {
         let model = MenuBarMenuModel()
         #expect(model.content.recordingTitle == nil)
         #expect(model.content.hiddenWindows.isEmpty)
+        #expect(model.content.profiles.isEmpty)
     }
 
     @Test("update(_:) with an unchanged value does not fire objectWillChange")
     func unchangedUpdateDoesNotPublish() {
         let model = MenuBarMenuModel()
-        let content = MenuBarMenuContent(recordingTitle: "会議", hiddenWindows: [])
+        let content = MenuBarMenuContent(recordingTitle: "会議", hiddenWindows: [], profiles: [])
         model.update(content)
 
         var fired = false
@@ -315,11 +346,11 @@ struct MenuBarMenuModelTests {
     @Test("update(_:) with a genuinely different value does fire objectWillChange")
     func changedUpdatePublishes() {
         let model = MenuBarMenuModel()
-        model.update(MenuBarMenuContent(recordingTitle: "会議A", hiddenWindows: []))
+        model.update(MenuBarMenuContent(recordingTitle: "会議A", hiddenWindows: [], profiles: []))
 
         var fired = false
         let cancellable = model.objectWillChange.sink { fired = true }
-        model.update(MenuBarMenuContent(recordingTitle: "会議B", hiddenWindows: []))
+        model.update(MenuBarMenuContent(recordingTitle: "会議B", hiddenWindows: [], profiles: []))
 
         #expect(fired == true)
         #expect(model.content.recordingTitle == "会議B")
@@ -329,13 +360,14 @@ struct MenuBarMenuModelTests {
     @Test("a run of timerText-only-driven MenuBarStatus updates (via derive) never publishes")
     func timerTickSequenceThroughDeriveNeverPublishes() {
         // Regression for §6 failure mode #15: simulates WindowManager.recomputeMenuBarStatus()'s
-        // once-a-second call feeding MenuBarMenuContent.derive(from:) into this model while only
-        // timerText changes across ticks.
+        // once-a-second call feeding MenuBarMenuContent.derive(from:profiles:) into this model while
+        // only timerText changes across ticks.
         let model = MenuBarMenuModel()
         let recordingTitle = "デイリースクラム"
-        model.update(MenuBarMenuContent.derive(from: MenuBarStatus(
-            icon: .recording, timerText: "00:00", recordingTitle: recordingTitle, hiddenWindows: []
-        )))
+        model.update(MenuBarMenuContent.derive(
+            from: MenuBarStatus(icon: .recording, timerText: "00:00", recordingTitle: recordingTitle, hiddenWindows: []),
+            profiles: []
+        ))
 
         var publishCount = 0
         let cancellable = model.objectWillChange.sink { publishCount += 1 }
@@ -346,10 +378,56 @@ struct MenuBarMenuModelTests {
                 recordingTitle: recordingTitle,
                 hiddenWindows: []
             )
-            model.update(MenuBarMenuContent.derive(from: ticked))
+            model.update(MenuBarMenuContent.derive(from: ticked, profiles: []))
         }
 
         #expect(publishCount == 0)
+        cancellable.cancel()
+    }
+
+    // MARK: - profiles equality guard (docs/design/41-meeting-profiles.md §6.2)
+
+    @Test("a run of derive(from:profiles:) calls with an unchanged profiles list never publishes, even as timerText ticks")
+    func unchangedProfilesListThroughDeriveNeverPublishes() {
+        let profiles = [MenuBarMenuContent.ProfileItem(id: "daily-scrum", name: "デイリースクラム")]
+        let model = MenuBarMenuModel()
+        model.update(MenuBarMenuContent.derive(
+            from: MenuBarStatus(icon: .recording, timerText: "00:00", recordingTitle: "会議", hiddenWindows: []),
+            profiles: profiles
+        ))
+
+        var publishCount = 0
+        let cancellable = model.objectWillChange.sink { publishCount += 1 }
+        for second in 1 ... 5 {
+            let ticked = MenuBarStatus(
+                icon: .recording,
+                timerText: TimeFormatting.clock(seconds: second),
+                recordingTitle: "会議",
+                hiddenWindows: []
+            )
+            // The exact same `profiles` array instance/value every tick: WindowManager only calls
+            // `refreshProfileMenu()` at its three defined points (§6.2), never once per second.
+            model.update(MenuBarMenuContent.derive(from: ticked, profiles: profiles))
+        }
+
+        #expect(publishCount == 0)
+        cancellable.cancel()
+    }
+
+    @Test("update(_:) fires objectWillChange when only the profiles list changes")
+    func changedProfilesListPublishes() {
+        let model = MenuBarMenuModel()
+        model.update(MenuBarMenuContent.derive(from: .idle, profiles: []))
+
+        var fired = false
+        let cancellable = model.objectWillChange.sink { fired = true }
+        model.update(MenuBarMenuContent.derive(
+            from: .idle,
+            profiles: [MenuBarMenuContent.ProfileItem(id: "daily-scrum", name: "デイリースクラム")]
+        ))
+
+        #expect(fired == true)
+        #expect(model.content.profiles == [MenuBarMenuContent.ProfileItem(id: "daily-scrum", name: "デイリースクラム")])
         cancellable.cancel()
     }
 }

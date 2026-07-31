@@ -98,6 +98,67 @@ enum SessionIdValidation {
     }
 }
 
+// MARK: - DraftSeed
+
+/// What seeds a new Draft session's prep files (context.md / summary_template.md / enabled
+/// watchers / participants), passed to `SessionStore.createDraftSession(seed:)`
+/// (`docs/design/41-meeting-profiles.md` §3.1). Exactly one source applies; the per-file fallback
+/// chain for each (source -> global default -> built-in) is documented on each
+/// `SessionStore+Defaults.swift` `loadInitial*(seed:profile:)` helper and design doc §4's table.
+enum DraftSeed: Equatable, Sendable {
+    /// Global defaults only (the existing "+ 新規" path).
+    case none
+    /// Copy from an existing session (the existing "複製して新規" path).
+    case basedOn(sessionId: String)
+    /// Copy from a saved meeting profile.
+    case profile(id: String)
+}
+
+// MARK: - AppliedDraftSeed
+
+/// What `SessionStore.createDraftSession(seed:)` actually applied (`docs/design/
+/// 41-meeting-profiles.md` §3.1). Mirrors `DraftSeed` case-for-case, plus `.profileFallback` for the
+/// one case where the requested seed could not be honored as-is. `.profileFallback` is how the soft
+/// fallback (§4 / §8 failure mode #3) travels back to the caller **as data**: `SessionStore` never
+/// touches any UI surface (no toast, no banner) -- presentation of that fallback is
+/// `WindowManager`'s job (§3.3 / §6.5), driven entirely off this value.
+enum AppliedDraftSeed: Equatable, Sendable {
+    case none
+    case basedOn(sessionId: String)
+    case profile(id: String)
+    /// `.profile(id: requestedId)` was requested but could not be resolved (invalid id / directory
+    /// missing / broken `profile.yaml`, §8 #3): the session was still created, seeded with global
+    /// defaults exactly as `.none` would be, and `meta.profileId` was **not** recorded.
+    case profileFallback(requestedId: String)
+}
+
+extension AppliedDraftSeed {
+    /// `SessionMeta.basedOnSession` to record for this applied seed: non-nil only for `.basedOn`.
+    var basedOnSessionForMeta: String? {
+        if case .basedOn(let sessionId) = self { return sessionId }
+        return nil
+    }
+
+    /// `SessionMeta.profileId` to record for this applied seed (`docs/design/41-meeting-profiles.md`
+    /// §2.3): non-nil only for a *successfully* resolved `.profile` -- `.profileFallback`
+    /// deliberately never records an id (§4: "meta.profile_id は記録しない").
+    var profileIdForMeta: String? {
+        if case .profile(let id) = self { return id }
+        return nil
+    }
+}
+
+// MARK: - DraftCreationResult
+
+/// `SessionStore.createDraftSession(seed:)`'s result: the new session's `meta.json` snapshot plus
+/// what was actually applied (`docs/design/41-meeting-profiles.md` §3.1). The thin compatibility
+/// wrapper `createDraftSession(basedOn:)` discards `appliedSeed` and returns `.meta` alone, since
+/// every pre-profiles call site only ever needed the meta.
+struct DraftCreationResult: Equatable, Sendable {
+    var meta: SessionMeta
+    var appliedSeed: AppliedDraftSeed
+}
+
 // MARK: - PrepCopyScope
 
 /// Which Prep-tab files `SessionHandle.copyPrepFiles(from:scope:)` should overwrite when copying

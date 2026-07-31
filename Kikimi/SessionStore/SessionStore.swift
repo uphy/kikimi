@@ -22,15 +22,19 @@ actor SessionStore {
         sessionsRootDirectory: SessionStore.defaultSessionsRootDirectory,
         defaultContextFileURL: FileManager.expandingTildePath(AppConfig.shared.data.defaults.contextFile),
         defaultSummaryTemplateFileURL: FileManager.expandingTildePath(AppConfig.shared.data.defaults.summaryTemplateFile),
-        defaultEnabledWatchersFileURL: FileManager.expandingTildePath(AppConfig.shared.data.watchers.defaultEnabledFile)
+        defaultEnabledWatchersFileURL: FileManager.expandingTildePath(AppConfig.shared.data.watchers.defaultEnabledFile),
+        profilesDirectoryURL: FileManager.expandingTildePath(AppConfig.shared.data.profiles.dir)
     )
 
-    // Not `private`: `SessionStore+Defaults.swift` (split out for `file_length`) reads all four
-    // through its `loadInitial*(basedOn:)` helpers, plus `logger` for their warning logs.
+    // Not `private`: `SessionStore+Defaults.swift` (split out for `file_length`) reads all five
+    // through its `loadInitial*(seed:profile:)` helpers, plus `logger` for their warning logs.
     let sessionsRootDirectory: URL
     let defaultContextFileURL: URL
     let defaultSummaryTemplateFileURL: URL
     let defaultEnabledWatchersFileURL: URL
+    /// `~/.config/kikimi/profiles/` (`docs/design/41-meeting-profiles.md` §2.4/§3.1); DI'd for tests,
+    /// only `static let shared` resolves it from `AppConfig.shared.data.profiles.dir`.
+    let profilesDirectoryURL: URL
     private let metaFlushInterval: TimeInterval
     private let fileManager: FileManager
     let logger = Logger(subsystem: "io.github.uphy.Kikimi", category: "SessionStore")
@@ -57,6 +61,7 @@ actor SessionStore {
         defaultContextFileURL: URL = SessionStore.defaultContextFileURL,
         defaultSummaryTemplateFileURL: URL = SessionStore.defaultSummaryTemplateFileURL,
         defaultEnabledWatchersFileURL: URL = SessionStore.defaultEnabledWatchersFileURL,
+        profilesDirectoryURL: URL = SessionStore.defaultProfilesDirectoryURL,
         metaFlushInterval: TimeInterval = 5.0,
         fileManager: FileManager = .default
     ) {
@@ -64,6 +69,7 @@ actor SessionStore {
         self.defaultContextFileURL = defaultContextFileURL
         self.defaultSummaryTemplateFileURL = defaultSummaryTemplateFileURL
         self.defaultEnabledWatchersFileURL = defaultEnabledWatchersFileURL
+        self.profilesDirectoryURL = profilesDirectoryURL
         self.metaFlushInterval = metaFlushInterval
         self.fileManager = fileManager
     }
@@ -91,6 +97,9 @@ actor SessionStore {
         FileManager.realHomeDirectory.appendingPathComponent(".config/kikimi/default_watchers.yaml")
     }
 
+    // `defaultProfilesDirectoryURL` (tilde-expanded `ProfilesConfig.default.dir`) lives in
+    // `SessionStore+Defaults.swift` to keep this file under the project's `file_length` lint limit.
+
     /// The built-in view template used when neither a `basedOn` source session nor the global
     /// default template file (`defaults.summary_template_file`) is readable (design doc section 8,
     /// failure mode #2). Kept as an alias for `SessionHandle.defaultSummaryTemplate`
@@ -99,18 +108,24 @@ actor SessionStore {
 
     // MARK: Session lifecycle
 
+    /// Creates a brand-new Draft session, seeding its prep files from `seed`
+    /// (`docs/design/41-meeting-profiles.md` §3.1/§4; `.profile(id:)` resolution/fallback lives in
+    /// `resolveDraftSeed(_:)`, `SessionStore+Defaults.swift`). No default: `= .none` would make a bare
+    /// `createDraftSession()` ambiguous against the `createDraftSession(basedOn:)` wrapper below.
     @discardableResult
-    func createDraftSession(basedOn sourceSessionId: String? = nil) async throws -> SessionMeta {
-        if let sourceSessionId {
+    func createDraftSession(seed: DraftSeed) async throws -> DraftCreationResult {
+        if case .basedOn(let sourceSessionId) = seed {
             try SessionIdValidation.validate(sourceSessionId)
         }
+
+        let (appliedSeed, resolvedProfile) = await resolveDraftSeed(seed)
+
         let now = Date()
         let id = EntryIdNaming.makeId(for: now)
         let directoryURL = sessionsRootDirectory.appendingPathComponent(id, isDirectory: true)
 
-        // No explicit `watchers/` mkdir here: `writeEnabledWatchers(_:)` below persists via
-        // `atomicWriteText`, which creates any missing parent directory itself (`SessionHandle.swift`'s
-        // `createParentDirectoryIfNeeded(for:)`), so a separate mkdir would be redundant.
+        // No explicit `watchers/` mkdir here: `writeEnabledWatchers(_:)` below creates any missing
+        // parent directory itself (`SessionHandle.swift`'s `createParentDirectoryIfNeeded(for:)`).
         do {
             try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
         } catch {
@@ -130,7 +145,8 @@ actor SessionStore {
             endedAt: nil,
             durationMs: 0,
             recordings: [],
-            basedOnSession: sourceSessionId,
+            basedOnSession: appliedSeed.basedOnSessionForMeta,
+            profileId: appliedSeed.profileIdForMeta,
             segmentCount: 0,
             refinedCount: 0,
             appVersion: Self.appVersion
@@ -138,23 +154,19 @@ actor SessionStore {
 
         do {
             let handle = SessionHandle(directoryURL: directoryURL, meta: meta, metaFlushInterval: metaFlushInterval)
-            // `SessionHandle.init` never touches disk itself (section 5.2: "init はテスト容易性のため
-            // directoryURL/初期 meta を注入可能にする"); a no-op `updateMeta` forces the immediate-write
-            // path (section 7) to persist this brand-new session's `meta.json` for the first time.
+            // `SessionHandle.init` never touches disk itself; a no-op `updateMeta` forces the
+            // immediate-write path to persist this brand-new session's `meta.json` for the first time.
             try await handle.updateMeta { _ in }
             try await handle.ensureTranscriptAndRefinedLogFilesExist()
-            try await handle.writeContext(loadInitialContext(basedOn: sourceSessionId))
-            try await handle.writeSummaryTemplate(loadInitialSummaryTemplate(basedOn: sourceSessionId))
-            try await handle.writeEnabledWatchers(loadInitialEnabledWatchers())
-            // `docs/design/22-participant-hints.md` section 1.3: `participant_ids` only, never
-            // `removed_participant_ids` (a removal record is session-scoped, not meaningful across
-            // meetings). `nil` (source missing/unreadable, or no `basedOn` at all) writes nothing --
-            // a brand-new session simply has no `participants.json` (= no roster).
-            if let participantIds = loadInitialParticipantIds(basedOn: sourceSessionId) {
+            try await handle.writeContext(loadInitialContext(seed: seed, profile: resolvedProfile))
+            try await handle.writeSummaryTemplate(loadInitialSummaryTemplate(seed: seed, profile: resolvedProfile))
+            try await handle.writeEnabledWatchers(loadInitialEnabledWatchers(seed: seed, profile: resolvedProfile))
+            // `nil` (no seed-provided roster) writes nothing -- see `loadInitialParticipantIds(seed:profile:)`.
+            if let participantIds = loadInitialParticipantIds(seed: seed, profile: resolvedProfile) {
                 try await handle.updateParticipants { $0.participantIds = participantIds }
             }
             handles[id] = handle
-            return meta
+            return DraftCreationResult(meta: meta, appliedSeed: appliedSeed)
         } catch {
             // The directory was just created by this call; don't leave a half-initialized folder
             // behind if a later step (context/template/watcher-list write) failed.
@@ -162,6 +174,10 @@ actor SessionStore {
             throw error
         }
     }
+
+    // `createDraftSession(basedOn:)` (the thin `.meta`-only compatibility wrapper over
+    // `createDraftSession(seed:)` above) lives in `SessionStore+Defaults.swift` alongside
+    // `resolveDraftSeed(_:)`, to keep this file under the project's `file_length` lint limit.
 
     func openSession(_ sessionId: String) async throws -> SessionHandle {
         try SessionIdValidation.validate(sessionId)
@@ -579,7 +595,6 @@ actor SessionStore {
 
 }
 
-// `loadInitialContext(basedOn:)`/`loadInitialSummaryTemplate(basedOn:)`/`loadInitialParticipantIds
-// (basedOn:)`/`loadInitialEnabledWatchers()` (the `createDraftSession(basedOn:)` default-resolution
-// helpers) moved to `SessionStore+Defaults.swift` to keep this file under the project's `file_length`
-// lint limit.
+// `createDraftSession(seed:)`'s default-resolution helpers (`loadInitialContext(seed:profile:)` etc.,
+// `resolveDraftSeed(_:)`) and its `createDraftSession(basedOn:)` compatibility wrapper live in
+// `SessionStore+Defaults.swift` to keep this file under the project's `file_length` lint limit.

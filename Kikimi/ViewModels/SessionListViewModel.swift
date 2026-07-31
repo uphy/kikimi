@@ -162,6 +162,13 @@ final class SessionListViewModel: ObservableObject {
     /// `createdAt` descending), unfiltered. Use `groupedByMonth()` for the filtered/grouped view
     /// the UI actually renders.
     @Published private(set) var sessions: [SessionMeta] = []
+    /// All meeting profiles currently on disk, read via `MeetingProfileStore.shared.list()`
+    /// (already sorted by `name`, Japanese-aware) on window display (the view's `.task`, which
+    /// calls `refresh()`) and again on every subsequent `refresh()` call. Deliberately independent
+    /// of `WindowManager.shared.profileMenuItems` (the menu bar's cache, `docs/design/
+    /// 41-meeting-profiles.md` §6.2): this view model already has an async context on load, so it
+    /// reads `MeetingProfileStore` directly rather than going through a cache (§6.1).
+    @Published private(set) var profiles: [MeetingProfile] = []
     @Published var searchText: String = ""
     @Published var stateFilter: SessionStateFilter = .all
     /// Sessions `WindowManager.launch()` found via `SessionStore.detectIncompleteSessions()`
@@ -209,9 +216,12 @@ final class SessionListViewModel: ObservableObject {
         self.pasteboard = pasteboard
     }
 
-    /// Reloads `sessions` from `SessionStore.listSessions()` and re-aggregates `llmUsageSummary`.
+    /// Reloads `sessions` from `SessionStore.listSessions()`, `profiles` from
+    /// `MeetingProfileStore.shared.list()` (`docs/design/41-meeting-profiles.md` §6.1), and
+    /// re-aggregates `llmUsageSummary`.
     func refresh() async {
         sessions = await SessionStore.shared.listSessions()
+        profiles = await MeetingProfileStore.shared.list()
         await refreshLLMUsage()
     }
 
@@ -252,10 +262,24 @@ final class SessionListViewModel: ObservableObject {
         await refresh()
     }
 
+    /// Menu item for a specific profile on the "+ 新規" button's pulldown
+    /// (`docs/design/41-meeting-profiles.md` §6.1): opens a fresh Draft workspace seeded from
+    /// `profileId`'s `.profile` seed, then reloads `sessions`/`profiles`.
+    ///
+    /// If `profileId` cannot be resolved (deleted out from under the pulldown / broken
+    /// `profile.yaml`), `WindowManager.createDraftWorkspace(seed:)` does not throw -- it falls back
+    /// to global defaults and surfaces `WorkspaceBanner.profileFallback` in the opened Session
+    /// Window (§6.5). This view model intentionally has no fallback toast of its own: that
+    /// notification is consolidated into the Session Window banner to avoid a duplicate.
+    func createNew(profileId: String) async throws {
+        try await WindowManager.shared.createDraftWorkspace(seed: .profile(id: profileId))
+        await refresh()
+    }
+
     /// "複製して新規セッション" (section 7): opens a Draft workspace seeded from `sessionId`'s
     /// `context.md`/`summary_template.md`, then reloads `sessions`.
     func duplicate(sessionId: String) async throws {
-        try await WindowManager.shared.createDraftWorkspace(basedOn: sessionId)
+        try await WindowManager.shared.createDraftWorkspace(seed: .basedOn(sessionId: sessionId))
         await refresh()
     }
 

@@ -12,6 +12,11 @@ import SwiftUI
 /// The "話者" tab is the exception: it is the R2 voiceprint management UI carved out by
 /// `docs/design/13-speaker-diarization.md` section 14 ("Settings に一覧 + 削除の最小限のみ"), and is
 /// backed by `VoiceprintStore` rather than `AppConfig.shared`.
+///
+/// "プロファイル" (`ProfilesSettingsTab`) is a second exception, for the same reason as "話者": a
+/// profile is a directory under `profiles.dir`, not a `config.yaml` field, so it reads
+/// `MeetingProfileStore` directly instead of binding to `AppConfig.shared`
+/// (`docs/design/41-meeting-profiles.md` §6.4).
 struct SettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
 
@@ -37,17 +42,21 @@ struct SettingsView: View {
                 .tabItem { Text("Watchers") }
                 .tag(2)
 
+            ProfilesSettingsTab()
+                .tabItem { Text("プロファイル") }
+                .tag(3)
+
             VoiceprintSpeakersTab(viewModel: viewModel)
                 .tabItem { Text("話者") }
-                .tag(3)
+                .tag(4)
 
             GlossarySettingsTab()
                 .tabItem { Text("用語集") }
-                .tag(4)
+                .tag(5)
 
             DictationSettingsTab()
                 .tabItem { Text("入力") }
-                .tag(5)
+                .tag(6)
         }
         // No `.padding()` on the TabView itself (docs/design/30-settings-ui-polish.md §5): the
         // grouped forms carry their own insets (padding here doubled the margin), and 用語集's
@@ -56,13 +65,14 @@ struct SettingsView: View {
         //
         // minWidth widened from 420 to 600 for the 5-tab bar (一般/モデル/Watchers/話者/入力,
         // docs/design/25-dictation-mode.md §6 added 入力), then to 680 for the 6th tab (用語集,
-        // docs/design/28-glossary.md §4): once the tab bar no longer fits, TabView collapses the
-        // overflow into a hidden ">>" menu and the last tabs aren't reachable at the window's default
-        // size. 760 now, for 用語集's 160pt category sidebar and its divider on top of that -- the
-        // detail pane still needs room for two side-by-side text fields. minHeight raised 380 -> 480
+        // docs/design/28-glossary.md §4), then to 760 for 用語集's 160pt category sidebar and its
+        // divider on top of that -- the detail pane still needs room for two side-by-side text
+        // fields. 830 now, for the 7th tab (プロファイル, `docs/design/41-meeting-profiles.md` §6.4):
+        // once the tab bar no longer fits, TabView collapses the overflow into a hidden ">>" menu and
+        // the last tabs aren't reachable at the window's default size. minHeight raised 380 -> 480
         // for the grouped forms (rows are ~40pt tall; at 380 the 一般 tab couldn't show its first
         // section whole).
-        .frame(minWidth: 760, minHeight: 480)
+        .frame(minWidth: 830, minHeight: 480)
     }
 }
 

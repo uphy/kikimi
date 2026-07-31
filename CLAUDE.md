@@ -124,6 +124,7 @@ kikimi.md 13 章に準拠。主要コンポーネント:
 | `Kikimi/Markdown/` | 会話ログの Markdown レンダリング・コピー |
 | `Kikimi/LLM/` | Claude CLI/API クライアント・課金集計・スタブプロバイダ |
 | `Kikimi/SessionStore/` | セッションのファイル I/O（JSONL・meta・各種 state） |
+| `Kikimi/Profiles/` | 会議プロファイル（`profile.yaml` の読み書き・id 検証） |
 | `Kikimi/Config/` | `AppConfig` / `AppState` / YAML 読み書き |
 | `Kikimi/WikiExport/` | セッション終了時の Wiki 向け Markdown export |
 | `Kikimi/Playback/` | セグメント単位の音声再生 |

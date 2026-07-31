@@ -203,6 +203,13 @@ enum WorkspaceBanner: Equatable, Identifiable {
     /// System audio capture is enabled and the default output device is built-in speakers: acoustic
     /// leakage into the mic is likely (`docs/design/24-system-audio-leak-mitigation.md` §5.2).
     case builtInSpeakerOutputDetected
+    /// `createDraftSession(seed: .profile(id: requestedProfileId))` could not resolve the requested
+    /// meeting profile (invalid id / directory missing / broken `profile.yaml`), so the Draft was
+    /// created with global defaults instead and `meta.profile_id` was left unset
+    /// (`docs/design/41-meeting-profiles.md` §3.3/§4/§6.5). Surfaced by
+    /// `WindowManager.createDraftWorkspace(seed:)` after opening the Session Window, not by
+    /// `SessionStore` itself (`SessionStore` never touches any UI surface).
+    case profileFallback(requestedProfileId: String)
 
     /// A stable identity per banner "kind" (and, where relevant, per `AudioSourceKind`).
     ///
@@ -227,6 +234,8 @@ enum WorkspaceBanner: Equatable, Identifiable {
             return "recordingStartFailed"
         case .builtInSpeakerOutputDetected:
             return "builtInSpeakerOutputDetected"
+        case .profileFallback(let requestedProfileId):
+            return "profileFallback(\(requestedProfileId))"
         }
     }
 }
