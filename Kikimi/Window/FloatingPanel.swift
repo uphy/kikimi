@@ -13,7 +13,16 @@ import SwiftUI
 /// (`Kikimi/Views/MeetingWorkspace/TestModeBanner.swift`): env is fixed for a process's lifetime,
 /// so this is a pure static lookup with no per-call `ProcessInfo` cost.
 enum HiddenTestMode {
-    static let isActive: Bool = ProcessInfo.processInfo.environment["KIKIMI_TEST_HIDDEN"] == "1"
+    /// True under the env flag, and also whenever the process is a test runner. `mise run test`
+    /// and CI export the flag, but a bare `swift test` (easy to reach for during development)
+    /// does not -- the XCTest-framework probe catches that case so window suites never flash real
+    /// panels over the user's work. XCTest is linked into every SwiftPM test runner (including
+    /// swift-testing suites) and never into the app itself, so the probe cannot misfire in
+    /// production. `FloatingPanelTests` is unaffected: it injects `isUnobtrusive` explicitly to
+    /// cover both branches.
+    static let isActive: Bool =
+        ProcessInfo.processInfo.environment["KIKIMI_TEST_HIDDEN"] == "1"
+            || NSClassFromString("XCTestCase") != nil
 }
 
 // MARK: - FloatingPanel
