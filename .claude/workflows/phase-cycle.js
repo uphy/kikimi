@@ -78,9 +78,20 @@ const FINAL_REVIEW_SCHEMA = {
   required: ['verdict', 'findings'],
 }
 
+// args must be an object: { feature, design_doc?, brief? }. A plain-string args once
+// produced design_doc = "docs/design/undefined.md" and agents guessed a wrong target
+// (wf_449c600e) — fail fast instead.
+if (typeof args !== 'object' || args === null || typeof args.feature !== 'string' || args.feature.length === 0) {
+  throw new Error('kikimi-phase-cycle requires object args: { feature: string, design_doc?: string, brief?: string }')
+}
 const feature = args.feature
 const designDoc = args.design_doc || `docs/design/${feature}.md`
 const designDocAbs = `${REPO}/${designDoc}`
+// Optional pre-agreed design direction (e.g. from a grilling session with the user).
+// Injected into the Design prompt so the draft starts from the agreement, not from scratch.
+const brief = args.brief
+  ? `\n\n## 合意済み設計方針（ユーザーと確定済み。逸脱する場合は設計文書に理由を明記すること）\n${args.brief}`
+  : ''
 
 function ctx() {
   return (
@@ -99,7 +110,7 @@ const design = await agent(
     `kikimi.md の該当章を読み、API・型・状態遷移・失敗モードを具体的に書くこと。` +
     `Chirami の参照実装（chirami-map.md 参照）との差分がある場合は明記すること。` +
     `書き終えたら、書いたファイルパス（リポジトリルートからの相対パス）・要約・オープンな質問・` +
-    `kikimi.md から逸脱した判断があれば列挙して返せ。`,
+    `kikimi.md から逸脱した判断があれば列挙して返せ。${brief}`,
   { schema: DESIGN_SCHEMA, label: `design:${feature}` }
 )
 
