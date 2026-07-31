@@ -115,11 +115,26 @@ Chirami 参照実装: `docs/references/chirami-map.md` 2章。
   - **Chirami に前例のない新規の採用方式のため、この動的捕捉の挙動は未検証**。実機・`kikimi-verify` での
     検証が必須（13節 Open Questions）。もし実際には tap 作成時点のプロセス集合に固定される（＝除外リストでも
     動的に増えない）ことが判明した場合のフォールバック案も 13節に記載する
-  - 除外対象は Kikimi 自身の `AudioObjectID` のみ（Kikimi は現状音声を再生しないため実害はないが、将来通知音等を
-    追加した場合の自己ループ防止として除外しておく）。自プロセスの `AudioObjectID` 解決に失敗した場合は
-    `.warning` ログを出し、除外リストを空（＝自プロセスも含めて全プロセスを対象）にしたまま `start()` を継続する
-    （9節 失敗モード表 参照）。**Chirami の `processes.isEmpty` での無言 `return`（`SystemAudioCapture.swift:113-115`）
-    に相当する分岐は、除外リスト方式では「空の除外リスト」が正常系そのものであるため存在しない**
+  - 除外対象は Kikimi 自身の `AudioObjectID` のみ。**Kikimi はセグメント再生（`Kikimi/Playback/SegmentAudioPlayer.swift`
+    の `AVAudioPlayer`）で実際に音声を再生するため、この除外は自己ループ防止の保険ではなく必須**——除外に失敗すると
+    再生した過去セグメントの音声がそのままシステム音声として録音・書き起こしされ、書き起こし内容が壊れる
+  - `kAudioHardwarePropertyTranslatePIDToProcessObject` による自プロセスの `AudioObjectID` 解決は、coreaudiod が
+    そのプロセスの音声 I/O を一度でも観測していないと失敗しうる。マイク有効時は `MicrophoneSource.start` が
+    `SystemAudioSource.start` より先に走るため（`AudioCapture.start()` の起動順序）これは問題にならないが、
+    **マイク無効・システム音声のみの録音では、tap 作成時点で Kikimi がまだ CoreAudio に一切触れていないことがあり、
+    解決が失敗しうる**。これに対処するため `SystemAudioSource.resolveExcludedProcesses()`
+    （実装は `Kikimi/AudioCapture/SystemAudioSelfExclusion.swift`）は次の手順を踏む:
+    1. まず素直に解決を試みる
+    2. 失敗したら `.warning` ログを出し、無音の `AVAudioEngine`（mixer→output の暗黙接続のみ。ノードが皆無だと
+       `start()` が throw して HAL クライアント登録自体が起きない）を start して Kikimi を CoreAudio の
+       HAL クライアントとして強制的に登録させ（"priming"）、短い間隔を空けて数回再試行する。この engine は
+       start/stop の一瞬起動ではなく、tap 作成（`AudioHardwareCreateProcessTap`）が除外リストを消費するまで
+       起動したまま維持する（coreaudiod は最後の音声 I/O が止まると process object を破棄しうるため）。
+       tap の aggregate device が動き出せば Kikimi 自身が HAL クライアントになるので、以降は不要となり解放する
+    3. それでも解決できなければ `.error` ログ（9節 失敗モード表 #11、`.warning` から格上げ）を出した上で、
+       除外リストを空（＝自プロセスも含めて全プロセスを対象）にしたまま `start()` を継続する。**Chirami の
+       `processes.isEmpty` での無言 `return`（`SystemAudioCapture.swift:113-115`）に相当する分岐は、除外リスト
+       方式では「空の除外リスト」が正常系そのものであるため存在しない**
 - 将来、マイクデバイス選択・特定アプリの除外/絞り込み UI が必要になった場合は、`MicrophoneSource.init(deviceUID:)` /
   `SystemAudioSource.init(excludedProcesses:)` に引数を追加するだけで拡張できるよう、コンストラクタ引数として
   最初から持たせる（値は現状常に `nil` / Kikimi 自身のみ）
@@ -463,7 +478,7 @@ STT 用バッファとは独立に変換・書き込みを行う。
 | 8 | セッションフォルダの `audio/` が作成できない | `start()` が `.sessionDirectoryUnavailable` を throw。録音は開始されない | `.error` | エラーダイアログ |
 | 9 | 下流（Ring Buffer / STT / 整形キュー）が詰まる | `AudioCapture` は関知しない。`didCapture` は呼び出し元が非同期キューに積むだけの想定で、`AudioCapture` 自身はブロックしない（10節・8.5章参照） | — | キュー長インジケータは `02-stt-pipeline.md` 側の関心事 |
 | 10 | 同一 `AudioCapture` インスタンスへの `start()` の二重呼び出し | `.alreadyRunning` を throw | `.warning` | 通常発生しない想定（呼び出し元のバグ検出用） |
-| 11 | Kikimi 自身の `AudioObjectID`（除外対象）の解決に失敗する（4節） | **フェイルセーフとして除外リストを空のまま `start()` を継続する**（＝ Kikimi 自身も含めて全プロセスを対象にタップする）。現状 Kikimi は音声を再生しないため実害はない。`.allSourcesUnavailable` 等の致命的失敗としては扱わない | `.warning` | 通常は非表示（内部的なフォールバックのため） |
+| 11 | Kikimi 自身の `AudioObjectID`（除外対象）の解決に失敗する（4節） | 無音 `AVAudioEngine` の priming + 数回のリトライを行い、それでも解決できなければ**フェイルセーフとして除外リストを空のまま `start()` を継続する**（＝ Kikimi 自身も含めて全プロセスを対象にタップする）。この場合セグメント再生音がシステム音声として録音・書き起こしされうる。`.allSourcesUnavailable` 等の致命的失敗としては扱わない | priming/リトライ中は `.warning`、最終的に諦めた場合は `.error`（実害があるため `.warning` から格上げ） | 通常は非表示（内部的なフォールバックのため） |
 | 12 | `system_NNN.wav` のオープンにファイルシステム起因で失敗する（`mic_NNN.wav` 自体は開けている） | **マイクが使える限り録音は開始する**（#3 と同様の扱い）。`systemAudioSource` はそもそも起動せず、`activeSources` は `{mic}` のみとなり、`didDegrade(.system, .systemAudioUnavailable)` を発火。`mic_NNN.wav` のオープン失敗は引き続き致命的（#1/#2/#4/#8 と同様） | `.warning` | 「システム音声を取得できません。マイクのみで記録します」バナー |
 
 **共通原則**: 「マイク」は必須（無ければ録音そのものを開始しない）。「システム音声」は best-effort（無くてもマイクのみで録音を継続する）。
