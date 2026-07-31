@@ -152,8 +152,10 @@ func rematchAnonymousSlots() async
 - ライブ抽出（`extractAndMatchVoiceprint`）との交錯は **actor reentrancy により起き得る**。
   防御は §3.1 の書き込み直前再検証で行う（「actor 直列化で構造的に起きない」は誤りなので
   根拠にしない）
-- 再照合はべき等（同じ名簿で 2 回呼んでも 2 回目は全滅 or 同一結果）。`extractedSlots` は
-  変更しない（抽出は従来どおり slot ごとに一度きり。再照合は照合だけをやり直す）
+- 再照合はべき等（同じ名簿で 2 回呼んでも 2 回目は全滅 or 同一結果）。抽出のマイルストーン状態
+  （旧 `extractedSlots`。13 章 5 節の 2026-08-01 追記でマイルストーン方式に変更）は変更しない
+  ——再照合は永続化済み embedding に対して照合だけをやり直す。live 側の再抽出で embedding が
+  新しくなれば、その後の再照合は自動的に新しいほうを使う
 - 名簿ゼロへの変化（最後の 1 人を削除）でも呼んでよいが、匿名 slot がオープンセットで
   マッチし得るのは従来挙動と同じなのでそのまま許容する
 
@@ -329,7 +331,7 @@ Ended / Paused セッションで録音を開始していない間は coordinato
     回帰テスト（reentrancy の防御を実装が省略しないためのガード）
   - rematch: 匿名 slot（embedding あり・displayName なし）が名簿追加後に accepted になる /
     `.user` slot・実名確定済み `.auto` slot を触らない / 名簿削除で巻き戻さない /
-    べき等性 / `extractedSlots` 不変
+    べき等性 / 抽出マイルストーン状態（旧 `extractedSlots`）不変
   - VM 側 rematch（§3.2）: coordinator 不在で `addParticipantHint` →
     匿名 slot が accepted になり `speaker_assignments.json` に書かれる /
     `diarizationAssignments` 再読込と `speakerLabels` への反映 / 対象外 slot 不可侵は

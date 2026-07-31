@@ -317,8 +317,8 @@ extension MeetingWorkspaceViewModel {
         // could possibly arrive (`RealtimeDiarizationCoordinator`'s documented lifecycle contract).
         if let coordinator = await diarizationCoordinatorIfEnabled() {
             await coordinator.beginSegment(startMsOffset: startMsOffset, hasSystemAudio: audioInputSelection.system.enabled)
-            pipeline.onSystemAudio = { [weak self] samples in
-                await self?.feedDiarization(samples: samples)
+            pipeline.onSystemAudio = { [weak self] samples, elapsedAtBufferStart in
+                await self?.feedDiarization(samples: samples, elapsedAtBufferStart: elapsedAtBufferStart)
             }
         }
         do {

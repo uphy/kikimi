@@ -1,6 +1,17 @@
 import FluidAudio
 import Foundation
 
+// MARK: - SlotSampleRange
+
+/// One finalized turn's span in the current generation's raw-sample index space (the same space
+/// `RealtimeDiarizationCoordinator.generationSampleBuffer` is indexed in), tagged with the slot it was
+/// attributed to. Exists so a slot's enroll audio can exclude stretches another slot was also speaking
+/// in (design section 5's "実装時の追記 2026-08-01（enroll 音声からの同時発話区間の除外）").
+struct SlotSampleRange: Sendable, Equatable {
+    let slot: String
+    let range: Range<Int>
+}
+
 // MARK: - RealtimeDiarizationCoordinator + Voiceprint (docs/design/13-speaker-diarization.md section 5/4.3, "R2")
 
 /// Split into its own file (alongside `MeetingWorkspaceViewModel`'s `+Diarization.swift`/`+Summary.swift`
@@ -29,6 +40,10 @@ extension RealtimeDiarizationCoordinator {
         }
         generationSampleBuffer.removeFirst(overflow)
         generationBufferBaseSampleIndex += overflow
+        // A recorded turn range that no longer intersects anything still in the buffer can no longer
+        // subtract anything from anyone's enroll audio, so it is pure memory — drop it in lockstep with
+        // the samples it described (design section 5's 2026-08-01 overlap-exclusion note).
+        generationTurnSampleRanges.removeAll { $0.range.upperBound <= generationBufferBaseSampleIndex }
     }
 
     /// Clamps a `DiarizerSegment`'s absolute-within-generation sample range into
@@ -51,46 +66,147 @@ extension RealtimeDiarizationCoordinator {
 
     // MARK: - Voiceprint extraction & matching (design section 5, "声紋照合（イベント駆動）")
 
-    /// Slices this segment's own speech audio out of `generationSampleBuffer` and appends it to
-    /// `pendingSlotAudio[slot]`, then triggers one-shot voiceprint extraction the moment the slot's
-    /// cumulative accumulated audio reaches `minEnrollSpeechMs` (design section 5). A no-op for a slot
-    /// that has already had extraction triggered (`extractedSlots`) — this is where the "one shot, never
-    /// re-extract" contract is actually enforced.
-    ///
-    /// Called from `RealtimeDiarizationCoordinator.persist(_:)` for every finalized `DiarizerSegment`,
-    /// regardless of whether that segment's `diarization.jsonl` append succeeded (see `persist(_:)`'s
-    /// own call-site comment).
-    func accumulateSlotAudioForVoiceprint(slot: String, segment: DiarizerSegment) async {
-        guard !extractedSlots.contains(slot) else {
+    /// Records one finalized turn's raw-sample span so later `accumulateSlotAudioForVoiceprint(slot:
+    /// segment:)` calls can subtract it out of *other* slots' enroll audio (design section 5's "実装時の
+    /// 追記 2026-08-01"). Called from `RealtimeDiarizationCoordinator.persist(_:)`'s first pass, for
+    /// every segment of the batch, before any of that batch's accumulation runs — so two slots finalized
+    /// together (the simultaneous-speech case this exists for) each see the other's range.
+    func recordTurnSampleRange(slot: String, segment: DiarizerSegment) {
+        let range = Self.sampleRange(of: segment)
+        guard !range.isEmpty else {
             return
         }
-        let startSample = Int((segment.startTime * Float(Self.sampleRateHz)).rounded())
-        let endSample = Int((segment.endTime * Float(Self.sampleRateHz)).rounded())
-        let slice = sliceGenerationBuffer(startSample: startSample, endSample: endSample)
+        generationTurnSampleRanges.append(SlotSampleRange(slot: slot, range: range))
+    }
+
+    /// A `DiarizerSegment`'s span in the generation's raw-sample index space. Deliberately **not**
+    /// anchor-corrected (`+Anchor.swift`'s `turnMs(fromGenerationTime:)` doc comment): the sample buffer
+    /// is filled by the same `feed` calls the backend consumes, so it shares the backend's own frame
+    /// cursor and must be addressed with unshifted times.
+    static func sampleRange(of segment: DiarizerSegment) -> Range<Int> {
+        let startSample = Int((segment.startTime * Float(sampleRateHz)).rounded())
+        let endSample = Int((segment.endTime * Float(sampleRateHz)).rounded())
+        guard endSample > startSample else {
+            return startSample..<startSample
+        }
+        return startSample..<endSample
+    }
+
+    /// Slices this segment's own speech audio out of `generationSampleBuffer` — **excluding** every
+    /// stretch another slot's turn also covers — appends it to `pendingSlotAudio[slot]`, and triggers a
+    /// voiceprint extraction whenever the slot's cumulative enroll audio reaches the next milestone
+    /// (design section 5 and its "実装時の追記 2026-08-01").
+    ///
+    /// Two behaviors replace the original "slice the turn verbatim, extract exactly once" rule:
+    ///
+    /// 1. **Overlap exclusion.** LS-EEND reports simultaneous speech as two overlapping turns, and
+    ///    slicing each verbatim fed the shared stretch into *both* slots' embeddings, pulling two
+    ///    different people's voiceprints toward each other (and toward whoever else was talking). Only
+    ///    the parts of this turn no other slot claims are accumulated; a fully-overlapped turn
+    ///    contributes nothing.
+    /// 2. **Milestone re-extraction.** A slot gets an extraction at `minEnrollSpeechMs × 1`, `× 3` and
+    ///    `× 6` of cumulative enroll audio (`Self.enrollMilestoneMultipliers`) instead of one shot at
+    ///    `× 1`. The counter is bumped *before* the attempt, so a failing extractor still consumes its
+    ///    milestone and can never spin (design section 8, "WeSpeaker 抽出/照合の失敗 → ... その slot は匿名の
+    ///    まま"). Everything after the first attempt additionally requires the slot to still be anonymous,
+    ///    re-checked against `speaker_assignments.json` inside the extraction task itself.
+    ///
+    /// Called from `RealtimeDiarizationCoordinator.persist(_:)`'s second pass for every finalized
+    /// `DiarizerSegment`, regardless of whether that segment's `diarization.jsonl` append succeeded (see
+    /// `persist(_:)`'s own call-site comment).
+    func accumulateSlotAudioForVoiceprint(slot: String, segment: DiarizerSegment) async {
+        let attempts = slotExtractionAttempts[slot] ?? 0
+        guard attempts < Self.enrollMilestoneMultipliers.count else {
+            // Every milestone spent: stop paying for slicing/buffering this slot for the rest of the
+            // session (the same "never again" shortcut the old `extractedSlots` set provided, just at
+            // the end of the milestone budget instead of after the first attempt).
+            return
+        }
+
+        let ownRange = Self.sampleRange(of: segment)
+        let otherSlotRanges = generationTurnSampleRanges.filter { $0.slot != slot }.map(\.range)
+        let exclusiveRanges = Self.subtractingOverlaps(from: ownRange, excluding: otherSlotRanges)
+        guard !exclusiveRanges.isEmpty else {
+            return
+        }
+        var slice: [Float] = []
+        for range in exclusiveRanges {
+            slice.append(contentsOf: sliceGenerationBuffer(startSample: range.lowerBound, endSample: range.upperBound))
+        }
         guard !slice.isEmpty else {
             return
         }
-        pendingSlotAudio[slot, default: []].append(contentsOf: slice)
 
-        let neededSampleCount = Int((Double(minEnrollSpeechMs) / 1_000.0 * Double(Self.sampleRateHz)).rounded())
-        guard let accumulated = pendingSlotAudio[slot], accumulated.count >= neededSampleCount else {
+        slotEnrollSampleCounts[slot, default: 0] += slice.count
+        // Capped on every append rather than only at extraction time: this buffer now survives an
+        // extraction (milestones 2 and 3 keep accumulating into it), and only its most recent 10s can
+        // ever be handed to the extractor anyway. `slotEnrollSampleCounts` above is what actually tracks
+        // milestone progress, so capping here loses no bookkeeping.
+        var accumulated = pendingSlotAudio[slot] ?? []
+        accumulated.append(contentsOf: slice)
+        accumulated = Self.capToExtractionWindow(accumulated)
+        pendingSlotAudio[slot] = accumulated
+
+        let multiplier = Self.enrollMilestoneMultipliers[attempts]
+        let neededSampleCount = Int(
+            (Double(minEnrollSpeechMs * multiplier) / 1_000.0 * Double(Self.sampleRateHz)).rounded()
+        )
+        guard (slotEnrollSampleCounts[slot] ?? 0) >= neededSampleCount else {
             return
         }
 
-        // Mark extracted *before* the extraction attempt itself: guarantees the one-shot contract holds
-        // even if the extraction below fails (design section 8, "WeSpeaker 抽出/照合の失敗 → ... その slot
-        // は匿名のまま").
-        extractedSlots.insert(slot)
-        pendingSlotAudio.removeValue(forKey: slot)
-        let capped = Self.capToExtractionWindow(accumulated)
+        slotExtractionAttempts[slot] = attempts + 1
+        if attempts + 1 == Self.enrollMilestoneMultipliers.count {
+            // Last milestone spent: the audio can never be needed again.
+            pendingSlotAudio.removeValue(forKey: slot)
+        }
 
         // Fire-and-forget: the actual CPU-bound CoreML work happens inside `voiceprintExtractor`'s own
         // actor (a different executor), so this coordinator's executor is free to keep processing
-        // `feed(samples:)`/`persist(_:)` calls for other slots/segments while this is in flight (design
-        // section 5: "extraction must not block turn processing").
+        // `feed(samples:elapsedAtBufferStart:)`/`persist(_:)` calls for other slots/segments while this
+        // is in flight (design section 5: "extraction must not block turn processing").
+        let isReExtraction = attempts > 0
         Task { [weak self] in
-            await self?.extractAndMatchVoiceprint(slot: slot, samples: capped)
+            await self?.extractAndMatchVoiceprint(
+                slot: slot,
+                samples: accumulated,
+                trigger: isReExtraction ? "re-extract" : "live",
+                requiresAnonymousSlot: isReExtraction
+            )
         }
+    }
+
+    /// Returns the parts of `range` that no range in `others` covers, in ascending order (empty if
+    /// `others` covers all of it). Pure and `static` so design section 5's overlap-exclusion rule can be
+    /// unit-tested directly, without a coordinator/backend/audio at all.
+    ///
+    /// `others` may be unsorted, may overlap each other, and may extend arbitrarily far outside `range`;
+    /// empty inputs are ignored. Both bounds are treated as half-open sample indices, so touching ranges
+    /// (`a.upperBound == b.lowerBound`) do not subtract anything from each other.
+    static func subtractingOverlaps(from range: Range<Int>, excluding others: [Range<Int>]) -> [Range<Int>] {
+        guard !range.isEmpty else {
+            return []
+        }
+        let overlapping = others
+            .filter { !$0.isEmpty && $0.overlaps(range) }
+            .sorted { $0.lowerBound < $1.lowerBound }
+        guard !overlapping.isEmpty else {
+            return [range]
+        }
+
+        var remaining: [Range<Int>] = []
+        var cursor = range.lowerBound
+        for other in overlapping {
+            if other.lowerBound > cursor {
+                remaining.append(cursor..<min(other.lowerBound, range.upperBound))
+            }
+            cursor = max(cursor, other.upperBound)
+            if cursor >= range.upperBound {
+                return remaining
+            }
+        }
+        remaining.append(cursor..<range.upperBound)
+        return remaining
     }
 
     /// Caps a slot's accumulated speech to at most `VoiceprintExtractor.maxSampleCount` (10s @ 16kHz),
@@ -120,7 +236,32 @@ extension RealtimeDiarizationCoordinator {
     /// and swallowed — this is the fire-and-forget `Task` `accumulateSlotAudioForVoiceprint(slot:
     /// segment:)` spawns, and design section 8 requires none of this to ever propagate to the
     /// recording/STT path.
-    func extractAndMatchVoiceprint(slot: String, samples: [Float]) async {
+    ///
+    /// - Parameters:
+    ///   - trigger: Log tag distinguishing the milestone that produced this call (`"live"` for a slot's
+    ///     first extraction, `"re-extract"` for milestones 2/3, `"rematch"` for `+Rematch.swift`'s
+    ///     embedding-only path), so the distance logs of design section 20 §3.3 stay readable when one
+    ///     slot appears several times.
+    ///   - requiresAnonymousSlot: `true` for every re-extraction (design section 5's "実装時の追記
+    ///     2026-08-01"). Re-reads `speaker_assignments.json` here, inside the extraction task, and
+    ///     abandons the whole attempt — *including* the embedding overwrite — if the slot has since been
+    ///     named. A named slot has nothing to gain from a fresh embedding and plenty to lose: a `.user`
+    ///     assignment's embedding is what a later rename/Ended-time moving-average update enrolls into
+    ///     `voiceprints.json` (design section 4.4), so replacing it with audio picked by a purely
+    ///     time-based milestone could quietly degrade a registered speaker. The first extraction is
+    ///     exempt (`false`) — it must persist an embedding even for a slot the user already named, which
+    ///     is exactly what the pre-existing "`.user` name survives, embedding still updates" behavior
+    ///     does.
+    func extractAndMatchVoiceprint(
+        slot: String,
+        samples: [Float],
+        trigger: String = "live",
+        requiresAnonymousSlot: Bool = false
+    ) async {
+        if requiresAnonymousSlot, await !isSlotStillAnonymous(slot) {
+            return
+        }
+
         let embedding: [Float]
         do {
             embedding = try await voiceprintExtractor.extractEmbedding(from: samples)
@@ -189,7 +330,37 @@ extension RealtimeDiarizationCoordinator {
             break
         }
 
-        await writeAutoAssignmentIfAllowed(slot: slot, candidate: candidate, embedding: embedding, trigger: "live")
+        await writeAutoAssignmentIfAllowed(slot: slot, candidate: candidate, embedding: embedding, trigger: trigger)
+    }
+
+    /// `true` iff `slot` still has no name at all in `speaker_assignments.json` — neither a `.user`
+    /// assignment nor an already-landed `.auto` match (the same two exclusions `+Rematch.swift`'s
+    /// `rematchSlot(slot:assignment:)` applies, for the same design section 3 reason: "ユーザー確定は不可侵"
+    /// / "実名確定済み。名簿の削除・変更で巻き戻さない").
+    ///
+    /// A read failure returns `false` (treat as "not eligible"): the only caller is a *re*-extraction,
+    /// which is by definition optional extra work, so declining it costs nothing while overwriting a
+    /// name/embedding on the strength of an unreadable file could cost real data.
+    private func isSlotStillAnonymous(_ slot: String) async -> Bool {
+        let assignments: SpeakerAssignments
+        do {
+            assignments = try await sessionHandle.readSpeakerAssignments()
+        } catch {
+            logger.warning(
+                "failed to read speaker_assignments.json before re-extracting slot \(slot, privacy: .public); skipping the re-extraction: \(String(describing: error), privacy: .public)"
+            )
+            return false
+        }
+        guard let assignment = assignments.assignments[slot] else {
+            return true
+        }
+        guard assignment.assignedBy != .user, assignment.displayName == nil else {
+            logger.debug(
+                "slot \(slot, privacy: .public) is already named; skipping its voiceprint re-extraction (assignedBy=\(String(describing: assignment.assignedBy), privacy: .public))"
+            )
+            return false
+        }
+        return true
     }
 
     // MARK: - Shared `.auto` write path (docs/design/22-participant-hints.md section 3/3.1)

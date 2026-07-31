@@ -178,7 +178,16 @@ final class TranscriptPipeline: AudioCaptureDelegate {
     /// `SttEngine.feed(...)`. `TranscriptPipeline` never talks to `RealtimeDiarizationCoordinator`
     /// directly (same isolation goal as `onDegrade` above, and as `DiarizationBackend`'s own doc
     /// comment: "a future model/vendor swap only touches this file plus its replacement") -- the
-    /// caller (`MeetingWorkspaceViewModel`) wires this to `RealtimeDiarizationCoordinator.feed(samples:)`.
+    /// caller (`MeetingWorkspaceViewModel`) wires this to
+    /// `RealtimeDiarizationCoordinator.feed(samples:elapsedAtBufferStart:)`.
+    ///
+    /// The second parameter is this buffer's `PendingBuffer.elapsedAtBufferStart` -- the very same
+    /// capture-clock anchor already handed to `SttEngine.feed(samples:elapsedAtBufferStart:)` for the
+    /// *same* buffer (design section 5.1's "実装時の追記 2026-08-01"). Forwarding it is what lets the
+    /// diarizer place its turns on the transcript's own timeline instead of on its "samples fed so far"
+    /// cursor: the system-audio tap only starts producing buffers a few hundred ms after
+    /// `AudioCapture.start()` (aggregate-device setup), so a fed-samples cursor runs permanently early
+    /// relative to every `TranscriptSegment.startMs` and mis-attributes boundary segments.
     ///
     /// `async` (unlike `onDegrade`, which is a fire-and-forget notification): the handler is `await`ed
     /// inline in the feed `Task`'s loop, so the coordinator actually finishes processing one buffer's
@@ -194,14 +203,14 @@ final class TranscriptPipeline: AudioCaptureDelegate {
     /// per audio buffer in `startForwarding()`'s `systemFeedTask` loop below (~26 times/sec), so a
     /// bare-closure `State` here is exactly the shape that produced the meeting-end crash.
     private final class SystemAudioHandlerBox: Sendable {
-        let handler: @Sendable ([Float]) async -> Void
-        init(_ handler: @escaping @Sendable ([Float]) async -> Void) {
+        let handler: @Sendable ([Float], TimeInterval) async -> Void
+        init(_ handler: @escaping @Sendable ([Float], TimeInterval) async -> Void) {
             self.handler = handler
         }
     }
 
     private let onSystemAudioStorage = OSAllocatedUnfairLock<SystemAudioHandlerBox?>(initialState: nil)
-    var onSystemAudio: (@Sendable ([Float]) async -> Void)? {
+    var onSystemAudio: (@Sendable ([Float], TimeInterval) async -> Void)? {
         get { onSystemAudioStorage.withLock { $0 }?.handler }
         set { onSystemAudioStorage.withLock { $0 = newValue.map(SystemAudioHandlerBox.init) } }
     }
@@ -393,7 +402,7 @@ final class TranscriptPipeline: AudioCaptureDelegate {
                 // `RealtimeDiarizationCoordinator.beginSegment(...)` finishes) still takes effect for
                 // every buffer arriving afterward.
                 if let handler = onSystemAudioStorage.withLock({ $0 })?.handler {
-                    await handler(pending.samples)
+                    await handler(pending.samples, pending.elapsedAtBufferStart)
                 }
             }
         }

@@ -40,16 +40,17 @@ struct DiarizationActiveRange: Sendable, Equatable {
 /// session-scoped `spk_N` numbering both need to persist across `beginSegment`/`endSegment` calls
 /// within one coordinator lifetime.
 ///
-/// `TranscriptPipeline` (or its caller) forwards system-audio buffers here via `feed(samples:)` — this
-/// type never talks to `AudioCapture`/`AVAudioPCMBuffer` directly, mirroring `SttEngine`'s own
-/// `[Float]`-only feed surface (`SttEngine.feed(samples:elapsedAtBufferStart:)`).
+/// `TranscriptPipeline` (or its caller) forwards system-audio buffers here via
+/// `feed(samples:elapsedAtBufferStart:)` — this type never talks to `AudioCapture`/`AVAudioPCMBuffer`
+/// directly, mirroring `SttEngine`'s own `[Float]`-plus-elapsed feed surface
+/// (`SttEngine.feed(samples:elapsedAtBufferStart:)`).
 ///
 /// ## Lifecycle contract
 ///
 /// ```
-/// beginSegment(startMsOffset:hasSystemAudio:)   // once per recording segment, before any feed(_:)
-/// feed(samples:)                                // zero or more times while the segment is Recording
-/// endSegment(reason:)                           // once, when the segment closes (Paused or Ended)
+/// beginSegment(startMsOffset:hasSystemAudio:)     // once per recording segment, before any feed
+/// feed(samples:elapsedAtBufferStart:)             // zero or more times while the segment is Recording
+/// endSegment(reason:)                             // once, when the segment closes (Paused or Ended)
 /// ```
 ///
 /// A new `RealtimeDiarizationCoordinator` instance is constructed once per `MeetingWorkspaceViewModel`
@@ -123,23 +124,52 @@ actor RealtimeDiarizationCoordinator {
     /// This generation's base offset (design section 5.1 "基点オフセット"): `startMsOffset` from the
     /// most recent `beginSegment` call. Added to every `DiarizerSegment.startTime`/`.endTime` (which
     /// are relative to the current backend generation's own frame cursor) before persisting a turn.
-    private var baseOffsetMs = 0
-    /// Samples fed to the backend since the current generation started (`beginSegment`). Used only to
-    /// compute this generation's active-range `endMs` on `endSegment` (design section 5's "稼働時間範囲");
-    /// turn timestamps themselves come from the backend's own frame cursor via `DiarizerSegment`,
-    /// never from this counter.
-    private var samplesFedThisGeneration = 0
+    /// Not `private`: read from `+Anchor.swift`.
+    var baseOffsetMs = 0
+    /// Samples fed to the backend since the current generation started (`beginSegment`). Used to
+    /// compute this generation's active-range `endMs` on `endSegment` (design section 5's "稼働時間範囲")
+    /// and, together with each buffer's `elapsedAtBufferStart`, to maintain `elapsedAnchorMs` below;
+    /// turn timestamps themselves come from the backend's own frame cursor via `DiarizerSegment`
+    /// (offset by that anchor), never from this counter alone. Not `private`: read from
+    /// `+Anchor.swift`.
+    var samplesFedThisGeneration = 0
+
+    /// This generation's offset (ms) from the backend's own frame cursor to the *capture clock* —
+    /// design section 5.1's "実装時の追記 2026-08-01（タイムスタンプのアンカー補正）". `nil` until the first
+    /// `feed(samples:elapsedAtBufferStart:)` of the generation establishes it; reset to `nil` by every
+    /// `beginSegment`.
+    ///
+    /// Why it exists: `DiarizerSegment.startTime`/`.endTime` count from the first sample ever fed to
+    /// *this backend generation*, whereas `TranscriptSegment.startMs` counts from `AudioCapture
+    /// .start()` (`SttEngine`'s `elapsedAtBufferStart`). The system-audio tap needs a few hundred ms of
+    /// aggregate-device setup before it emits its first buffer, so those two clocks are offset by
+    /// exactly that startup lag — turns land systematically *early*, and `SegmentAttribution` then
+    /// mis-attributes segments near a turn boundary. Adding this anchor puts both on one timeline.
+    ///
+    /// Maintained by `+Anchor.swift`'s `updateElapsedAnchor(elapsedAtBufferStart:)`; read through
+    /// `anchorMs` (0 when still unestablished). Not `private`: read/written from `+Anchor.swift`.
+    var elapsedAnchorMs: Int?
+
+    /// How far the capture clock may run *ahead* of `anchor + samplesFedThisGeneration` before the
+    /// anchor is moved forward by that much (`+Anchor.swift`). Positive drift means audio never
+    /// reached the backend at all (a dropped/skipped stretch of buffers, e.g. the tap stalling), so
+    /// every later turn would otherwise be reported that much too early for the rest of the segment.
+    /// 1s is comfortably above ordinary per-buffer jitter (~64ms buffers) while still catching the
+    /// real gaps; negative drift is never corrected (see `updateElapsedAnchor`'s doc comment).
+    static let anchorDriftToleranceMs = 1_000
 
     /// Internal LS-EEND speaker index -> session-scoped slot id, for the *current* generation only.
     /// Cleared at the start of every generation (`beginSegment`) because a fresh/reset backend restarts
     /// its internal indices at 0 (design section 5.1: "（再）作成後は内部 index が 0 から始まるため...").
-    private var internalIndexToSlot: [Int: String] = [:]
+    /// Not `private`: read/written from `+SlotNumbering.swift`.
+    var internalIndexToSlot: [Int: String] = [:]
     /// The highest `spk_N` number allocated so far, across every generation this coordinator has run
     /// (never decreases; design section 5.1 "一度使われた slot 番号は再利用しない"). Restored from disk at
     /// the start of every generation via `restoreSlotCounterFromDisk()` so a brand-new coordinator
     /// instance (window reopened, crash recovery) continues numbering rather than colliding with slots
-    /// a previous coordinator instance already persisted.
-    private var maxAllocatedSlotNumber = 0
+    /// a previous coordinator instance already persisted. Not `private`: read/written from
+    /// `+SlotNumbering.swift`.
+    var maxAllocatedSlotNumber = 0
 
     /// Closed ranges from earlier generations plus (if a segment is currently open) one open-ended
     /// range for the current generation (design section 5, "稼働時間範囲...を公開する"). See
@@ -169,19 +199,56 @@ actor RealtimeDiarizationCoordinator {
     static let generationBufferRetentionSampleCount = sampleRateHz * 30
 
     /// Per-slot accumulated speech samples, sliced from `generationSampleBuffer` as each of that slot's
-    /// turns is persisted (design section 5: "新しい slot の発話が累計 min_enroll_speech_ms に達した時点で").
-    /// Removed once the slot crosses `minEnrollSpeechMs` and extraction is triggered — the samples
-    /// themselves are handed off to the extraction task at that point, not needed here again
-    /// (`extractedSlots` is what actually enforces "never again" for this slot, not this dictionary's
-    /// presence/absence). Not `private`: read/written from `+Voiceprint.swift`.
+    /// turns is persisted (design section 5: "新しい slot の発話が累計 min_enroll_speech_ms に達した時点で"),
+    /// **minus** any stretch overlapping another slot's turn (design section 5's "実装時の追記
+    /// 2026-08-01（enroll 音声からの同時発話区間の除外）").
+    ///
+    /// Kept (not dropped) after an extraction fires, because extraction is no longer one-shot — see
+    /// `slotExtractionAttempts`. To bound memory this buffer is capped to the most recent
+    /// `VoiceprintExtractor.maxSampleCount` (10s) samples on every append: everything older can never
+    /// reach the extractor anyway (`capToExtractionWindow`), and the milestone bookkeeping deliberately
+    /// counts through `slotEnrollSampleCounts` rather than this buffer's length for exactly that
+    /// reason. Not `private`: read/written from `+Voiceprint.swift`.
     var pendingSlotAudio: [String: [Float]] = [:]
-    /// Slots for which voiceprint extraction has already been triggered — guarantees the "one shot,
-    /// never re-extract" contract (design section 5) regardless of whether that extraction ultimately
-    /// succeeds or fails. Never cleared (persists for this coordinator's whole lifetime, across every
-    /// generation): design section 5.1 already accepts that a pause can split one person across
-    /// multiple `spk_N` slots, and each such slot independently earns exactly one extraction attempt.
+    /// Cumulative enroll audio (in samples, at `sampleRateHz`) ever accumulated for each slot — the
+    /// quantity the extraction milestones below are measured against. Counted separately from
+    /// `pendingSlotAudio[slot].count` because that buffer is capped to the extraction window and would
+    /// otherwise stop growing at 10s. Not `private`: read/written from `+Voiceprint.swift`.
+    var slotEnrollSampleCounts: [String: Int] = [:]
+    /// How many voiceprint extractions have been *triggered* for each slot (success or failure alike —
+    /// the counter is bumped before the attempt so a failing extractor can never spin).
+    ///
+    /// Replaces the original "one shot, never re-extract" contract with the milestone scheme of design
+    /// section 5's "実装時の追記 2026-08-01（匿名 slot の声紋再抽出）": a slot earns an extraction each time
+    /// its cumulative enroll audio reaches `minEnrollSpeechMs × Self.enrollMilestoneMultipliers[n]`,
+    /// capped at `enrollMilestoneMultipliers.count` attempts total. Attempts after the first only run
+    /// while the slot is still anonymous, which `+Voiceprint.swift` re-checks against
+    /// `speaker_assignments.json` inside the extraction task itself.
+    ///
+    /// Never cleared (persists for this coordinator's whole lifetime, across every generation): design
+    /// section 5.1 already accepts that a pause can split one person across multiple `spk_N` slots, and
+    /// each such slot independently earns its own milestone budget. Not `private`: read/written from
+    /// `+Voiceprint.swift`.
+    var slotExtractionAttempts: [String: Int] = [:]
+    /// Cumulative-speech multiples of `minEnrollSpeechMs` at which a slot's voiceprint is (re-)extracted
+    /// (design section 5's "実装時の追記 2026-08-01"). `1` is the original single shot; `3` and `6` give a
+    /// slot that stayed anonymous two more chances from a much longer, more representative sample —
+    /// field data showed the first 10s often landing just outside `speaker_match_threshold`, with no
+    /// mechanism to ever try again. Bounded at three attempts so a talkative slot cannot keep paying for
+    /// WeSpeaker inference all meeting long. Not `private`: read from `+Voiceprint.swift`.
+    static let enrollMilestoneMultipliers = [1, 3, 6]
+
+    /// Sample ranges (within this generation's own feed cursor, the same index space
+    /// `generationSampleBuffer` uses) of every turn finalized so far this generation, tagged with the
+    /// slot it was attributed to. Used only to subtract *other* slots' turns out of a slot's enroll
+    /// audio (design section 5's "実装時の追記 2026-08-01（enroll 音声からの同時発話区間の除外）"): LS-EEND
+    /// happily reports two slots speaking at once, and slicing each turn's raw time range verbatim fed
+    /// the overlapping stretch into *both* slots' voiceprints, blurring them toward each other.
+    ///
+    /// Cleared by `beginSegment` (the index space is generation-scoped) and pruned as
+    /// `generationSampleBuffer` is trimmed — a range that can no longer be sliced can no longer matter.
     /// Not `private`: read/written from `+Voiceprint.swift`.
-    var extractedSlots: Set<String> = []
+    var generationTurnSampleRanges: [SlotSampleRange] = []
 
     /// The current session participant roster (`docs/design/22-participant-hints.md` section 1/2.2),
     /// keyed by `VoiceprintSpeaker.id`. Empty means "no roster configured" -- voiceprint matching stays
@@ -225,7 +292,7 @@ actor RealtimeDiarizationCoordinator {
         backend: any DiarizationBackend = LSEENDDiarizationBackend(),
         voiceprintExtractor: any VoiceprintEmbeddingExtracting = VoiceprintExtractor(),
         voiceprintStore: VoiceprintStore = .shared,
-        minEnrollSpeechMs: Int = 5_000,
+        minEnrollSpeechMs: Int = 10_000,
         speakerMatchThreshold: Double = 0.45,
         speakerMatchMargin: Double = 0.05
     ) {
@@ -301,12 +368,17 @@ actor RealtimeDiarizationCoordinator {
         internalIndexToSlot.removeAll()
         baseOffsetMs = startMsOffset
         samplesFedThisGeneration = 0
+        // Both the capture clock and the backend's frame cursor restart for this segment, so the offset
+        // between them has to be measured again from this generation's very first buffer.
+        elapsedAnchorMs = nil
         // A fresh generation always allocates brand-new `spk_N` slot ids (never reused, design section
         // 5.1), so no earlier generation's slot can ever receive more turns/audio once this call
-        // returns — `pendingSlotAudio`/`extractedSlots` (keyed by those globally-unique ids) need no
-        // equivalent reset here; only the raw audio buffer they are sliced from is generation-scoped.
+        // returns — `pendingSlotAudio`/`slotEnrollSampleCounts`/`slotExtractionAttempts` (keyed by those
+        // globally-unique ids) need no equivalent reset here; only the raw audio buffer they are sliced
+        // from, and the turn ranges indexing into it, are generation-scoped.
         generationSampleBuffer.removeAll()
         generationBufferBaseSampleIndex = 0
+        generationTurnSampleRanges.removeAll()
         isRunningThisSegment = true
         activeRanges.append(DiarizationActiveRange(startMs: startMsOffset, endMs: nil))
     }
@@ -317,10 +389,21 @@ actor RealtimeDiarizationCoordinator {
     /// failure is caught, logged, and turned into `isPermanentlyStopped = true` here (design section 8,
     /// "本機能のいかなる失敗も録音・書き起こし...をブロックしない"), so callers can invoke this
     /// fire-and-forget (e.g. from an unawaited `Task`) without their own error handling.
-    func feed(samples: [Float]) async {
+    ///
+    /// - Parameter elapsedAtBufferStart: Seconds since this recording segment's `AudioCapture.start()`
+    ///   at the first sample of `samples` — the identical value `SttEngine.feed(samples:
+    ///   elapsedAtBufferStart:)` receives for the same buffer. Used solely to maintain
+    ///   `elapsedAnchorMs`; it is never turned into a turn timestamp directly (the backend's own frame
+    ///   cursor stays the source of turn *durations*, the anchor only shifts them onto the transcript's
+    ///   timeline). See `updateElapsedAnchor(elapsedAtBufferStart:)` in `+Anchor.swift`.
+    func feed(samples: [Float], elapsedAtBufferStart: TimeInterval) async {
         guard isRunningThisSegment, !samples.isEmpty else {
             return
         }
+
+        // Before `samplesFedThisGeneration` grows: `elapsedAtBufferStart` marks this buffer's *start*,
+        // which lines up with the fed-sample count as it stands right now.
+        updateElapsedAnchor(elapsedAtBufferStart: elapsedAtBufferStart)
 
         do {
             try await backend.addAudio(samples)
@@ -429,13 +512,24 @@ actor RealtimeDiarizationCoordinator {
     /// append is logged and skipped — mirroring `TranscriptPipeline.appendOrLog`'s "録音は絶対に止めない"
     /// handling — rather than treated as a backend failure: it says nothing about the diarizer's own
     /// health, only about this one write.
+    ///
+    /// Runs in **two passes** over the batch (design section 5's "実装時の追記 2026-08-01"): pass 1 only
+    /// allocates slots and records every segment's sample range, pass 2 does the appending and the
+    /// voiceprint accumulation. The split matters because pass 2's overlap subtraction must be able to
+    /// see turns that arrive in the *same* `finalizedSegments` batch — simultaneous speech by two slots
+    /// is precisely the case that gets finalized together, and a single-pass loop would have subtracted
+    /// only the earlier-listed slot's ranges from the later one, never the reverse.
     private func persist(_ segments: [DiarizerSegment]) async {
-        for segment in segments {
-            let slot = allocateSlot(forInternalIndex: segment.speakerIndex)
+        let allocated = segments.map { (slot: allocateSlot(forInternalIndex: $0.speakerIndex), segment: $0) }
+        for (slot, segment) in allocated {
+            recordTurnSampleRange(slot: slot, segment: segment)
+        }
+
+        for (slot, segment) in allocated {
             let turn = DiarizationTurn(
                 slot: slot,
-                startMs: baseOffsetMs + Int((segment.startTime * 1_000).rounded()),
-                endMs: baseOffsetMs + Int((segment.endTime * 1_000).rounded())
+                startMs: turnMs(fromGenerationTime: segment.startTime),
+                endMs: turnMs(fromGenerationTime: segment.endTime)
             )
             do {
                 try await sessionHandle.appendDiarizationTurn(turn)
@@ -457,72 +551,22 @@ actor RealtimeDiarizationCoordinator {
         }
     }
 
-    /// Design section 5.1's slot-numbering rule: `internalIndexToSlot[index]` if already assigned this
-    /// generation, otherwise the next unused `spk_N` (`maxAllocatedSlotNumber + 1`, never reused).
-    private func allocateSlot(forInternalIndex index: Int) -> String {
-        if let existing = internalIndexToSlot[index] {
-            return existing
-        }
-        maxAllocatedSlotNumber += 1
-        let slot = "spk_\(maxAllocatedSlotNumber)"
-        internalIndexToSlot[index] = slot
-        return slot
-    }
-
-    /// Restores `maxAllocatedSlotNumber` from the higher of `diarization.jsonl`'s and
-    /// `speaker_assignments.json`'s highest existing `spk_N` (design section 5.1: "diarization.jsonl と
-    /// speaker_assignments.json 両方の最大 slot 番号を復元して続番から採番する"). Only ever raises the
-    /// in-memory counter (via `max(...)`), so a mid-lifetime call (every `beginSegment`, not only the
-    /// very first) can never regress numbering that this coordinator itself already allocated but has
-    /// not yet durably persisted anywhere.
-    ///
-    /// The two reads are wrapped in **separate** `do`/`catch` blocks, not one shared block: a
-    /// `speaker_assignments.json` read failure (e.g. corrupt JSON) must not also discard whatever
-    /// `diarization.jsonl` already told us, and vice versa — a single shared `do`/`catch` would abort
-    /// the whole function on the first throw, silently dropping the other, still-healthy file's
-    /// contribution to `maxAllocatedSlotNumber` and risking a slot-number collision the very next
-    /// `allocateSlot(forInternalIndex:)` call. Each failure is logged and otherwise ignored —
-    /// best-effort, matching design section 8's "voiceprints.json...破損 → warning + 空 DB として再スタート"
-    /// tolerance for sidecar-file corruption.
-    private func restoreSlotCounterFromDisk() async {
-        var maxFromTurns = 0
-        do {
-            let turns = try await sessionHandle.readDiarizationTurns()
-            maxFromTurns = turns.compactMap { Self.slotNumber(from: $0.slot) }.max() ?? 0
-        } catch {
-            logger.error("failed to restore the diarization slot counter from diarization.jsonl: \(String(describing: error), privacy: .public)")
-        }
-
-        var maxFromAssignments = 0
-        do {
-            let assignments = try await sessionHandle.readSpeakerAssignments()
-            maxFromAssignments = assignments.assignments.keys.compactMap { Self.slotNumber(from: $0) }.max() ?? 0
-        } catch {
-            logger.error("failed to restore the diarization slot counter from speaker_assignments.json: \(String(describing: error), privacy: .public)")
-        }
-
-        maxAllocatedSlotNumber = max(maxAllocatedSlotNumber, maxFromTurns, maxFromAssignments)
-    }
-
-    /// Parses the trailing integer out of a `"spk_N"` slot id, or `nil` for anything else
-    /// (defensively — every slot this coordinator itself ever writes matches this shape).
-    private static func slotNumber(from slot: String) -> Int? {
-        guard slot.hasPrefix("spk_") else {
-            return nil
-        }
-        return Int(slot.dropFirst("spk_".count))
-    }
-
     // MARK: - Active range bookkeeping
 
     /// Closes the current generation's open active range (if any) at this generation's fed-audio
-    /// duration, converted via `Self.sampleRateHz` and offset by `baseOffsetMs` — the same timeline
-    /// `DiarizationTurn.startMs`/`.endMs` are already on.
+    /// duration, converted via `Self.sampleRateHz` and offset by `baseOffsetMs` **and `anchorMs`** — the
+    /// same timeline `DiarizationTurn.startMs`/`.endMs` are already on.
+    ///
+    /// Only the `endMs` gets the anchor. The range's `startMs` stays at `beginSegment`'s
+    /// `startMsOffset`, deliberately covering the pre-first-buffer stretch too (design section 5.3's
+    /// precondition is "was the diarizer running for this segment's time range", and a `system`
+    /// transcript segment confirmed during the tap's own startup lag is better attributed against an
+    /// empty turn list — "Speaker ?" — than excluded from diarization's coverage entirely).
     private func closeCurrentActiveRange() {
         guard let lastIndex = activeRanges.indices.last, activeRanges[lastIndex].endMs == nil else {
             return
         }
         let elapsedMs = Int((Double(samplesFedThisGeneration) / Double(Self.sampleRateHz) * 1_000).rounded())
-        activeRanges[lastIndex].endMs = baseOffsetMs + elapsedMs
+        activeRanges[lastIndex].endMs = baseOffsetMs + anchorMs + elapsedMs
     }
 }

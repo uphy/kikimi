@@ -76,6 +76,18 @@ enum AttributionTuning {
     /// file's pure functions -- they have no notion of wall-clock "now" -- but declared alongside
     /// the other tuning constants per the design's "定数化" instruction, for the UI layer to use.
     static let unattributedGraceMs: Int = 3000
+    /// Minimum union-of-any-turn-overlap (ms) a segment needs before any slot may be named as its
+    /// speaker (design section 5.3's coverage gate, 2026-08-01). Below this *and* below
+    /// `shortSegmentCoverageRatio`, the segment falls through to `.unattributed` instead: a couple of
+    /// hundred milliseconds of turn is exactly the phantom LS-EEND emitted before the timeline's
+    /// `min_duration_on_ms` gate existed (`DiarizationConfig`), and attributing a multi-second segment
+    /// from it names the wrong person with full confidence.
+    static let minAttributionUnionMs: Int = 300
+    /// The escape hatch that keeps genuine short segments (相槌 like 「はい」) attributable: a segment
+    /// whose trimmed range is *itself* well covered by turns is attributed no matter how short it is.
+    /// Only a segment failing **both** this ratio and `minAttributionUnionMs` is dropped to
+    /// `.unattributed` -- the gate targets "long segment, sliver of turn", not "short segment".
+    static let shortSegmentCoverageRatio: Double = 0.5
 }
 
 // MARK: - SegmentAttribution
@@ -139,6 +151,17 @@ enum SegmentAttribution {
             return SegmentAttributionResult(label: .unattributed, hasOverlapMarker: hasOverlapMarker, occupancies: occupancies)
         }
 
+        // Rule 1b (coverage gate, design section 5.3's 2026-08-01 addition): the union is real but too
+        // thin to name anyone from. `denominatorMs` being the *union* means it is also the total amount
+        // of evidence this segment has; a 200ms sliver against a multi-second segment says "the diarizer
+        // saw a blip somewhere in here", not "this person spoke this sentence". Both conditions must
+        // fail: a short segment (相槌) whose trimmed range is mostly covered still attributes normally,
+        // which is why this is an AND, not just an absolute floor. `occupancies`/`hasOverlapMarker` are
+        // still reported -- callers use them as raw display/debug data regardless of the label.
+        guard !isCoverageTooThin(denominatorMs: denominatorMs, trimmedLengthMs: trimmed.end - trimmed.start) else {
+            return SegmentAttributionResult(label: .unattributed, hasOverlapMarker: hasOverlapMarker, occupancies: occupancies)
+        }
+
         if occupancies.count >= 2 {
             let secondary = occupancies[1]
             let secondaryRatio = Double(secondary.overlapMs) / Double(denominatorMs)
@@ -169,6 +192,20 @@ enum SegmentAttribution {
     }
 
     // MARK: Private helpers
+
+    /// `true` when the turn coverage backing a segment is too thin to name a speaker from: the union
+    /// is under `AttributionTuning.minAttributionUnionMs` **and** covers under
+    /// `AttributionTuning.shortSegmentCoverageRatio` of the trimmed range. A `trimmedLengthMs <= 0`
+    /// range (a zero-or-negative-length segment) can only be reached with `denominatorMs == 0`, which
+    /// `attribute(...)` already returned `.unattributed` for, so it is treated as "not thin" here rather
+    /// than dividing by zero.
+    private static func isCoverageTooThin(denominatorMs: Int, trimmedLengthMs: Int) -> Bool {
+        guard denominatorMs < AttributionTuning.minAttributionUnionMs, trimmedLengthMs > 0 else {
+            return false
+        }
+        let coverageRatio = Double(denominatorMs) / Double(trimmedLengthMs)
+        return coverageRatio < AttributionTuning.shortSegmentCoverageRatio
+    }
 
     /// The segment's central range after trimming `AttributionTuning.edgeTrimRatio` off each end.
     /// For any `endMs > startMs`, `2 * edgeTrimRatio < 1` guarantees `end > start` (never inverted).

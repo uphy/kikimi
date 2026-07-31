@@ -115,8 +115,12 @@ extension MeetingWorkspaceViewModel {
         // internally on an actual roster change, and the roster is unchanged here), and the ViewModel-side
         // path is explicitly safe alongside a coordinator -- both write through the same actor-serialized
         // `updateSpeakerAssignments` with the same roster re-verification guard (design 22 §3.2). The
-        // slots reset above were already extracted once (`extractedSlots` is one-shot), so the live
-        // coordinator never re-extracts or re-writes them; only this rematch does.
+        // The reset leaves those slots anonymous (`displayName == nil`, still `.auto`), which is exactly
+        // the state design 13's milestone re-extraction (2026-08-01) requires: if such a slot later
+        // crosses its next `min_enroll_speech_ms` milestone the coordinator may re-extract and re-match
+        // it too, independently of this pass. That is desirable here (a fresher embedding from more
+        // speech is precisely what a disputed slot needs) and order-independent -- both paths write
+        // through the same actor-serialized `updateSpeakerAssignments` and the same roster guard.
         await rematchAnonymousSlotsViaViewModel(allowedSpeakerIds: roster)
     }
 }

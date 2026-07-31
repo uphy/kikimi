@@ -243,7 +243,7 @@ struct RealtimeDiarizationCoordinatorTests {
 
         // 0.5s/frame: frames [0, 2) -> 0.0s..1.0s -> +5000ms base offset -> 5000ms..6000ms.
         await backend.enqueueProcessResult(makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 0, endFrame: 2)]))
-        await coordinator.feed(samples: makeSamples())
+        await coordinator.feed(samples: makeSamples(), elapsedAtBufferStart: 0)
 
         let turns = try await handle.readDiarizationTurns()
         #expect(turns == [DiarizationTurn(slot: "spk_1", startMs: 5_000, endMs: 6_000)])
@@ -261,7 +261,7 @@ struct RealtimeDiarizationCoordinatorTests {
         // Allocate spk_1 in the first generation, so the second generation's continued numbering
         // (spk_2, not a reused spk_1) is actually exercised below.
         await backend.enqueueProcessResult(makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 0, endFrame: 1)]))
-        await coordinator.feed(samples: makeSamples())
+        await coordinator.feed(samples: makeSamples(), elapsedAtBufferStart: 0)
         await coordinator.endSegment(reason: .paused)
 
         await coordinator.beginSegment(startMsOffset: 8_000, hasSystemAudio: true)
@@ -270,7 +270,7 @@ struct RealtimeDiarizationCoordinatorTests {
 
         // Internal index 0 restarts fresh in the new generation; frames [0, 1) at 0.5s/frame -> 0.0s..0.5s.
         await backend.enqueueProcessResult(makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 0, endFrame: 1)]))
-        await coordinator.feed(samples: makeSamples())
+        await coordinator.feed(samples: makeSamples(), elapsedAtBufferStart: 0)
 
         let turns = try await handle.readDiarizationTurns()
         #expect(turns.contains(DiarizationTurn(slot: "spk_2", startMs: 8_000, endMs: 8_500)))
@@ -297,7 +297,7 @@ struct RealtimeDiarizationCoordinatorTests {
 
         await coordinator.beginSegment(startMsOffset: 0, hasSystemAudio: true)
         await backend.enqueueProcessResult(makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 0, endFrame: 1)]))
-        await coordinator.feed(samples: makeSamples())
+        await coordinator.feed(samples: makeSamples(), elapsedAtBufferStart: 0)
 
         let turns = try await handle.readDiarizationTurns()
         #expect(turns.contains { $0.slot == "spk_6" }, "numbering must continue past the higher of the two files' max (5), not diarization.jsonl's own max (3)")
@@ -324,7 +324,7 @@ struct RealtimeDiarizationCoordinatorTests {
 
         await coordinator.beginSegment(startMsOffset: 0, hasSystemAudio: true)
         await backend.enqueueProcessResult(makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 0, endFrame: 1)]))
-        await coordinator.feed(samples: makeSamples())
+        await coordinator.feed(samples: makeSamples(), elapsedAtBufferStart: 0)
 
         let turns = try await handle.readDiarizationTurns()
         #expect(
@@ -383,19 +383,19 @@ struct RealtimeDiarizationCoordinatorTests {
 
         await coordinator.beginSegment(startMsOffset: 0, hasSystemAudio: true)
         await backend.setAddAudioError(MockDiarizationBackendError())
-        await coordinator.feed(samples: makeSamples())
+        await coordinator.feed(samples: makeSamples(), elapsedAtBufferStart: 0)
 
         #expect(await coordinator.isStopped())
 
         // Further feed() calls this segment must be true no-ops (no additional backend calls at all).
-        await coordinator.feed(samples: makeSamples())
+        await coordinator.feed(samples: makeSamples(), elapsedAtBufferStart: 0)
         #expect(await backend.addAudioCallCount == 1)
 
         // A later segment with system audio must not retry the backend either -- the failure is sticky
         // for the rest of this coordinator's (session's) lifetime, not just the current segment.
         await coordinator.endSegment(reason: .paused)
         await coordinator.beginSegment(startMsOffset: 5_000, hasSystemAudio: true)
-        await coordinator.feed(samples: makeSamples())
+        await coordinator.feed(samples: makeSamples(), elapsedAtBufferStart: 0)
 
         #expect(await backend.initializeCallCount == 1)
         #expect(await backend.resetCallCount == 0)
@@ -415,7 +415,7 @@ struct RealtimeDiarizationCoordinatorTests {
         await coordinator.beginSegment(startMsOffset: 0, hasSystemAudio: true)
         #expect(await coordinator.isStopped())
 
-        await coordinator.feed(samples: makeSamples())
+        await coordinator.feed(samples: makeSamples(), elapsedAtBufferStart: 0)
         #expect(await backend.addAudioCallCount == 0)
         #expect(try await handle.readDiarizationTurns().isEmpty)
     }
@@ -434,7 +434,7 @@ struct RealtimeDiarizationCoordinatorTests {
         #expect(await coordinator.activeRangesSnapshot() == [DiarizationActiveRange(startMs: 1_000, endMs: nil)])
 
         // 16,000 samples @ 16kHz == exactly 1000ms of fed audio.
-        await coordinator.feed(samples: makeSamples(count: 16_000))
+        await coordinator.feed(samples: makeSamples(count: 16_000), elapsedAtBufferStart: 0)
         #expect(await coordinator.activeRangesSnapshot() == [DiarizationActiveRange(startMs: 1_000, endMs: nil)], "still open until endSegment")
 
         await coordinator.endSegment(reason: .paused)
@@ -488,7 +488,7 @@ struct RealtimeDiarizationCoordinatorTests {
                 makeSegment(speakerIndex: 1, startFrame: 1, endFrame: 2),
             ])
         )
-        await coordinator.feed(samples: makeSamples())
+        await coordinator.feed(samples: makeSamples(), elapsedAtBufferStart: 0)
 
         await collector.value
         #expect(received == [
@@ -524,7 +524,7 @@ struct RealtimeDiarizationCoordinatorTests {
 
         await coordinator.beginSegment(startMsOffset: 8_000, hasSystemAudio: true)
         await backend.enqueueProcessResult(makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 0, endFrame: 1)]))
-        await coordinator.feed(samples: makeSamples())
+        await coordinator.feed(samples: makeSamples(), elapsedAtBufferStart: 0)
 
         let received = await collector.value
         #expect(received == DiarizationTurn(slot: "spk_1", startMs: 8_000, endMs: 8_500))
@@ -550,7 +550,7 @@ struct RealtimeDiarizationCoordinatorTests {
 
         await coordinator.beginSegment(startMsOffset: 5_000, hasSystemAudio: true)
         await backend.enqueueProcessResult(makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 0, endFrame: 1)]))
-        await coordinator.feed(samples: makeSamples())
+        await coordinator.feed(samples: makeSamples(), elapsedAtBufferStart: 0)
 
         let received = await collector.value
         #expect(received == DiarizationTurn(slot: "spk_1", startMs: 5_000, endMs: 5_500))
@@ -558,8 +558,8 @@ struct RealtimeDiarizationCoordinatorTests {
 
     // MARK: - Voiceprint extraction & matching (design section 5/4.3, "R2")
 
-    @Test("a slot's speech only triggers extraction once its accumulated audio crosses min_enroll_speech_ms, and never again after that")
-    func accumulationThresholdTriggersOneShotExtraction() async throws {
+    @Test("a slot's speech only triggers extraction once its accumulated audio crosses min_enroll_speech_ms, and not again before the next milestone")
+    func accumulationThresholdTriggersFirstExtraction() async throws {
         let directory = makeTempSessionDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let handle = SessionHandle(directoryURL: directory, meta: baseMeta())
@@ -578,23 +578,24 @@ struct RealtimeDiarizationCoordinatorTests {
 
         // First 0.5s turn: 8,000 samples @16kHz, well under the 16,000-sample (1,000ms) threshold.
         await backend.enqueueProcessResult(makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 0, endFrame: 1)]))
-        await coordinator.feed(samples: makeSamples(value: 0, count: 8_000))
+        await coordinator.feed(samples: makeSamples(value: 0, count: 8_000), elapsedAtBufferStart: 0)
         #expect(await extractor.callCount == 0, "must not extract before the threshold is reached")
 
         // Second 0.5s turn completes the buffer to exactly 16,000 samples (1,000ms) -- crosses the
         // threshold and must trigger extraction exactly once.
         await backend.enqueueProcessResult(makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 1, endFrame: 2)]))
-        await coordinator.feed(samples: makeSamples(value: 1, count: 8_000))
+        await coordinator.feed(samples: makeSamples(value: 1, count: 8_000), elapsedAtBufferStart: 0)
 
         try await waitUntil { await extractor.callCount == 1 }
         let receivedCounts = await extractor.receivedSamples.map(\.count)
         #expect(receivedCounts == [16_000])
 
-        // A third turn for the same slot must not trigger a second extraction, ever (one-shot contract).
+        // A third turn takes the slot to 1,500ms cumulative -- past the first milestone but nowhere near
+        // the second (`enrollMilestoneMultipliers[1] == 3`, i.e. 3,000ms), so nothing may re-fire yet.
         await backend.enqueueProcessResult(makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 2, endFrame: 3)]))
-        await coordinator.feed(samples: makeSamples(value: 2, count: 8_000))
+        await coordinator.feed(samples: makeSamples(value: 2, count: 8_000), elapsedAtBufferStart: 0)
         try await Task.sleep(for: .milliseconds(100))
-        #expect(await extractor.callCount == 1, "must never re-extract a slot once it has been extracted")
+        #expect(await extractor.callCount == 1, "the next extraction must wait for the next milestone, not fire on every subsequent turn")
     }
 
     @Test("a slot's accumulated audio is capped at 10 seconds (most recent), even if the threshold takes longer to reach")
@@ -622,7 +623,7 @@ struct RealtimeDiarizationCoordinatorTests {
             await backend.enqueueProcessResult(
                 makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: index, endFrame: index + 1, frameDurationSeconds: 1.0)])
             )
-            await coordinator.feed(samples: makeSamples(value: Float(index), count: 16_000))
+            await coordinator.feed(samples: makeSamples(value: Float(index), count: 16_000), elapsedAtBufferStart: 0)
         }
 
         try await waitUntil { await extractor.callCount == 1 }
@@ -653,7 +654,7 @@ struct RealtimeDiarizationCoordinatorTests {
 
         await coordinator.beginSegment(startMsOffset: 0, hasSystemAudio: true)
         await backend.enqueueProcessResult(makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 0, endFrame: 2, frameDurationSeconds: 0.5)]))
-        await coordinator.feed(samples: makeSamples(count: 16_000))
+        await coordinator.feed(samples: makeSamples(count: 16_000), elapsedAtBufferStart: 0)
 
         try await waitUntil {
             let assignments = try? await handle.readSpeakerAssignments()
@@ -699,7 +700,7 @@ struct RealtimeDiarizationCoordinatorTests {
 
         await coordinator.beginSegment(startMsOffset: 0, hasSystemAudio: true)
         await backend.enqueueProcessResult(makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 0, endFrame: 2, frameDurationSeconds: 0.5)]))
-        await coordinator.feed(samples: makeSamples(count: 16_000))
+        await coordinator.feed(samples: makeSamples(count: 16_000), elapsedAtBufferStart: 0)
 
         await collector.value
         #expect(assignmentUpdateCount == 1)
@@ -737,7 +738,7 @@ struct RealtimeDiarizationCoordinatorTests {
         await coordinator.beginSegment(startMsOffset: 0, hasSystemAudio: true)
         // First (sub-threshold) turn allocates "spk_1" for internal index 0.
         await backend.enqueueProcessResult(makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 0, endFrame: 1)]))
-        await coordinator.feed(samples: makeSamples(value: 0, count: 8_000))
+        await coordinator.feed(samples: makeSamples(value: 0, count: 8_000), elapsedAtBufferStart: 0)
 
         // The user has already renamed "spk_1" by the time it crosses the enrollment threshold.
         try await handle.updateSpeakerAssignments { assignments in
@@ -745,7 +746,7 @@ struct RealtimeDiarizationCoordinatorTests {
         }
 
         await backend.enqueueProcessResult(makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 1, endFrame: 2)]))
-        await coordinator.feed(samples: makeSamples(value: 1, count: 8_000))
+        await coordinator.feed(samples: makeSamples(value: 1, count: 8_000), elapsedAtBufferStart: 0)
 
         try await waitUntil {
             let assignments = try? await handle.readSpeakerAssignments()
@@ -793,7 +794,7 @@ struct RealtimeDiarizationCoordinatorTests {
 
         await coordinator.beginSegment(startMsOffset: 0, hasSystemAudio: true)
         await backend.enqueueProcessResult(makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 0, endFrame: 2, frameDurationSeconds: 0.5)]))
-        await coordinator.feed(samples: makeSamples(count: 16_000))
+        await coordinator.feed(samples: makeSamples(count: 16_000), elapsedAtBufferStart: 0)
 
         try await waitUntil {
             let assignments = try? await handle.readSpeakerAssignments()
@@ -848,7 +849,7 @@ struct RealtimeDiarizationCoordinatorTests {
 
         await coordinator.beginSegment(startMsOffset: 0, hasSystemAudio: true)
         await backend.enqueueProcessResult(makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 0, endFrame: 2, frameDurationSeconds: 0.5)]))
-        await coordinator.feed(samples: makeSamples(count: 16_000))
+        await coordinator.feed(samples: makeSamples(count: 16_000), elapsedAtBufferStart: 0)
 
         try await waitUntil {
             let assignments = try? await handle.readSpeakerAssignments()
@@ -867,7 +868,7 @@ struct RealtimeDiarizationCoordinatorTests {
         #expect(assignmentUpdateCount == 0, "a rejected match must never signal assignmentUpdates")
     }
 
-    @Test("a voiceprint extraction failure leaves the slot anonymous without crashing or stopping diarization, and still never re-extracts")
+    @Test("a voiceprint extraction failure leaves the slot anonymous without crashing or stopping diarization, and still consumes its milestone")
     func extractionFailureLeavesSlotAnonymousWithoutCrashing() async throws {
         let directory = makeTempSessionDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -887,7 +888,7 @@ struct RealtimeDiarizationCoordinatorTests {
 
         await coordinator.beginSegment(startMsOffset: 0, hasSystemAudio: true)
         await backend.enqueueProcessResult(makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 0, endFrame: 2, frameDurationSeconds: 0.5)]))
-        await coordinator.feed(samples: makeSamples(count: 16_000))
+        await coordinator.feed(samples: makeSamples(count: 16_000), elapsedAtBufferStart: 0)
 
         try await waitUntil { await extractor.callCount == 1 }
         // Give the (failed) extraction task a moment to finish its error-handling path before asserting
@@ -898,9 +899,10 @@ struct RealtimeDiarizationCoordinatorTests {
         #expect(assignments.assignments["spk_1"]?.embedding == nil, "a failed extraction must never persist a partial/garbage embedding")
         #expect(await coordinator.isStopped() == false, "an extraction failure must not stop diarization itself (design section 8)")
 
-        // Further turns for the same slot must not retry the extraction (still one-shot, even after failure).
+        // A failed attempt still spends its milestone (the counter is bumped before the attempt), so the
+        // next turn -- 1,500ms cumulative, short of the 3,000ms second milestone -- must not retry.
         await backend.enqueueProcessResult(makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 2, endFrame: 3)]))
-        await coordinator.feed(samples: makeSamples(count: 8_000))
+        await coordinator.feed(samples: makeSamples(count: 8_000), elapsedAtBufferStart: 0)
         try await Task.sleep(for: .milliseconds(100))
         #expect(await extractor.callCount == 1)
     }
@@ -934,7 +936,7 @@ struct RealtimeDiarizationCoordinatorTests {
 
         await coordinator.beginSegment(startMsOffset: 0, hasSystemAudio: true)
         await backend.enqueueProcessResult(makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 0, endFrame: 2, frameDurationSeconds: 0.5)]))
-        await coordinator.feed(samples: makeSamples(count: 16_000))
+        await coordinator.feed(samples: makeSamples(count: 16_000), elapsedAtBufferStart: 0)
 
         try await waitUntil {
             let assignments = try? await handle.readSpeakerAssignments()
@@ -976,7 +978,7 @@ struct RealtimeDiarizationCoordinatorTests {
 
         await coordinator.beginSegment(startMsOffset: 0, hasSystemAudio: true)
         await backend.enqueueProcessResult(makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 0, endFrame: 2, frameDurationSeconds: 0.5)]))
-        await coordinator.feed(samples: makeSamples(count: 16_000))
+        await coordinator.feed(samples: makeSamples(count: 16_000), elapsedAtBufferStart: 0)
 
         try await waitUntil {
             let assignments = try? await handle.readSpeakerAssignments()
@@ -1192,7 +1194,7 @@ struct RealtimeDiarizationCoordinatorTests {
 
         await coordinator.beginSegment(startMsOffset: 0, hasSystemAudio: true)
         await backend.enqueueProcessResult(makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 0, endFrame: 2, frameDurationSeconds: 0.5)]))
-        await coordinator.feed(samples: makeSamples(count: 16_000))
+        await coordinator.feed(samples: makeSamples(count: 16_000), elapsedAtBufferStart: 0)
 
         // Wait until the fire-and-forget extraction task is actually blocked at the gate.
         try await waitUntil { await extractor.callCount == 1 }
@@ -1215,5 +1217,290 @@ struct RealtimeDiarizationCoordinatorTests {
         #expect(slot.embedding == matchingEmbedding)
         #expect(slot.globalSpeakerId != offRosterAfterChange.id, "the roster change that raced the in-flight extraction must still be honored by the time the write happens")
         #expect(slot.globalSpeakerId == nil)
+    }
+
+    // MARK: - Capture-clock anchor (design section 5.1's "実装時の追記 2026-08-01")
+
+    @Test("the first fed buffer's elapsedAtBufferStart anchors every turn of that generation onto the capture clock")
+    func firstBufferEstablishesTheCaptureClockAnchor() async throws {
+        let directory = makeTempSessionDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = SessionHandle(directoryURL: directory, meta: baseMeta())
+        let backend = MockDiarizationBackend()
+        let coordinator = RealtimeDiarizationCoordinator(sessionHandle: handle, backend: backend)
+
+        await coordinator.beginSegment(startMsOffset: 0, hasSystemAudio: true)
+        // The system-audio tap only produced its first buffer 400ms after `AudioCapture.start()`
+        // (aggregate-device setup) -- the real-world lag this anchor exists to cancel out.
+        await backend.enqueueProcessResult(makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 0, endFrame: 2)]))
+        await coordinator.feed(samples: makeSamples(count: 16_000), elapsedAtBufferStart: 0.4)
+
+        let turns = try await handle.readDiarizationTurns()
+        #expect(
+            turns == [DiarizationTurn(slot: "spk_1", startMs: 400, endMs: 1_400)],
+            "the backend's own 0.0s-1.0s frame times must land at 400ms-1400ms on the transcript's timeline"
+        )
+    }
+
+    @Test("the anchor is also applied to the active range's endMs, while its startMs still covers the tap's startup lag")
+    func anchorAppliesToActiveRangeEnd() async throws {
+        let directory = makeTempSessionDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = SessionHandle(directoryURL: directory, meta: baseMeta())
+        let backend = MockDiarizationBackend()
+        let coordinator = RealtimeDiarizationCoordinator(sessionHandle: handle, backend: backend)
+
+        await coordinator.beginSegment(startMsOffset: 1_000, hasSystemAudio: true)
+        await coordinator.feed(samples: makeSamples(count: 16_000), elapsedAtBufferStart: 0.4)
+        await coordinator.endSegment(reason: .paused)
+
+        #expect(
+            await coordinator.activeRangesSnapshot() == [DiarizationActiveRange(startMs: 1_000, endMs: 2_400)],
+            "endMs must be startMsOffset + anchor + fed audio; startMs stays at startMsOffset so the tap's startup lag is still covered"
+        )
+    }
+
+    @Test("a mid-segment system-audio gap larger than the tolerance re-anchors every later turn by exactly the gap")
+    func aLargeAudioGapReAnchorsLaterTurns() async throws {
+        let directory = makeTempSessionDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = SessionHandle(directoryURL: directory, meta: baseMeta())
+        let backend = MockDiarizationBackend()
+        let coordinator = RealtimeDiarizationCoordinator(sessionHandle: handle, backend: backend)
+
+        await coordinator.beginSegment(startMsOffset: 0, hasSystemAudio: true)
+        await backend.enqueueProcessResult(makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 0, endFrame: 2)]))
+        await coordinator.feed(samples: makeSamples(count: 16_000), elapsedAtBufferStart: 0.4)
+
+        // 2s of buffers never arrived: the capture clock has advanced 3.0s since the previous buffer
+        // started, but only 1.0s of audio ever reached the backend.
+        await backend.enqueueProcessResult(
+            makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 2, endFrame: 4)])
+        )
+        await coordinator.feed(samples: makeSamples(count: 16_000), elapsedAtBufferStart: 3.4)
+
+        let turns = try await handle.readDiarizationTurns()
+        #expect(turns.first == DiarizationTurn(slot: "spk_1", startMs: 400, endMs: 1_400), "turns finalized before the gap keep the original anchor")
+        #expect(
+            turns.last == DiarizationTurn(slot: "spk_1", startMs: 3_400, endMs: 4_400),
+            "after re-anchoring, the backend's 1.0s-2.0s frame times must land where that audio was actually captured (3.4s-4.4s)"
+        )
+    }
+
+    @Test("ordinary jitter (and any negative drift) never moves the anchor")
+    func smallOrNegativeDriftNeverMovesTheAnchor() async throws {
+        let directory = makeTempSessionDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = SessionHandle(directoryURL: directory, meta: baseMeta())
+        let backend = MockDiarizationBackend()
+        let coordinator = RealtimeDiarizationCoordinator(sessionHandle: handle, backend: backend)
+
+        await coordinator.beginSegment(startMsOffset: 0, hasSystemAudio: true)
+        await coordinator.feed(samples: makeSamples(count: 16_000), elapsedAtBufferStart: 0.4)
+        // +500ms of drift: real, but well inside `anchorDriftToleranceMs` -- an anchor that twitched
+        // here would make turn timestamps non-monotonic against each other for no benefit.
+        await coordinator.feed(samples: makeSamples(count: 16_000), elapsedAtBufferStart: 1.9)
+        // Negative drift (more audio fed than wall time allows, i.e. rounding/boundary jitter) must
+        // never walk the anchor backwards -- that would undo a legitimate gap correction.
+        await backend.enqueueProcessResult(
+            makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 4, endFrame: 6)])
+        )
+        await coordinator.feed(samples: makeSamples(count: 16_000), elapsedAtBufferStart: 1.0)
+
+        let turns = try await handle.readDiarizationTurns()
+        #expect(turns == [DiarizationTurn(slot: "spk_1", startMs: 2_400, endMs: 3_400)], "the anchor must still be the original 400ms")
+    }
+
+    @Test("the anchor is re-established per generation, not carried over from the previous segment")
+    func anchorIsResetOnEveryBeginSegment() async throws {
+        let directory = makeTempSessionDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = SessionHandle(directoryURL: directory, meta: baseMeta())
+        let backend = MockDiarizationBackend()
+        let coordinator = RealtimeDiarizationCoordinator(sessionHandle: handle, backend: backend)
+
+        await coordinator.beginSegment(startMsOffset: 0, hasSystemAudio: true)
+        await coordinator.feed(samples: makeSamples(count: 16_000), elapsedAtBufferStart: 5.0)
+        await coordinator.endSegment(reason: .paused)
+
+        // The next segment's `AudioCapture.start()` restarts the capture clock, so a 5s anchor from the
+        // previous generation would push every turn of this one 5s into the future.
+        await coordinator.beginSegment(startMsOffset: 9_000, hasSystemAudio: true)
+        await backend.enqueueProcessResult(makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 0, endFrame: 2)]))
+        await coordinator.feed(samples: makeSamples(count: 16_000), elapsedAtBufferStart: 0.1)
+
+        let turns = try await handle.readDiarizationTurns()
+        // The first generation produced no turn at all, so numbering still starts at spk_1 here; what
+        // matters is the timestamp: 9,000ms base offset + this generation's own 100ms anchor.
+        #expect(turns.last == DiarizationTurn(slot: "spk_1", startMs: 9_100, endMs: 10_100))
+    }
+
+    // MARK: - Overlap exclusion from enroll audio (design section 5's "実装時の追記 2026-08-01")
+
+    @Test("subtractingOverlaps returns the whole range when nothing overlaps it")
+    func subtractingOverlapsWithNoOverlap() {
+        #expect(RealtimeDiarizationCoordinator.subtractingOverlaps(from: 0..<100, excluding: []) == [0..<100])
+        #expect(
+            RealtimeDiarizationCoordinator.subtractingOverlaps(from: 0..<100, excluding: [200..<300, 100..<150]) == [0..<100],
+            "a range that merely touches the end (100..<150) shares no sample with 0..<100"
+        )
+    }
+
+    @Test("subtractingOverlaps removes overlapping stretches, merging unsorted and mutually-overlapping exclusions")
+    func subtractingOverlapsRemovesOverlappingStretches() {
+        // Head, middle and tail overlaps, supplied out of order and overlapping each other.
+        #expect(RealtimeDiarizationCoordinator.subtractingOverlaps(from: 0..<100, excluding: [40..<60]) == [0..<40, 60..<100])
+        #expect(RealtimeDiarizationCoordinator.subtractingOverlaps(from: 0..<100, excluding: [-50..<30]) == [30..<100])
+        #expect(RealtimeDiarizationCoordinator.subtractingOverlaps(from: 0..<100, excluding: [80..<500]) == [0..<80])
+        #expect(
+            RealtimeDiarizationCoordinator.subtractingOverlaps(from: 0..<100, excluding: [70..<90, 10..<20, 15..<30]) == [0..<10, 30..<70, 90..<100]
+        )
+    }
+
+    @Test("subtractingOverlaps returns nothing when the range is fully covered, and ignores empty inputs")
+    func subtractingOverlapsWithFullCoverageOrEmptyInputs() {
+        #expect(RealtimeDiarizationCoordinator.subtractingOverlaps(from: 0..<100, excluding: [0..<100]).isEmpty)
+        #expect(RealtimeDiarizationCoordinator.subtractingOverlaps(from: 0..<100, excluding: [-10..<50, 50..<110]).isEmpty)
+        #expect(RealtimeDiarizationCoordinator.subtractingOverlaps(from: 0..<0, excluding: []).isEmpty, "an empty range yields nothing")
+        #expect(
+            RealtimeDiarizationCoordinator.subtractingOverlaps(from: 0..<100, excluding: [50..<50]) == [0..<100],
+            "an empty exclusion subtracts nothing"
+        )
+    }
+
+    @Test("audio a second slot was also speaking over is excluded from the first slot's enroll audio, even within one finalized batch")
+    func simultaneousSpeechIsExcludedFromEnrollAudio() async throws {
+        let directory = makeTempSessionDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = SessionHandle(directoryURL: directory, meta: baseMeta())
+        let backend = MockDiarizationBackend()
+        let extractor = FakeVoiceprintExtractor()
+        let coordinator = RealtimeDiarizationCoordinator(
+            sessionHandle: handle,
+            backend: backend,
+            voiceprintExtractor: extractor,
+            voiceprintStore: makeTempVoiceprintStore(),
+            minEnrollSpeechMs: 1_000,
+            speakerMatchThreshold: 0.5
+        )
+
+        await coordinator.beginSegment(startMsOffset: 0, hasSystemAudio: true)
+        // spk_1 talks for the whole 2s; spk_2 joins in over its second half. Both turns finalize in the
+        // *same* batch -- the ordering case a single-pass loop would only have handled in one direction.
+        await backend.enqueueProcessResult(
+            makeUpdate(finalizedSegments: [
+                makeSegment(speakerIndex: 0, startFrame: 0, endFrame: 2, frameDurationSeconds: 1.0),
+                makeSegment(speakerIndex: 1, startFrame: 1, endFrame: 2, frameDurationSeconds: 1.0),
+            ])
+        )
+        let soloAudio = Array(repeating: Float(1), count: 16_000)
+        let overlappedAudio = Array(repeating: Float(2), count: 16_000)
+        await coordinator.feed(samples: soloAudio + overlappedAudio, elapsedAtBufferStart: 0)
+
+        try await waitUntil { await extractor.callCount == 1 }
+        try await Task.sleep(for: .milliseconds(100))
+
+        #expect(await extractor.callCount == 1, "spk_2's turn is fully overlapped, so it must contribute no enroll audio at all")
+        let received = await extractor.receivedSamples[0]
+        #expect(received.count == 16_000, "only spk_1's non-overlapping first second may be enrolled")
+        #expect(received.allSatisfy { $0 == 1 }, "not a single sample of the simultaneous-speech stretch may reach the voiceprint")
+    }
+
+    // MARK: - Milestone re-extraction (design section 5's "実装時の追記 2026-08-01")
+
+    @Test("an anonymous slot is re-extracted at 3x and 6x min_enroll_speech_ms, and never a fourth time")
+    func anonymousSlotIsReExtractedAtEachMilestoneUpToThreeTimes() async throws {
+        let directory = makeTempSessionDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = SessionHandle(directoryURL: directory, meta: baseMeta())
+        let backend = MockDiarizationBackend()
+        let extractor = FakeVoiceprintExtractor()
+        // Empty voiceprint DB: nothing ever matches, so the slot stays anonymous and keeps qualifying
+        // for re-extraction -- the exact field situation this milestone scheme was added for.
+        let coordinator = RealtimeDiarizationCoordinator(
+            sessionHandle: handle,
+            backend: backend,
+            voiceprintExtractor: extractor,
+            voiceprintStore: makeTempVoiceprintStore(),
+            minEnrollSpeechMs: 1_000,
+            speakerMatchThreshold: 0.5
+        )
+
+        await coordinator.beginSegment(startMsOffset: 0, hasSystemAudio: true)
+        // Seven 1s turns for one slot: cumulative 1s, 2s, ... 7s against milestones at 1s / 3s / 6s.
+        var expectedCallCounts: [Int] = []
+        for index in 0..<7 {
+            await backend.enqueueProcessResult(
+                makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: index, endFrame: index + 1, frameDurationSeconds: 1.0)])
+            )
+            await coordinator.feed(samples: makeSamples(value: Float(index), count: 16_000), elapsedAtBufferStart: TimeInterval(index))
+            expectedCallCounts.append([1, 1, 2, 2, 2, 3, 3][index])
+            try await waitUntil { await extractor.callCount == expectedCallCounts[index] }
+            // Any *extra* extraction would also have to happen right here, so a short settle before the
+            // next feed is what makes the per-step equality assertion meaningful.
+            try await Task.sleep(for: .milliseconds(50))
+            #expect(await extractor.callCount == expectedCallCounts[index], "cumulative \(index + 1)s must have produced exactly \(expectedCallCounts[index]) extraction(s)")
+        }
+
+        let receivedCounts = await extractor.receivedSamples.map(\.count)
+        #expect(
+            receivedCounts == [16_000, 48_000, 96_000],
+            "each milestone must hand over everything accumulated so far (1s / 3s / 6s), not just the newest turn"
+        )
+    }
+
+    @Test("a slot named since its first extraction is never re-extracted, and its embedding is left untouched")
+    func aNamedSlotIsNeverReExtracted() async throws {
+        let directory = makeTempSessionDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = SessionHandle(directoryURL: directory, meta: baseMeta())
+        let backend = MockDiarizationBackend()
+        let extractor = FakeVoiceprintExtractor()
+        let firstEmbedding: [Float] = [1, 0, 0, 0]
+        await extractor.setEmbeddingResult(firstEmbedding)
+        let coordinator = RealtimeDiarizationCoordinator(
+            sessionHandle: handle,
+            backend: backend,
+            voiceprintExtractor: extractor,
+            voiceprintStore: makeTempVoiceprintStore(),
+            minEnrollSpeechMs: 1_000,
+            speakerMatchThreshold: 0.5
+        )
+
+        await coordinator.beginSegment(startMsOffset: 0, hasSystemAudio: true)
+        await backend.enqueueProcessResult(
+            makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: 0, endFrame: 1, frameDurationSeconds: 1.0)])
+        )
+        await coordinator.feed(samples: makeSamples(count: 16_000), elapsedAtBufferStart: 0)
+        try await waitUntil {
+            let assignments = try? await handle.readSpeakerAssignments()
+            return assignments?.assignments["spk_1"]?.embedding != nil
+        }
+
+        // The user names the slot before it reaches the second milestone.
+        try await handle.updateSpeakerAssignments { assignments in
+            var current = assignments.assignments["spk_1"] ?? SlotAssignment()
+            current.displayName = "佐藤さん"
+            current.assignedBy = .user
+            assignments.assignments["spk_1"] = current
+        }
+        await extractor.setEmbeddingResult([9, 9, 9, 9])
+
+        // Two more 1s turns take the slot to 3s cumulative -- the second milestone, which must now be
+        // declined rather than overwrite a named slot's embedding with milestone-picked audio.
+        for index in 1..<3 {
+            await backend.enqueueProcessResult(
+                makeUpdate(finalizedSegments: [makeSegment(speakerIndex: 0, startFrame: index, endFrame: index + 1, frameDurationSeconds: 1.0)])
+            )
+            await coordinator.feed(samples: makeSamples(count: 16_000), elapsedAtBufferStart: TimeInterval(index))
+        }
+        try await Task.sleep(for: .milliseconds(200))
+
+        #expect(await extractor.callCount == 1, "a named slot must not pay for another WeSpeaker inference")
+        let assignments = try await handle.readSpeakerAssignments()
+        let slot = try #require(assignments.assignments["spk_1"])
+        #expect(slot.embedding == firstEmbedding, "the named slot's embedding must survive the declined re-extraction")
+        #expect(slot.displayName == "佐藤さん")
+        #expect(slot.assignedBy == .user)
     }
 }

@@ -424,6 +424,22 @@ rematch（design 22 §3）は `display_name != nil` の slot を巻き戻さな�
   用いる（coordinator の `rematchAnonymousSlots()` は `DiarizationCoordinating` プロトコル非公開で、
   名簿無変化では内部起動しないため。両経路とも同じ actor 直列化書き込み + 名簿再検証 guard を通る）
 
+### 6.5 声紋抽出のマイルストーン化との関係（2026-08-01 追記）
+
+13 章 5 節の 2026-08-01 追記で、live 抽出が「slot ごとに 1 回だけ」から「累計発話量
+`min_enroll_speech_ms` の 1 / 3 / 6 倍で最大 3 回」に変わった。本章の各対策との関係を明示する。
+
+- **§6.4 の再照合リセットと噛み合う**: リセット後の slot は `display_name = null` / `assigned_by = "auto"`
+  の匿名 auto slot に戻るので、以降のマイルストーンに達すれば**再抽出の対象になる**。誤マッチの原因が
+  「冒頭 10 秒の質の悪い embedding」だった場合、訂正済み名簿での再照合に加えて、より長い発話から
+  作り直した embedding でも照合し直せる。両者は独立に効き、順序に依存しない
+- **命名済み slot は再抽出しない**（13 章 5 節）。§5 の override enrollment や Ended 時 EMA が入力に
+  するのは `speaker_assignments.json` の embedding なので、時間だけで選ばれた音声で上書きすると
+  1 節の「学習」層の汚染を新しい経路で再現してしまう。`.user` はもちろん `.auto` で実名確定済みの
+  slot も対象外
+- **距離ログ（§3.3）の `trigger`**: 再抽出由来の照合は `trigger=re-extract` で出す。`live` / `rematch` と
+  区別できるので、同じ slot が複数回ログに出ても閾値チューニングの材料として読める
+
 ## 7. config.yaml（変更まとめ）
 
 ```yaml

@@ -278,6 +278,121 @@ struct SegmentAttributionAttributeTests {
         #expect(fromInOrder == fromReversed)
     }
 
+    // MARK: - Coverage gate (design section 5.3 rule 1b, 2026-08-01)
+
+    @Test("a sliver of turn inside a long segment is unattributed, not attributed to the sliver's slot")
+    func thinCoverageOnALongSegmentIsUnattributed() {
+        // A 10s segment -> trim = 1500 -> trimmed [1500, 8500] (length 7000). One 200ms turn sits
+        // inside it: union 200 < 300 and 200/7000 = 2.9% < 50%, so both gate conditions fail.
+        // This is the real-session phantom the gate exists for -- before it, this named spk_1 as the
+        // speaker of a ten-second sentence.
+        let result = SegmentAttribution.attribute(
+            startMs: 0,
+            endMs: 10_000,
+            turns: [DiarizationTurn(slot: "spk_1", startMs: 3_000, endMs: 3_200)]
+        )
+
+        #expect(result.label == .unattributed)
+        // The raw occupancy breakdown is still reported -- only the *label* is withheld.
+        #expect(result.occupancies == [SlotOccupancy(slot: "spk_1", overlapMs: 200)])
+    }
+
+    @Test("a short 相槌 segment fully covered by one turn stays .single despite a sub-300ms union")
+    func shortFullyCoveredSegmentStaysSingle() {
+        // A 400ms segment -> trim = 60 -> trimmed [60, 340] (length 280). The turn covers all 280ms:
+        // union 280 < 300 (first condition holds) but 280/280 = 100% >= 50%, so the segment is still
+        // attributed. This OR escape hatch is what keeps 「はい」/「なるほど」 from being silenced.
+        let result = SegmentAttribution.attribute(
+            startMs: 0,
+            endMs: 400,
+            turns: [DiarizationTurn(slot: "spk_1", startMs: 0, endMs: 400)]
+        )
+
+        #expect(result.label == .single(slot: "spk_1"))
+    }
+
+    @Test("union exactly at minAttributionUnionMs is attributed (the floor is exclusive)")
+    func unionAtTheFloorIsAttributed() {
+        // 10s segment, trimmed [1500, 8500]. A 300ms turn: union == 300, which is *not* < 300, so the
+        // gate does not fire even though the coverage ratio (4.3%) is far below 50%.
+        let result = SegmentAttribution.attribute(
+            startMs: 0,
+            endMs: 10_000,
+            turns: [DiarizationTurn(slot: "spk_1", startMs: 3_000, endMs: 3_300)]
+        )
+
+        #expect(result.label == .single(slot: "spk_1"))
+    }
+
+    @Test("union one millisecond below the floor, with sub-50% coverage, is unattributed")
+    func unionJustBelowTheFloorIsUnattributed() {
+        let result = SegmentAttribution.attribute(
+            startMs: 0,
+            endMs: 10_000,
+            turns: [DiarizationTurn(slot: "spk_1", startMs: 3_000, endMs: 3_299)]
+        )
+
+        #expect(result.label == .unattributed)
+    }
+
+    @Test("coverage exactly at shortSegmentCoverageRatio is attributed (the ratio floor is exclusive too)")
+    func coverageAtTheRatioFloorIsAttributed() {
+        // A 400ms segment -> trimmed [60, 340] (length 280). A 140ms turn is exactly 50% of it, and
+        // the union (140) is under the 300ms floor -- so only the ratio condition can save it.
+        let result = SegmentAttribution.attribute(
+            startMs: 0,
+            endMs: 400,
+            turns: [DiarizationTurn(slot: "spk_1", startMs: 60, endMs: 200)]
+        )
+
+        #expect(result.label == .single(slot: "spk_1"))
+    }
+
+    @Test("coverage one millisecond below the ratio floor, with a sub-300ms union, is unattributed")
+    func coverageJustBelowTheRatioFloorIsUnattributed() {
+        // Same 280ms trimmed range, one millisecond less turn: 139/280 = 49.6% < 50%, union 139 < 300.
+        let result = SegmentAttribution.attribute(
+            startMs: 0,
+            endMs: 400,
+            turns: [DiarizationTurn(slot: "spk_1", startMs: 60, endMs: 199)]
+        )
+
+        #expect(result.label == .unattributed)
+    }
+
+    @Test("the gate also suppresses a would-be .mixed label, not only .single")
+    func thinCoverageSuppressesMixedToo() {
+        // Two slots, 100ms each, inside a 10s segment: union 200 < 300 and 200/7000 < 50%. Without the
+        // gate this would render as 「A + B」 -- naming *two* wrong people instead of one.
+        let result = SegmentAttribution.attribute(
+            startMs: 0,
+            endMs: 10_000,
+            turns: [
+                DiarizationTurn(slot: "spk_1", startMs: 3_000, endMs: 3_100),
+                DiarizationTurn(slot: "spk_2", startMs: 4_000, endMs: 4_100)
+            ]
+        )
+
+        #expect(result.label == .unattributed)
+    }
+
+    @Test("singleDominantSlot inherits the gate, so a phantom turn never seeds a voiceprint sample")
+    func singleDominantSlotInheritsTheGate() {
+        // `OverrideEnrollmentSampleResolver`/`DisputedSlotDetector` both adopt samples only from
+        // `.single` segments (design 20 section 6.1); the gate must reach them through `attribute`.
+        #expect(SegmentAttribution.singleDominantSlot(
+            startMs: 0,
+            endMs: 10_000,
+            turns: [DiarizationTurn(slot: "spk_1", startMs: 3_000, endMs: 3_200)]
+        ) == nil)
+
+        #expect(SegmentAttribution.singleDominantSlot(
+            startMs: 0,
+            endMs: 10_000,
+            turns: [DiarizationTurn(slot: "spk_1", startMs: 0, endMs: 10_000)]
+        ) == "spk_1")
+    }
+
     /// A brute-force, deliberately-`O(n^2)` reference for `hasOverlapMarker` (midpoint-sampling every
     /// breakpoint against every interval, exactly what `computeHasOverlapMarker`'s pre-sweep-rewrite
     /// implementation did) -- used only by `sweepMatchesBruteForceReferenceOverRandomTurns` below to

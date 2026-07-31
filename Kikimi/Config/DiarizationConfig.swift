@@ -47,6 +47,26 @@ struct DiarizationConfig: Codable, Equatable, Sendable {
     /// the margin check entirely, reproducing the pre-margin "distance < threshold" behavior (design
     /// section 3.4: "0 でマージン判定を無効化（従来挙動）").
     var speakerMatchMargin: Double
+    /// LS-EEND posterior threshold above which a frame starts counting as speech, forwarded to
+    /// FluidAudio's `DiarizerTimelineConfig.onsetThreshold`
+    /// (`LSEENDDiarizationBackend.makeTimelineConfig(frameDurationSeconds:)`). Must be strictly
+    /// between 0 and 1; anything else falls back to the default (see `init(from:)`).
+    var onsetThreshold: Double
+    /// LS-EEND posterior threshold below which an in-progress speech run ends
+    /// (`DiarizerTimelineConfig.offsetThreshold`). Kept separate from `onsetThreshold` so the pair can
+    /// be used as a hysteresis band (offset < onset) once real sessions justify one. Same 0 < x < 1
+    /// validation as `onsetThreshold`.
+    var offsetThreshold: Double
+    /// Minimum turn length (ms) FluidAudio keeps: shorter runs of speech are discarded outright
+    /// (`DiarizerTimelineConfig.minFramesOn`, converted from ms by
+    /// `LSEENDDiarizationBackend.timelineFrames(ms:frameDurationSeconds:)`). `0` restores FluidAudio's
+    /// own pass-through default. Non-zero by default because real sessions produced 0.2 s phantom turns
+    /// that `SegmentAttribution` then attributed whole segments from.
+    var minDurationOnMs: Int
+    /// Minimum silence (ms) between two turns of the same slot: shorter gaps are closed, merging the
+    /// two turns (`DiarizerTimelineConfig.minFramesOff`). `0` restores FluidAudio's pass-through
+    /// default.
+    var minDurationOffMs: Int
 
     enum CodingKeys: String, CodingKey {
         case enabled
@@ -56,6 +76,10 @@ struct DiarizationConfig: Codable, Equatable, Sendable {
         case minEnrollSpeechMs = "min_enroll_speech_ms"
         case speakerMatchThreshold = "speaker_match_threshold"
         case speakerMatchMargin = "speaker_match_margin"
+        case onsetThreshold = "onset_threshold"
+        case offsetThreshold = "offset_threshold"
+        case minDurationOnMs = "min_duration_on_ms"
+        case minDurationOffMs = "min_duration_off_ms"
     }
 
     /// The exact defaults documented in design section 7's `config.yaml` sample, plus
@@ -70,14 +94,30 @@ struct DiarizationConfig: Codable, Equatable, Sendable {
     /// 447 flagged as a future step. This is the same threshold live diarization uses to accept an
     /// auto-match (`RealtimeDiarizationCoordinator`), so the tighter value also makes auto-matching
     /// during a meeting stricter, not just the Settings warning quieter.
+    /// `minEnrollSpeechMs` is `10_000`, not the design's original `5000`: `VoiceprintExtractor`'s
+    /// WeSpeaker model takes a **fixed 10-second** input window (`waveformShape = [3, 160_000]`), so a
+    /// 5-second gate lets a voiceprint be extracted from audio that is half zero-padding, which makes
+    /// the resulting embedding unstable (and therefore the cosine distances every match/merge decision
+    /// is built on). Raising the gate to the model's own window length costs only "the slot enrolls a
+    /// bit later" and buys embeddings computed from a fully populated window.
+    ///
+    /// The `onset*`/`offset*`/`minDuration*` group is the LS-EEND timeline post-processing FluidAudio
+    /// otherwise leaves entirely off (its own `DiarizerTimelineConfig.default` is a pass-through:
+    /// thresholds 0.5, every frame count 0). Real sessions produced 0.2-second phantom turns under that
+    /// pass-through, so `minDurationOnMs`/`minDurationOffMs` default to `250` — long enough to drop a
+    /// single spurious posterior blip, short enough to keep a genuine one-word 相槌.
     static let `default` = DiarizationConfig(
         enabled: true,
         selfName: "自分",
         stepMs: 500,
         variant: "callhome",
-        minEnrollSpeechMs: 5_000,
+        minEnrollSpeechMs: 10_000,
         speakerMatchThreshold: 0.45,
-        speakerMatchMargin: 0.05
+        speakerMatchMargin: 0.05,
+        onsetThreshold: 0.5,
+        offsetThreshold: 0.5,
+        minDurationOnMs: 250,
+        minDurationOffMs: 250
     )
 
     init(
@@ -87,7 +127,11 @@ struct DiarizationConfig: Codable, Equatable, Sendable {
         variant: String,
         minEnrollSpeechMs: Int,
         speakerMatchThreshold: Double,
-        speakerMatchMargin: Double
+        speakerMatchMargin: Double,
+        onsetThreshold: Double = 0.5,
+        offsetThreshold: Double = 0.5,
+        minDurationOnMs: Int = 250,
+        minDurationOffMs: Int = 250
     ) {
         self.enabled = enabled
         self.selfName = selfName
@@ -96,6 +140,10 @@ struct DiarizationConfig: Codable, Equatable, Sendable {
         self.minEnrollSpeechMs = minEnrollSpeechMs
         self.speakerMatchThreshold = speakerMatchThreshold
         self.speakerMatchMargin = speakerMatchMargin
+        self.onsetThreshold = onsetThreshold
+        self.offsetThreshold = offsetThreshold
+        self.minDurationOnMs = minDurationOnMs
+        self.minDurationOffMs = minDurationOffMs
     }
 
     private static let logger = Logger(subsystem: "io.github.uphy.Kikimi", category: "DiarizationConfig")
@@ -138,5 +186,61 @@ struct DiarizationConfig: Codable, Equatable, Sendable {
         } else {
             speakerMatchMargin = decodedSpeakerMatchMargin
         }
+
+        onsetThreshold = try Self.decodeThreshold(container, forKey: .onsetThreshold, default: Self.default.onsetThreshold)
+        offsetThreshold = try Self.decodeThreshold(container, forKey: .offsetThreshold, default: Self.default.offsetThreshold)
+        minDurationOnMs = try Self.decodeDurationMs(container, forKey: .minDurationOnMs, default: Self.default.minDurationOnMs)
+        minDurationOffMs = try Self.decodeDurationMs(container, forKey: .minDurationOffMs, default: Self.default.minDurationOffMs)
+    }
+
+    /// A posterior threshold (`onset_threshold`/`offset_threshold`) must sit strictly inside `(0, 1)`:
+    /// `0` would mark every frame as speech and `1` would mark none, both of which silently destroy
+    /// diarization rather than merely tuning it. Out-of-range values are therefore treated as
+    /// misconfiguration (kikimi.md's logging rules → `.warning`) and folded back to the default, the
+    /// same shape `stepMs`/`variant` already use in `DiarizationBackend.swift` -- unlike
+    /// `speakerMatchMargin`'s clamp, where the out-of-range value still has an unambiguous intended
+    /// meaning.
+    private static func decodeThreshold(
+        _ container: KeyedDecodingContainer<CodingKeys>,
+        forKey key: CodingKeys,
+        default defaultValue: Double
+    ) throws -> Double {
+        guard let decoded = try container.decodeIfPresent(Double.self, forKey: key) else {
+            return defaultValue
+        }
+        guard decoded > 0, decoded < 1 else {
+            logger.warning(
+                """
+                diarization.\(key.rawValue, privacy: .public)=\(decoded, privacy: .public) must be \
+                strictly between 0 and 1; falling back to \(defaultValue, privacy: .public)
+                """
+            )
+            return defaultValue
+        }
+        return decoded
+    }
+
+    /// A duration gate (`min_duration_on_ms`/`min_duration_off_ms`) is clamped to `0` rather than
+    /// folded back to the default when negative, mirroring `speakerMatchMargin`: `0` is FluidAudio's
+    /// own "no post-processing" value, so a negative number's only coherent reading is "turn this gate
+    /// off", and silently restoring the (non-zero) default would do the opposite of what was asked.
+    private static func decodeDurationMs(
+        _ container: KeyedDecodingContainer<CodingKeys>,
+        forKey key: CodingKeys,
+        default defaultValue: Int
+    ) throws -> Int {
+        guard let decoded = try container.decodeIfPresent(Int.self, forKey: key) else {
+            return defaultValue
+        }
+        guard decoded >= 0 else {
+            logger.warning(
+                """
+                diarization.\(key.rawValue, privacy: .public)=\(decoded, privacy: .public) must be \
+                >= 0; clamping to 0 (gate disabled)
+                """
+            )
+            return 0
+        }
+        return decoded
     }
 }

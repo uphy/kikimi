@@ -24,7 +24,11 @@
   電話会話ドメインがコーデック圧縮されたオンライン会議音声に最も近いため）。config
   `diarization.variant` で切替可能にし、既定を `callhome` にしている。なお同一音声で
   Sortformer は 4 話者を検出（372s/37s/6s/1.8s）しており、4 話者以下の会議では Sortformer
-  backend の追加が将来の改善候補（14 章）
+  backend の追加が将来の改善候補（14 章）。
+  【2026-08-01 追記】実会議 WAV 3 本でのオフライン再計測（design 21 §9）で callhome 採用を
+  再確認した: ami / dihard2 は確定 2 話者の会議を 1 話者に併合し、onset/offset を 0.4 / 0.3 に
+  下げても検出話者数は増えず、Sortformer はトラック数こそ増やすがユーザー確定済みの 2 話者を
+  同一トラックに併合した（話者数カウントだけでは優劣を判定できない教訓を含め design 21 §9 参照）
 - **混在セグメントのトークンタイムスタンプ分割を R3 として計画している**: 「Speaker 1 +
   Speaker 2」の混在表示（5.3 節規則 2）を、発話境界で複数セグメントに分割した表示・export に
   進化させる（5.4 節「順次交代」ケース。同時発話は対象外のまま）。着手は **R2 完了後**（表示解決・
@@ -179,7 +183,7 @@ transcript.jsonl のセグメント（speaker: "system"）
 - `display_name == null` の slot は UI で「Speaker 2」と表示
 - `embedding`: coordinator が声紋抽出に成功した時点で保存する（**メモリ保持契約にしない**。
   Paused でウィンドウを閉じて別プロセス起動後に会議終了しても、Ended 時の移動平均更新・
-  リネーム時の新規登録がファイルから復元できる）。未抽出（発話 5 秒未満・抽出失敗）は `null`
+  リネーム時の新規登録がファイルから復元できる）。未抽出（発話が `min_enroll_speech_ms` 未満・抽出失敗）は `null`
 - slot は不変（4.2 節）なので、このファイルの割り当てが後から無効化されることはない。
   リネームはいつでも可能（Recording 中を含む。6.1 節）
 - 同一人物が複数 slot に分裂した場合（diarizer 再作成後の続番採番。5.1 節）は、両方の slot に
@@ -246,7 +250,7 @@ transcript.jsonl のセグメント（speaker: "system"）
      使って各録音区間の `system_NNN.wav` 内サンプル範囲に変換する。turn が区間境界をまたぐ場合は
      区間ごとに分割し、時系列順に累計 `VoiceprintExtractor.maxSampleCount`
      （FluidAudio の抽出窓固定値、10 秒 @16kHz = 160,000 samples）で打ち切る。累積発話が
-     `min_enroll_speech_ms`（既定 5000ms）未満なら抽出自体を行わない（従来どおり local-only）
+     `min_enroll_speech_ms`（既定 10000ms。7 章の 2026-08-01 追記）未満なら抽出自体を行わない（従来どおり local-only）
   2. `AVAudioFileSampleReader`（`Kikimi/Diarization/SessionAudioSampleReader.swift`）で該当区間の
      WAV から実サンプルを読み出す。`AVAudioFile` を再利用（`TestFileAudioSource` と同じ経路）
      することで独自の `fmt `/`data` チャンクパーサや Int16→Float32 正規化を新設せずに済ませて
@@ -336,10 +340,43 @@ if let update = try diarizer.process() {
 }
 ```
 
-**声紋照合（イベント駆動）**: 新しい slot の発話が累計 `min_enroll_speech_ms`（既定 5000ms）に
+**声紋照合（イベント駆動）**: 新しい slot の発話が累計 `min_enroll_speech_ms`（既定 10000ms。7 章の 2026-08-01 追記）に
 達した時点で WeSpeaker embedding を 1 回抽出し、`speaker_assignments.json` の当該 slot に保存した
 うえでグローバル DB と照合。マッチしたら `assigned_by: "auto"` で実名を書く（user 割り当てが
 あれば触らない）。
+
+**enroll 音声からの同時発話区間の除外（2026-08-01 追記）**: turn の時間範囲をそのまま切り出すのを
+やめ、**他 slot の turn と重なる区間を差し引いた残りだけ**を enroll 音声に積む。
+
+- LS-EEND は同時発話を「時間的に重なる 2 本の turn」として出す。素直に切り出すと重なり区間の音声が
+  両方の slot の声紋に入り、2 人の embedding が互いに（さらに第三者へも）引き寄せられる。閾値を
+  どう調整しても直らない種類の汚染なので、入力の側で断つ
+- 全区間が他 slot と重なる turn は enroll に一切寄与しない（0 サンプル）。「重なりの少ない発話だけで
+  声紋を作る」ほうが、量を稼いで混ざるより常に良い
+- 判定は**同一バッチ内の turn も対象**にする。同時発話はまさに同じ `finalizedSegments` で確定するため、
+  「slot を確定してサンプル範囲を記録する」パスと「enroll に積む」パスの 2 パスに分けて実装する
+  （1 パスだと配列で先に来た側からしか差し引けない）
+- 区間差分は純関数（`RealtimeDiarizationCoordinator.subtractingOverlaps(from:excluding:)`）に切り出し、
+  単体テストで担保する
+
+**匿名 slot の声紋再抽出（2026-08-01 追記）**: 「slot ごとに 1 回だけ抽出」の one-shot 契約をやめ、
+累計発話量のマイルストーン方式（`min_enroll_speech_ms` の **1 倍 / 3 倍 / 6 倍**、最大 3 回）にする。
+
+- 実データでは、会議冒頭の 10 秒で作った embedding が `speaker_match_threshold` をわずかに超えられず、
+  以後どれだけ長く話しても匿名のままで終わる slot が多発した。one-shot 契約には「もっと良い音声が
+  溜まった時点でやり直す」機会が構造的に存在しない
+- 2 回目以降は**その slot がまだ匿名（`display_name == null` かつ `assigned_by != "user"`）のときだけ**
+  実行する。判定は抽出タスクの中で `speaker_assignments.json` を読み直して行い、命名済みなら
+  **embedding も上書きせず**中止する（命名済み slot の embedding は 4.4 節の Ended 時 EMA / リネーム時
+  登録の入力になるため、時間だけで選んだ音声で置き換えると登録済み話者を劣化させ得る）
+- 試行回数はマイルストーン到達時点で先に加算する。抽出が失敗しても同じマイルストーンでは再試行せず、
+  次のマイルストーンまで待つ（8 章の「抽出失敗 → その slot は匿名のまま」を維持したまま、失敗が
+  ループにならないようにする）
+- 初回抽出後も enroll 音声の蓄積は続けるが、保持するのは抽出窓（`VoiceprintExtractor.maxSampleCount`
+  = 10 秒）の直近サフィックスだけに切り詰める。マイルストーン進捗は別カウンタ（累計サンプル数）で
+  追跡するので、バッファを切り詰めても判定は狂わない
+- 名簿再照合（design 22 §3）は永続化された embedding を読むだけなので、再抽出で新しくなった embedding に
+  自動で追随する（再抽出は照合の再実行を必要としない）
 
 ### 5.1 diarizer の（再）作成と区間境界の共通規則
 
@@ -374,6 +411,29 @@ Paused 跨ぎで維持する」経路は実装しない。結果として、一�
 インスタンス内フィード時間と録音アクティブ時間が一致し続け、基点の付け直しは不要。
 **「オフセット加算不要」が成り立つのは同一インスタンス継続中だけ**であり、（再）作成時に基点を
 取り直さないと過去区間の turn と時刻が衝突してセグメント帰属が全面的に壊れる。
+
+**タイムスタンプのアンカー補正（2026-08-01 追記）**: 上の「turn の時刻 = 基点 + インスタンス内の累積
+フィード時間」には、**capture クロックとのズレ**という前提の穴があった。実装では次のように補正する。
+
+- transcript のセグメント時刻は AudioCapture の capture クロック（`AudioCapture.start()` からの経過秒。
+  `SttEngine.feed(samples:elapsedAtBufferStart:)` の引数）由来。一方 diarization の turn 時刻は
+  「coordinator にフィードした累計サンプル数」由来だった。システム音声 tap は aggregate device の
+  作成等で `AudioCapture.start()` から**数百 ms 遅れて**最初のバッファを出すため、turn 全体がその
+  ぶん一貫して早くなり、5.2 節の帰属が turn 境界付近のセグメントで誤る
+- 対策: pipeline → coordinator の転送で `elapsed_at_buffer_start` も渡し（`onSystemAudio` の第 2 引数）、
+  世代ごとに `anchor = elapsed − 累計フィード時間` を持つ。turn 時刻 = **基点 + anchor + フレーム時刻**、
+  稼働時間範囲の `end_ms` も同様に anchor を加算する
+- anchor は**世代ごとに取り直す**（`beginSegment` で null に戻す）。区間ごとに `AudioCapture` が
+  作り直されて capture クロックも 0 から始まるため、前世代の anchor を持ち越すと丸ごとずれる
+- **ドリフト再アンカー**: 以降のバッファで `drift = elapsed − (anchor + 累計フィード時間)` を監視し、
+  +1000ms を超えたら anchor を drift ぶん進める（warning ログ）。正のドリフトは「バッファが欠落して
+  backend に届かなかった」ことを意味し、放置するとその区間の残り全部が早くなる。負方向は補正しない
+  （丸め・バッファ境界のゆらぎでしか出ず、補正すると正当な再アンカーを巻き戻す）。閾値未満のゆらぎも
+  無視する（毎バッファ anchor が揺れるほうが turn 同士の時刻の一貫性を壊す）
+- **声紋スライスには anchor を適用しない**。スライス対象の生サンプルバッファは backend と同じ
+  `feed` で埋まるので backend のフレームカーソルと同じ index 空間にあり、ここで anchor を足すと
+  tap 起動遅延ぶん**ずれた位置の音声**を切り出すことになる。適用箇所は turn の永続化と稼働時間範囲の
+  終端の 2 箇所だけ
 
 **slot 採番**: coordinator が LS-EEND 内部の slot index → セッション slot ID（`spk_1` 起点の連番）の
 マッピングを保持する。新しい内部 index が現れたら次の連番を割り当てる。（再）作成後は内部 index が
@@ -442,6 +502,19 @@ seg_00042 (start 125300 / end 128100)
 - 閾値（30% / 先頭末尾 15% / `unattributed_grace_ms` 3000ms）はハードコードせず定数化
   （config には出さない。実戦で調整してから公開を判断）
 
+**最低カバレッジ要件（2026-08-01 追記・規則 1b）**: 規則 1 と規則 2 の間に「turn の裏付けが薄すぎる
+セグメントは名前を出さない」ゲートを挟む。占有率の分母（＝いずれかの turn と重複した時間の合計、
+5.2 節）が `min_attribution_union_ms`（定数・既定 300ms）未満**かつ**中央部の長さに対する比が
+`short_segment_coverage_ratio`（定数・既定 0.5）未満なら、規則 1 と同じ無帰属として扱う。
+
+- **AND 条件である理由**: 「はい」「なるほど」のような短い相槌セグメントは、中央部が turn で
+  ほぼ埋まっていても分母が 300ms に届かない。絶対値の下限だけで切ると相槌が丸ごと無帰属になる。
+  このゲートが狙うのは「長いセグメント × turn の切れ端」であって「短いセグメント」ではない
+- **境界は両方とも排他**: 分母がちょうど 300ms、または比がちょうど 0.5 のときは帰属する
+- `occupancies` と ⚠ マーカーは従来どおり計算して返す（表示・デバッグ用の生データは維持し、
+  伏せるのはラベルだけ）。`singleDominantSlot`（design 20 の 6.1 節の M2 サンプル採用規則）も
+  `attribute` 経由なので同じゲートが効き、偽 turn が声紋サンプルの種になることはない
+
 ### 5.4 限界の明示
 
 - **順次交代**（1 セグメント内で話者が入れ替わる）: 混在表示で対応。トークンタイムスタンプが
@@ -500,12 +573,36 @@ diarization:
   self_name: 自分                    # mic セグメントの表示名
   step_ms: 500                      # LS-EEND step（100/500）
   variant: callhome                 # LS-EEND variant（callhome/dihard3/dihard2/ami）
-  min_enroll_speech_ms: 5000        # 声紋抽出に必要な最低発話量
+  min_enroll_speech_ms: 10000       # 声紋抽出に必要な最低発話量（2026-08-01 に 5000 から変更。下記）
   speaker_match_threshold: 0.45     # 声紋照合の cosine 距離閾値（実測データにより 0.65 から引き下げ。design 20 参照）
   speaker_match_margin: 0.05        # 異名の次点話者との距離差がこれ未満なら曖昧として棄却（design 20）。0 で無効
+  onset_threshold: 0.5              # LS-EEND の発話開始判定の事後確率閾値（0 < x < 1）
+  offset_threshold: 0.5             # LS-EEND の発話終了判定の事後確率閾値（0 < x < 1）
+  min_duration_on_ms: 250           # これ未満の turn は捨てる（0 で FluidAudio 既定の素通し）
+  min_duration_off_ms: 250          # これ未満の無音は閉じて前後の turn を連結する（0 で素通し）
 ```
 
 - グローバル声紋 DB のパスは `storage` 系と同じ規約で `~/.local/state/kikimi/voiceprints.json` 固定
+
+**LS-EEND timeline 後処理の公開（2026-08-01 追記）**: `onset_threshold` / `offset_threshold` /
+`min_duration_on_ms` / `min_duration_off_ms` の 4 キーを追加した。FluidAudio の
+`DiarizerTimelineConfig` は既定が**完全な素通し**（閾値 0.5・フレーム数はすべて 0）で、Kikimi はこれまで
+`timelineConfig` を渡していなかったため、実セッションで 0.2 秒の偽 turn が出ていた。
+
+- 閾値は `0 < x < 1` の範囲外なら warning ログを出して既定へフォールバックする（`step_ms` / `variant`
+  と同じ扱い）。`0` は全フレームを発話、`1` は全フレームを無音にしてしまい「調整」ではなく破壊になるため
+- ms は負値なら warning ログ + `0` にクランプする（`speaker_match_margin` と同じ流儀。`0` は FluidAudio
+  自身の「後処理なし」の値なので、負値の唯一の合理的な解釈は「このゲートを切りたい」）
+- ms → フレーム数の換算は**モデルをロードして `metadata.frameDurationSeconds` を読んだ後**に行う。
+  `DiarizerTimelineConfig` の秒アクセサは代入時点の `frameDurationSeconds` でフレーム数を確定させる一方、
+  `LSEENDDiarizer.init(model:timelineConfig:)` は `frameDurationSeconds` だけを metadata で上書きして
+  フレーム数を再計算しないため、ロード前に組み立てた config はプレースホルダのフレーム長で換算された
+  ゲートを持つことになる（`LSEENDDiarizationBackend.initialize()` が convenience init を使わない理由）
+
+**`min_enroll_speech_ms` の既定変更（2026-08-01）**: 5000 → 10000。WeSpeaker 声紋抽出の入力窓は
+固定 10 秒（`waveformShape = [3, 160_000]`）で、5 秒だと半分がゼロ埋めになり embedding が不安定になる
+（＝ 照合・統合のすべての判断の土台である cosine 距離が不安定になる）。代償は「slot の enroll が少し
+遅くなる」だけ。
 
 ## 8. 失敗モード
 
@@ -652,7 +749,7 @@ R3 で混在セグメント（「田中さん + 佐藤さん」）が発話境�
 
 - LS-EEND dihard3 の日本語 Zoom 音声での実効品質（スパイク 1 が go/no-go）
 - 混在表示の閾値（30%）・中央部計算（先頭末尾 15% 除外）・`unattributed_grace_ms`（3000ms）の実戦調整
-- `min_enroll_speech_ms`（5 秒）で声紋の同一人物再現性が足りるか（スパイク 5）
+- `min_enroll_speech_ms`（10 秒。当初 5 秒）で声紋の同一人物再現性が足りるか（スパイク 5）
 - Recording 中のリネームが LS-EEND の slot 揺れ（同一人物の slot 分裂）とぶつかったときの
   体感（リネーム直後に別 slot で Speaker N が再出現する等）。声紋照合が吸収できるか実戦で確認
 - **複数デバイス・媒体起因の声紋分裂（同一人物の auto マッチ失敗）が実際に起きる頻度**（Phase 4）:

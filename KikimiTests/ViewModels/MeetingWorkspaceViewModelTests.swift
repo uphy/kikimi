@@ -46,7 +46,7 @@ private final class FakeTranscriptPipeline: RecordingTranscriptPipelining {
     /// `docs/design/13-speaker-diarization.md` section 5's `RecordingTranscriptPipelining
     /// .onSystemAudio` DI point. Tests trigger it directly via `simulateSystemAudio(_:)` below, same
     /// rationale as `onDegrade` above.
-    var onSystemAudio: (@Sendable ([Float]) async -> Void)?
+    var onSystemAudio: (@Sendable ([Float], TimeInterval) async -> Void)?
 
     private let stream: AsyncStream<TranscriptSegment>
     private let continuation: AsyncStream<TranscriptSegment>.Continuation
@@ -92,8 +92,8 @@ private final class FakeTranscriptPipeline: RecordingTranscriptPipelining {
 
     /// Test-only trigger for `onSystemAudio`, standing in for `TranscriptPipeline`'s own systemFeedTask
     /// forwarding samples after each `SttEngine.feed(...)` call (`Kikimi/Stt/TranscriptPipeline.swift`).
-    func simulateSystemAudio(_ samples: [Float]) async {
-        await onSystemAudio?(samples)
+    func simulateSystemAudio(_ samples: [Float], elapsedAtBufferStart: TimeInterval = 0) async {
+        await onSystemAudio?(samples, elapsedAtBufferStart)
     }
 
     // MARK: AudioCaptureDelegate (required by `RecordingTranscriptPipelining`; unused by these tests,
@@ -117,6 +117,10 @@ private actor FakeDiarizationCoordinator: DiarizationCoordinating {
     private(set) var beginSegmentCalls: [(startMsOffset: Int, hasSystemAudio: Bool)] = []
     private(set) var feedCallCount = 0
     private(set) var feedSampleCounts: [Int] = []
+    /// Every `elapsedAtBufferStart` this coordinator was fed, in call order (design section 5.1's
+    /// "実装時の追記 2026-08-01"): lets a test assert the ViewModel actually forwards `TranscriptPipeline
+    /// .onSystemAudio`'s capture-clock anchor instead of silently dropping it.
+    private(set) var feedElapsedAtBufferStarts: [TimeInterval] = []
     private(set) var endSegmentCalls: [DiarizationSegmentEndReason] = []
     private var activeRanges: [DiarizationActiveRange] = []
     private var stopped = false
@@ -145,9 +149,10 @@ private actor FakeDiarizationCoordinator: DiarizationCoordinating {
         activeRanges.append(DiarizationActiveRange(startMs: startMsOffset, endMs: nil))
     }
 
-    func feed(samples: [Float]) async {
+    func feed(samples: [Float], elapsedAtBufferStart: TimeInterval) async {
         feedCallCount += 1
         feedSampleCounts.append(samples.count)
+        feedElapsedAtBufferStarts.append(elapsedAtBufferStart)
     }
 
     func endSegment(reason: DiarizationSegmentEndReason) async {
