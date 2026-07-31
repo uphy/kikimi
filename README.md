@@ -22,13 +22,14 @@ macOS 14 (Sonoma) 以降が必要。メニューバー常駐アプリなので D
 
 会議情報（議題・参加者・確認したいこと）を Claude Code に渡すと、その会議専用の
 プロファイル（context / summary template / watchers）を生成して録音ウィンドウまで開ける。
-リポジトリ同梱の `kikimi-prepare-meeting` skill が担う（仕様は
+リポジトリ同梱の `kikimi` skill（`references/prepare-meeting.md`）が担う（仕様は
 [`docs/design/41-meeting-profiles.md`](docs/design/41-meeting-profiles.md)）。
+同 skill はプロンプト調整（[`docs/prompts.md`](docs/prompts.md)）の入口も兼ねる。
 
 リポジトリの外の作業ディレクトリから使う場合は、user-level skills へ symlink を張る:
 
 ```bash
-ln -s /path/to/kikimi/.claude/skills/kikimi-prepare-meeting ~/.claude/skills/kikimi-prepare-meeting
+ln -s /path/to/kikimi/.claude/skills/kikimi ~/.claude/skills/kikimi
 ```
 
 ## リリース

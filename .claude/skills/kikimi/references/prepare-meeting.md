@@ -1,21 +1,12 @@
----
-name: kikimi-prepare-meeting
-description: >-
-  会議情報（議題・参加者・確認したいこと）から Kikimi の会議プロファイル
-  （context / summary template / watchers）を生成し、検証して Draft ウィンドウを開くスキル。
-  「会議の準備をして」「次の◯◯会議のプロファイルを作って」「Kikimi に会議情報をセットして」
-  「この議題で聞き耳の準備をして」など、Kikimi で録音する会議の事前準備を頼まれたときに使う。
----
-
-# kikimi-prepare-meeting
+# 会議準備（meeting profiles）
 
 会議の説明テキストを受け取り、`~/.config/kikimi/profiles/<id>/` に会議プロファイル一式を生成して
 `kikimi://window/new?profile=<id>` で Draft ウィンドウを開く。
 
-仕様の正は Kikimi リポジトリの `docs/design/41-meeting-profiles.md`。この skill の実体は同リポジトリの
-`.claude/skills/kikimi-prepare-meeting/` にあるので、symlink 経由で起動された場合は SKILL.md の実体パス
-（`realpath`）から `../../../docs/design/41-meeting-profiles.md` で解決できる。プロファイル形式に迷ったら
-必ず仕様を読む（特に §2 データモデル・§4 解決順序）。
+仕様の正は Kikimi リポジトリの `docs/design/41-meeting-profiles.md`。symlink 経由で起動された場合は
+**この reference ファイルの実体パス**（`realpath`）から `../../../../docs/design/41-meeting-profiles.md`
+で解決できる（skill ディレクトリ基準なら `../../../docs/...`）。
+プロファイル形式に迷ったら必ず仕様を読む（特に §2 データモデル・§4 解決順序）。
 
 ## 手順
 
@@ -31,7 +22,7 @@ description: >-
 
 - id は `[A-Za-z0-9-]+`（ディレクトリ名 = id）。例: 定例 `acme-weekly`、単発 `20260805-acme-kickoff`
 - 先に `~/.config/kikimi/profiles/` を一覧し、同じ会議の既存プロファイルがあれば**新規作成ではなく更新**する
-- プロファイルは名前付きで永続。定例は使い回し、掃除は手動（ユーザーに頼まれたら §5 の掃除を行う）
+- プロファイルは名前付きで永続。定例は使い回し、掃除は手動（ユーザーに頼まれたら「掃除」の節を行う）
 
 ### 3. ファイルを生成する
 
@@ -63,7 +54,7 @@ summary_template.md で参照できる変数（schema 固定。これ以外は�
 生成後、必ず同梱の検証スクリプトを実行する:
 
 ```bash
-ruby "<この skill の実体ディレクトリ>/scripts/validate.rb" <profile-id>
+ruby "<この skill の実体ディレクトリ>/scripts/validate_profile.rb" <profile-id>
 ```
 
 エラーが出たら修正して再実行し、エラーゼロになるまで繰り返す。warning は内容を確認し、
@@ -84,11 +75,3 @@ open "kikimi://window/new?profile=<id>"
   （`watchers/<id>-*.md`）の削除。ただし watcher が他プロファイルの `enabled_watchers` から
   参照されていないことを確認してから消す
 - 過去セッションはプロファイルのコピーを持っているので、プロファイルを消しても影響しない
-
-## セットアップ（初回のみ）
-
-Kikimi リポジトリの外から使う場合は、user-level skills へ symlink を張る:
-
-```bash
-ln -s /path/to/kikimi/.claude/skills/kikimi-prepare-meeting ~/.claude/skills/kikimi-prepare-meeting
-```
