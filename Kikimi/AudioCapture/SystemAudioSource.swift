@@ -180,6 +180,14 @@ final class SystemAudioSource: AudioSourceCapturing {
             throw SystemAudioSourceError.alreadyRunning
         }
 
+        // Holds the priming HAL client alive (when `resolveExcludedProcesses()` needed one) until
+        // this method returns: the exclude list is consumed by `AudioHardwareCreateProcessTap`
+        // below, and once `AudioDeviceStart` succeeds the tap's own aggregate-device IOProc makes
+        // Kikimi a registered HAL client in its own right, so the token is no longer needed.
+        // `withExtendedLifetime` in the `defer` stops Swift from releasing it any earlier.
+        var selfExclusionPrimingToken: Any?
+        defer { withExtendedLifetime(selfExclusionPrimingToken) {} }
+
         let tapDescription: CATapDescription
         if let includedBundleId {
             let includedProcesses = try resolveIncludedProcesses(bundleId: includedBundleId)
@@ -189,7 +197,8 @@ final class SystemAudioSource: AudioSourceCapturing {
             tapDescription = CATapDescription(monoMixdownOfProcesses: includedProcesses)
             tapDescription.isExclusive = false
         } else {
-            let excludedProcesses = resolveExcludedProcesses()
+            let (excludedProcesses, primingToken) = resolveExcludedProcesses()
+            selfExclusionPrimingToken = primingToken
             logger.info("SystemAudioSource starting, excludedProcesses=\(excludedProcesses.description, privacy: .public)")
             tapDescription = CATapDescription(monoGlobalTapButExcludeProcesses: excludedProcesses)
             tapDescription.isExclusive = true
@@ -291,46 +300,41 @@ final class SystemAudioSource: AudioSourceCapturing {
     }
 
     // MARK: - Self-process exclusion (section 4, failure mode #11)
+    //
+    // The retry/priming policy and the raw CoreAudio process-id resolution live in
+    // `SystemAudioSelfExclusion.swift` (split out purely to stay under swiftlint's
+    // `file_length` budget; logically part of this same type).
 
     /// Resolves the tap's exclude list: Kikimi's own `AudioObjectID` plus any caller-supplied
-    /// `additionalExcludedProcesses`.
-    ///
-    /// If Kikimi's own `AudioObjectID` cannot be resolved, this logs a `.warning` and falls back
-    /// to just `additionalExcludedProcesses` (empty by default) rather than failing `start()`.
-    /// Unlike Chirami's include-list `processes.isEmpty` early return
+    /// `additionalExcludedProcesses`. See `SystemAudioSelfExclusion.swift` for why this can need a
+    /// priming step + retries (system-audio-only recordings may not have registered as a CoreAudio
+    /// HAL client yet) and why a final failure to resolve is now logged at `.error`: it means
+    /// Kikimi's own output -- e.g. segment playback, `Kikimi/Playback/SegmentAudioPlayer.swift` --
+    /// will be captured as system audio and corrupt the transcript, not merely a theoretical
+    /// self-loop as originally documented. `start()` itself still does not fail in that case:
+    /// unlike Chirami's include-list `processes.isEmpty` early return
     /// (`SystemAudioCapture.swift:113-115`), an empty exclude list is a normal, fully-supported
-    /// state here -- it simply means "tap every process, including Kikimi itself" -- so there is
-    /// no equivalent silent no-op branch to preserve.
-    private func resolveExcludedProcesses() -> [AudioObjectID] {
-        guard let selfObjectID = Self.resolveSelfProcessObjectID() else {
-            logger.warning("SystemAudioSource failed to resolve Kikimi's own AudioObjectID; starting with an empty exclude list")
-            return additionalExcludedProcesses
-        }
-        return additionalExcludedProcesses + [selfObjectID]
-    }
-
-    private static func resolveSelfProcessObjectID() -> AudioObjectID? {
-        var pid = ProcessInfo.processInfo.processIdentifier
-        var objectID = kAudioObjectUnknown
-        var dataSize = UInt32(MemoryLayout<AudioObjectID>.size)
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
+    /// tap configuration here.
+    private func resolveExcludedProcesses() -> (excluded: [AudioObjectID], primingToken: Any?) {
+        Self.resolveExcludedProcesses(
+            additionalExcludedProcesses: additionalExcludedProcesses,
+            resolveSelf: Self.resolveSelfProcessObjectID,
+            primeSelfRegistration: { [logger] in
+                // Failure-mode #11's documented `.warning` breadcrumb: also explains a slightly
+                // delayed `start()` (priming + up to ~100ms of retry sleeps) in the log timeline.
+                logger.warning("SystemAudioSource could not resolve Kikimi's own AudioObjectID on the first attempt; priming a HAL client registration and retrying")
+                return Self.primeSelfHALRegistration()
+            },
+            onGiveUp: { [logger] in
+                logger.error(
+                    """
+                    SystemAudioSource failed to resolve Kikimi's own AudioObjectID even after \
+                    priming/retries; starting with an EMPTY exclude list -- Kikimi's own output \
+                    (e.g. segment playback) will be captured as system audio
+                    """
+                )
+            }
         )
-
-        let status = AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address,
-            UInt32(MemoryLayout<pid_t>.size),
-            &pid,
-            &dataSize,
-            &objectID
-        )
-        guard status == noErr, objectID != kAudioObjectUnknown else {
-            return nil
-        }
-        return objectID
     }
 
     // MARK: - Include-list resolution (docs/design/10-audio-input-selection.md section 5.1)
