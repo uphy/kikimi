@@ -6,8 +6,9 @@ import Foundation
 /// (mirrors `RealtimeDiarizationCoordinator+Voiceprint.swift`'s/`MeetingWorkspaceViewModel
 /// +DiarizationEnded.swift`'s own file-length splits). Only needs `SummaryUpdater`'s already-`internal`
 /// surface (`sessionHandle`/`logger`/`eventsContinuation`/`runSerialized(kind:)`/`RequestKind` -- see
-/// each one's own "Not `private`: ... `+ParticipantsMerge.swift`" doc comment in `SummaryUpdater.swift`),
-/// not any genuinely `private` member of the primary actor declaration.
+/// each one's own "Not `private`: ... `+ParticipantsMerge.swift`" doc comment in `SummaryUpdater.swift`,
+/// plus `readSanitizedSummaryState()` per `summary-quality-topics-and-final-pass.md` §2.3), not any
+/// genuinely `private` member of the primary actor declaration.
 extension SummaryUpdater {
     /// `docs/design/13-speaker-diarization.md` section 6.2 ("R2 module 4"): the sole sanctioned way
     /// any caller outside this actor may add names to `summary.state.json`'s `participants` --
@@ -49,7 +50,7 @@ extension SummaryUpdater {
 
         let priorState: SummaryState
         do {
-            priorState = (try await sessionHandle.readJSON(.summaryState, as: SummaryState.self)) ?? .empty
+            priorState = try await readSanitizedSummaryState()
         } catch {
             logger.error("Failed to read summary.state.json for a participants merge: \(String(describing: error), privacy: .public)")
             return

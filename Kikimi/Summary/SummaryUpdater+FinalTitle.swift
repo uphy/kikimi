@@ -6,7 +6,8 @@ import Foundation
 /// (mirrors `+Regeneration.swift`/`+ParticipantsMerge.swift`'s own splits). Only needs
 /// `SummaryUpdater`'s already-`internal` surface (`sessionHandle`/`llm`/`config`/`logger`/
 /// `eventsContinuation`/`promptBodyProvider`, the last per `docs/design/42-prompt-overrides.md`
-/// §4.3), not any genuinely `private` member of the primary actor declaration.
+/// §4.3, plus `readSanitizedSummaryState()` per `summary-quality-topics-and-final-pass.md` §2.3),
+/// not any genuinely `private` member of the primary actor declaration.
 extension SummaryUpdater {
     /// `on_session_end` final title proposal (§3.4): generates one title from the final
     /// `summary.state.json` and stores it as a proposal (never auto-reflected, see
@@ -15,7 +16,7 @@ extension SummaryUpdater {
     func performFinalTitleProposal() async {
         let state: SummaryState
         do {
-            state = (try await sessionHandle.readJSON(.summaryState, as: SummaryState.self)) ?? .empty
+            state = try await readSanitizedSummaryState()
         } catch {
             logger.error("Failed to read summary.state.json for final title proposal: \(String(describing: error), privacy: .public)")
             return

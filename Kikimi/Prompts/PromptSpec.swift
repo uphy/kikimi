@@ -3,7 +3,8 @@ import Foundation
 
 // MARK: - PromptID
 
-/// One of the 7 override-able prompts (`docs/design/42-prompt-overrides.md` §2.1's table). `rawValue`
+/// One of the override-able prompts (`docs/design/42-prompt-overrides.md` §2.1's table -- originally 7,
+/// plus `.summaryFinal` added by `docs/design/summary-quality-topics-and-final-pass.md` §7.4). `rawValue`
 /// is also the file name stem under `prompts/` (`prompts/<rawValue>.md`, §3.1) -- `PromptRef.relativePath`
 /// relies on this equivalence, so a case's `rawValue` must never diverge from its on-disk file name.
 ///
@@ -18,6 +19,11 @@ enum PromptID: String, CaseIterable, Sendable {
     case simpleWatcher = "simple-watcher"
     case glossaryHeader = "glossary-header"
     case dictation
+    /// Session-end final refinement pass that rewrites overview/decisions/action_items from a
+    /// whole-meeting view (`docs/design/summary-quality-topics-and-final-pass.md` §7.4). Distinct
+    /// from `.summary` (the incremental patch prompt): this one runs exactly once per `endMeeting()`,
+    /// never mid-session.
+    case summaryFinal = "summary-final"
 }
 
 // MARK: - PromptReload
@@ -213,6 +219,15 @@ struct PromptSpec: Sendable {
                 defaultBody: dictationDefaultBody,
                 ejectComments: []
             )
+        case .summaryFinal:
+            return PromptSpec(
+                id: .summaryFinal,
+                reload: .immediate,
+                requiredPlaceholders: [],
+                optionalPlaceholders: [],
+                defaultBody: summaryFinalDefaultBody,
+                ejectComments: []
+            )
         }
     }
 
@@ -245,7 +260,7 @@ struct PromptSpec: Sendable {
 /// price of parallelism is paid in "review the sibling when editing" instead of machinery:
 /// - filler / self-correction / punctuation bullets: `refinement` ↔ `dictation`
 /// - "transcript may contain mis-transcriptions" caveat: `refinement`/`summary`/`chat`/
-///   `simple-watcher`/`dictation`, each phrased for its task
+///   `simple-watcher`/`dictation`/`summary-final`, each phrased for its task
 private extension PromptSpec {
     /// Moved from `RefinementPromptBuilder.buildSystemPrompt(context:glossaryBlock:dedupSystemLeakSegments:)`
     /// (§2.2 "refinement"). `{{leak_dedup_rule}}` sits exactly where that function used to
@@ -285,6 +300,16 @@ private extension PromptSpec {
     /// the overview should stay, and that garbled transcript fragments are ignorable. Structure
     /// invariants stay in the app-owned 【patch 契約】 block -- these bullets are about content
     /// judgement, which is exactly what the policy layer is for.
+    ///
+    /// Four bullets were added per §5.2 of `summary-quality-topics-and-final-pass.md` (root-caused
+    /// against session `2026-07-31T03-51-26_d7deac6b`, which had 23 decisions -- mostly non-decisions
+    /// -- and no topic-level detail): what disqualifies a decision (shared understanding / status
+    /// updates / mere possibilities), that a superseded decision must be revised or withdrawn rather
+    /// than left to accumulate (`decisions_modify`/`decisions_remove` -- structural keywords for those
+    /// operations live in the app-owned contract layer, `SummaryPromptBuilder.patchContract`; these
+    /// bullets only judge *when* a decision qualifies or needs correction), how a topic should be
+    /// scoped and written, and that an in-progress topic's continuation folds into the existing topic
+    /// (`topics_update`) instead of spawning a new one.
     static let summaryDefaultBody = """
     あなたは会議サマリを更新するエディタです。前サマリ state と直近の会話を受け取り、変更差分（patch）を JSON で返してください。
 
@@ -292,7 +317,11 @@ private extension PromptSpec {
     - title: 現在の state.title が空の場合は、会議内容を表す簡潔なタイトルを必ず提案する（会議名が明確でなければ議題や会話内容から推定する）。既に付いているタイトルは、明確に良くなる場合だけ新しい title を返し、実質同じ内容の言い換えなら null を返す
     - overview は必要に応じて全文書き直す。会議の流れと現時点の論点が短時間で掴める要約に保ち、発言の羅列にしない
     - decisions は会話で明確に合意・決定された事項だけを追加する。提案・検討段階のものを決定として書かない
+    - decisions は「これをやる / やらない / この方針で進める」と明確に合意された事項だけにする。認識共有・現状理解の確認・可能性やアイデアの言及・単なる進捗報告は decision に入れない
+    - 一度追加した decision が後の会話で覆された・条件付きに変わった・誤りと分かった場合は、decisions_modify で書き直すか decisions_remove で取り下げる
     - action_items は担当や期限が発言から読み取れる場合のみ埋める。読み取れないときは assignee は空文字、due は null にする（推測で埋めない）
+    - topics は会議の話題のまとまりごとに時系列で作る。見出しは内容が特定できる短い名詞句にする。body は要点の箇条書きで、結論・数値・固有名詞・対立した意見の両論を残す。発言の逐語再現はしない
+    - 直近の会話が既存トピックの続きなら新トピックを作らず topics_update で該当トピックに統合する
     - 書き起こしには誤変換があり得る。意味の取れない断片は無理にサマリへ反映しない
     """
 
@@ -425,5 +454,29 @@ private extension PromptSpec {
     - 音声認識により助詞や単語が部分的に欠落し、文法的に不自然な箇所がある場合は、前後の文脈から自然に補って文法的に整った文章にする（例:「明日 会議 資料」→「明日の会議の資料」）
     - 欠落補完はあくまで文法的な穴埋めに留め、話者が言っていない新しい情報や結論を創作しない
     - 確信が持てない箇所（表記の候補に自信が持てない、または欠落補完で文意が推測できない場合など）は元の表現を残す
+    """
+
+    /// Session-end final refinement pass (`docs/design/summary-quality-topics-and-final-pass.md`
+    /// §7.4): rewrites overview/decisions/action_items once, from a whole-meeting view, to fix the
+    /// structural drift the incremental `.summary` prompt cannot avoid (it only ever sees the latest
+    /// ~20 segments) -- overview bias toward recent topics, uneven decision granularity, and
+    /// raw-transcript mis-transcriptions that got locked in early. `topics` is deliberately excluded
+    /// (§7.2's (a)-(c): rewriting it scales output with meeting length, its incremental accretion is
+    /// itself the value, and the existing full-regeneration rescue path already covers degradation);
+    /// so are `title` (final-title proposal) and `participants` (diarization merge).
+    ///
+    /// The contract layer (app-owned, not in this string) requires the JSON response to include all
+    /// three of overview/decisions/action_items, and forbids the LLM from returning `id`s -- the app
+    /// renumbers `dc_00N`/`ai_00N` from scratch on apply (`applyFinalRevision`, §7.3), so there is no
+    /// id-collision bookkeeping to get right.
+    static let summaryFinalDefaultBody = """
+    あなたは会議の議事録を仕上げる編集者です。会議全体の書き起こしと、会議中に自動生成されたサマリ state を受け取り、overview / decisions / action_items を最終版に書き直してください。
+
+    【編集方針】
+    - overview は会議全体を俯瞰した要約にする。冒頭の議題から結論までの流れが掴めるようにし、終盤の話題に偏らせない
+    - decisions は会議終了時点で有効な決定だけを残す。途中で覆された決定・認識共有・現状理解・可能性の言及は含めない。同じ決定の重複や言い換えは1件に統合する
+    - action_items は重複を統合し、担当・期限は発言から読み取れる場合のみ埋める（推測で埋めない）
+    - 既存 state で status が done の action item は、最終版でも done を維持する
+    - 書き起こしには誤変換があり得る。文脈から明らかな誤変換は正しい表記で書く
     """
 }

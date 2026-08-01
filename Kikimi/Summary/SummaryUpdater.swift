@@ -173,6 +173,9 @@ actor SummaryUpdater {
     /// A `Set`, not an array: coalescing while a merge is already running only needs the union of
     /// names, never duplicates (`performParticipantsMerge(_:)`'s own dedup would collapse them anyway).
     private var pendingParticipantsMergeNames: Set<String> = []
+    /// Coalesced follow-up for `.finalPass` (summary-quality-topics-and-final-pass.md §7.5):
+    /// `modelOverride` is last-writer-wins across coalesced requests.
+    private var pendingFinalPass: (requested: Bool, modelOverride: String?) = (false, nil)
 
     /// `true` while `regenerateFromScratch()` is in progress. §4.1.1: incremental triggers must
     /// stand down while a full regeneration is rewriting `summary.state.json` from scratch, so
@@ -280,6 +283,10 @@ actor SummaryUpdater {
         case finalTitleProposal
         case regeneration
         case participantsMerge([String])
+        /// Session-end final refinement pass (summary-quality-topics-and-final-pass.md §7.5).
+        /// `modelOverride`: forward-looking hook for a future manual re-run UI; every current call
+        /// site passes `nil` (`+FinalPass.swift`'s `runFinalPass(modelOverride:)`).
+        case finalPass(modelOverride: String?)
     }
 
     /// Single in-flight gate covering every entry point (§4.1.1). If a request is already running,
@@ -321,6 +328,8 @@ actor SummaryUpdater {
             pendingRegeneration = true
         case .participantsMerge(let names):
             pendingParticipantsMergeNames.formUnion(names)
+        case .finalPass(let modelOverride):
+            pendingFinalPass = (true, modelOverride)
         }
     }
 
@@ -336,12 +345,21 @@ actor SummaryUpdater {
         }
     }
 
+    /// Priority order: regeneration → finalPass → finalTitleProposal → incrementalUpdate →
+    /// participantsMerge (`docs/design/summary-quality-topics-and-final-pass.md` §7.5).
+    /// `finalPass` runs ahead of `finalTitleProposal` so the final title is generated from the
+    /// final pass's improved `overview`/`decisions`, not the pre-final-pass state.
     private func takePendingRequest() -> RequestKind? {
         // Regeneration takes priority: it is the "救済パス" the user explicitly asked for, and
         // §4.1.1 already dedicates a special standdown for incremental updates while it runs.
         if pendingRegeneration {
             pendingRegeneration = false
             return .regeneration
+        }
+        if pendingFinalPass.requested {
+            let modelOverride = pendingFinalPass.modelOverride
+            pendingFinalPass = (false, nil)
+            return .finalPass(modelOverride: modelOverride)
         }
         if pendingFinalTitleProposal {
             pendingFinalTitleProposal = false
@@ -369,6 +387,8 @@ actor SummaryUpdater {
             await performRegeneration()
         case .participantsMerge(let names):
             await performParticipantsMerge(names)
+        case .finalPass(let modelOverride):
+            await performFinalPass(modelOverride: modelOverride)
         }
     }
 
@@ -398,6 +418,19 @@ actor SummaryUpdater {
             guard !Task.isCancelled else { return }
             await self?.enqueue(reason: .timeThreshold)
         }
+    }
+
+    // MARK: - Shared sanitized state read (docs/design/summary-quality-topics-and-final-pass.md §2.3)
+
+    /// The single call site for `sessionHandle.readJSON(.summaryState, as: SummaryState.self)`, so
+    /// `sanitizeState(_:)`'s normalization (unnumbered `dc_00N`/`tp_00N` id backfill,
+    /// reserved-channel-name participant removal -- `SummaryPatchApplier.swift`) applies uniformly
+    /// on every read, including sessions written before that normalization existed. Not `private`:
+    /// used here, and from `+FinalTitle.swift`/`+ParticipantsMerge.swift`/`+FinalPass.swift`.
+    func readSanitizedSummaryState() async throws -> SummaryState {
+        var state = (try await sessionHandle.readJSON(.summaryState, as: SummaryState.self)) ?? .empty
+        sanitizeState(&state)
+        return state
     }
 
     // MARK: - §4.3 Incremental update flow
@@ -519,7 +552,7 @@ actor SummaryUpdater {
             return SummarySegmentInput(id: transcript.id, startMs: transcript.startMs, speaker: transcript.speaker, text: transcript.text)
         }.sorted { $0.startMs < $1.startMs }
 
-        let priorState = (try await sessionHandle.readJSON(.summaryState, as: SummaryState.self)) ?? .empty
+        let priorState = try await readSanitizedSummaryState()
         let cursor = priorState.lastSummarizedStartMs
         let pending = merged.filter { cursor == nil || $0.startMs > cursor! }
         return (pending, cursor, priorState)
@@ -557,9 +590,10 @@ actor SummaryUpdater {
         return changed
     }
 
-    // `performFinalTitleProposal()`/`applyFinalTitleProposal(_:)` (§3.4 "Session-end final title
-    // proposal") live in `+FinalTitle.swift`; `performRegeneration()`/
-    // `loadAllSegmentsSortedForRegeneration()` (§6 "Full regeneration") live in `+Regeneration.swift`;
-    // `mergeParticipants(_:)`'s implementation (`performParticipantsMerge(_:)`, §6.2 "R2 module 4")
-    // lives in `+ParticipantsMerge.swift` -- all three split out for `file_length`.
+    // `performFinalTitleProposal()` lives in `+FinalTitle.swift`; `performRegeneration()`/
+    // `loadAllSegmentsSorted()` (§6) live in `+Regeneration.swift`; `mergeParticipants(_:)`/
+    // `performParticipantsMerge(_:)` (§6.2 "R2 module 4") live in `+ParticipantsMerge.swift`;
+    // `runFinalPass(modelOverride:)`/`performFinalPass(modelOverride:)`
+    // (summary-quality-topics-and-final-pass.md §7) live in `+FinalPass.swift` -- all four split
+    // out for `file_length`.
 }

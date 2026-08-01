@@ -44,7 +44,25 @@ enum SummaryRenderer {
     |--------|------|------|
     {{#action_items}}| {{task}} | {{assignee}} | {{#due}}{{due}}{{/due}}{{^due}}—{{/due}} |
     {{/action_items}}
+
+    ## 議事詳細
+
+    {{#topics}}### {{heading}}
+
+    {{body}}
+
+    {{/topics}}
     """
+
+    /// Prepended (with no intervening newline, so it emits no output of its own -- see
+    /// `render(_:usingTemplateSource:)`) to every template source, built-in or user-provided, before
+    /// parsing (04-summary-updater.md §5 / this module's design doc §4.2 "HTML エスケープ対策"). GRMustache's
+    /// default `contentType` is `.html`, which escapes `& < >` etc.; `overview`/topic `body` are
+    /// free-form Markdown (blockquotes, ampersands, ...) that must pass through unescaped. There is no
+    /// settable `Template.contentType` API and `Mustache.DefaultConfiguration` is deliberately avoided
+    /// (global mutable state under Swift 6 strict concurrency), so a `{{% CONTENT_TYPE:TEXT }}` pragma
+    /// tag is the mechanism instead.
+    private static let textModeContentTypePragma = "{{% CONTENT_TYPE:TEXT }}"
 
     /// Renders `state` using `templateString` (a session's `summary_template.md` contents), falling
     /// back to `defaultTemplate` if `templateString` is `nil`/empty, or if it fails to parse/render
@@ -72,7 +90,10 @@ enum SummaryRenderer {
 
     private static func render(_ state: SummaryState, usingTemplateSource templateSource: String) -> String? {
         do {
-            let template = try Template(string: templateSource)
+            // No newline between the pragma and `templateSource`: the pragma tag renders to nothing,
+            // but GRMustache.swift does not fold standalone lines, so a newline here would leak a
+            // leading blank line into the rendered output (see `textModeContentTypePragma`'s doc).
+            let template = try Template(string: textModeContentTypePragma + templateSource)
             return try template.render(renderingContext(for: state))
         } catch {
             logger.warning("Mustache render failed: \(String(describing: error), privacy: .public)")
@@ -94,7 +115,12 @@ enum SummaryRenderer {
             "decisions": state.decisions.map { decision in
                 ["text": decision.text] as [String: Any]
             },
-            "action_items": state.actionItems.map(renderableActionItem)
+            "action_items": state.actionItems.map(renderableActionItem),
+            // `id`/`source_seg_ids` are intentionally omitted -- internal bookkeeping keys, not a view
+            // concern (this module's design doc §4.2).
+            "topics": state.topics.map { topic in
+                ["heading": topic.heading, "body": topic.body] as [String: Any]
+            }
         ]
     }
 

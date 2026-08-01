@@ -334,6 +334,9 @@ enum PromptCLI {
         case .summary:
             return SummaryPromptBuilder.systemPrompt(policyBody: policyBody)
 
+        case .summaryFinal:
+            return SummaryUpdater.finalRevisionSystemPrompt(policyBody: policyBody)
+
         case .chat, .finalTitle:
             return policyBody
 

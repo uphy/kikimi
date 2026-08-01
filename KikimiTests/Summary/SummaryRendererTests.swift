@@ -98,6 +98,118 @@ struct SummaryRendererTests {
         #expect(!rendered.hasPrefix("---"))
     }
 
+    @Test("renders the 議事詳細 section from topics, in order, after action items")
+    func rendersTopicsSection() throws {
+        let state = SummaryState(
+            title: "t",
+            participants: [],
+            overview: "o",
+            decisions: [],
+            actionItems: [],
+            topics: [
+                SummaryState.Topic(
+                    id: "tp_001",
+                    heading: "検索基盤の移行方針",
+                    body: "- Elasticsearchへの移行を検討\n- 移行コストは未見積り",
+                    sourceSegIds: ["seg_00010"]
+                ),
+                SummaryState.Topic(
+                    id: "tp_002",
+                    heading: "次回会議の日程",
+                    body: "来週火曜に再度確認する",
+                    sourceSegIds: []
+                )
+            ],
+            lastSummarizedStartMs: 0
+        )
+
+        let rendered = try #require(SummaryRenderer.render(state, templateString: nil))
+
+        #expect(rendered.contains(
+            """
+            ## 議事詳細
+
+            ### 検索基盤の移行方針
+
+            - Elasticsearchへの移行を検討
+            - 移行コストは未見積り
+
+            ### 次回会議の日程
+
+            来週火曜に再度確認する
+            """
+        ))
+        // Placement: after the action items section (設計 4.1's "アクションアイテムの後（末尾）").
+        let actionItemsRange = try #require(rendered.range(of: "## アクションアイテム"))
+        let topicsRange = try #require(rendered.range(of: "## 議事詳細"))
+        #expect(actionItemsRange.lowerBound < topicsRange.lowerBound)
+        // `id`/`source_seg_ids` are internal bookkeeping keys, never exposed to the view (設計 4.2).
+        #expect(!rendered.contains("tp_001"))
+        #expect(!rendered.contains("seg_00010"))
+    }
+
+    @Test("still emits the 議事詳細 heading when topics is empty, with no topic entries")
+    func rendersTopicsHeadingWhenEmpty() throws {
+        var state = SummaryState.empty
+        state.title = "空トピック確認"
+
+        let rendered = try #require(SummaryRenderer.render(state, templateString: nil))
+
+        #expect(rendered.contains("## 議事詳細"))
+        // No topic heading ("### ...") is emitted for an empty topics array.
+        #expect(!rendered.contains("### "))
+    }
+
+    @Test("passes '&'/'<'/'>' through overview and topic body unescaped instead of HTML-escaping them")
+    func passesHTMLSpecialCharsThroughUnescaped() throws {
+        let state = SummaryState(
+            title: "t",
+            participants: [],
+            overview: "A社 & B社 <確認事項> の調整",
+            decisions: [],
+            actionItems: [],
+            topics: [
+                SummaryState.Topic(
+                    id: "tp_001",
+                    heading: "見積り確認",
+                    body: "> 前回の見積りは100万円だったが、A<B & B>C の条件で再検討する",
+                    sourceSegIds: []
+                )
+            ],
+            lastSummarizedStartMs: 0
+        )
+
+        let rendered = try #require(SummaryRenderer.render(state, templateString: nil))
+
+        #expect(rendered.contains("A社 & B社 <確認事項> の調整"))
+        #expect(rendered.contains("> 前回の見積りは100万円だったが、A<B & B>C の条件で再検討する"))
+        #expect(!rendered.contains("&amp;"))
+        #expect(!rendered.contains("&lt;"))
+        #expect(!rendered.contains("&gt;"))
+    }
+
+    @Test("a custom session template also renders '&'/'<'/'>' unescaped (text-mode content type applies to user templates too)")
+    func customTemplateAlsoUsesTextMode() throws {
+        var state = SummaryState.empty
+        state.overview = "A & B <C>"
+
+        let rendered = try #require(SummaryRenderer.render(state, templateString: "{{overview}}"))
+
+        #expect(rendered == "A & B <C>")
+    }
+
+    @Test("does not leak the CONTENT_TYPE:TEXT pragma tag itself into rendered output")
+    func pragmaTagProducesNoOutput() throws {
+        var state = SummaryState.empty
+        state.title = "pragma確認"
+
+        let rendered = try #require(SummaryRenderer.render(state, templateString: nil))
+
+        #expect(!rendered.contains("CONTENT_TYPE"))
+        // No newline was inserted between the pragma and the template, so no leading blank line.
+        #expect(rendered.hasPrefix("# pragma確認"))
+    }
+
     @Test("multiple action items render as consecutive GFM table rows, with no blank line breaking the table")
     func rendersMultipleActionItemsAsConsecutiveTableRows() throws {
         let state = SummaryState(
