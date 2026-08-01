@@ -163,12 +163,26 @@ fi
 # --- 8) verify the WebView-rendered surfaces actually rendered ---
 # `docs/design/39-webview-markdown.md`: the summary / Watchers / chat bodies are WKWebView pages, and
 # nothing above this point touches them -- a page that failed to load would leave every check so far
-# green. The chat tab is used because its empty-state placeholder renders without needing an LLM
-# response (the stub has no `summary_patch` reply, so no summary is produced in this run).
+# green. Both the summary and chat tabs are checked:
+#
+# - summary: `LLMStubProvider.builtinDefaults` now has a `summary_patch` reply (added alongside
+#   `final_title`/`summary_final` -- kikimi.md 8 章), so `endMeeting()`'s `updateNow(.pauseFlush)` /
+#   `runFinalPass()` actually produce a `summary.md` in this run (unlike before, when the stub had no
+#   `summary_patch` reply and the summary tab always stayed empty). The expected string is the
+#   `"[stub] "`-prefixed overview text from that builtin default.
+# - chat: its empty-state placeholder renders without needing an LLM response, so it is kept as an
+#   independent check that doesn't depend on the summary pipeline above having run.
 #
 # `KIKIMI_TEST_HIDDEN=1` is still in effect here: AX ignores alpha, so tab switching and the dump
 # bridge both work against the invisible window (verified 2026-07-30).
-log "[8/8] Verify WebView rendering (chat tab)"
+log "[8/8] Verify WebView rendering (summary + chat tabs)"
+# SKILL.md "WebView のページはタブを開かないと存在しない": the summary WebView lives under the
+# "会議" tab, so it has to be opened once before `webview.sh` can dump/wait on it.
+if ! python3 "$SCRIPTS/tab_click.py" click 会議; then
+  fail "tab_click.py could not open the 会議 tab (tab bar moved? see SKILL.md)"
+elif ! "$SCRIPTS/webview.sh" wait summary "[stub] スタブ応答による最終概要です" 20; then
+  fail "the summary WebView never rendered the stub summary_final overview -- the page failed to load, the bridge is unreachable, or the session-end final pass did not complete"
+fi
 if ! python3 "$SCRIPTS/tab_click.py" click チャット; then
   fail "tab_click.py could not open the chat tab (tab bar moved? see SKILL.md)"
 elif ! "$SCRIPTS/webview.sh" wait chat "この会議について質問できます" 15; then

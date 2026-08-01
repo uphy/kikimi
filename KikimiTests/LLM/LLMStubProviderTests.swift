@@ -129,6 +129,52 @@ struct LLMStubProviderTests {
         #expect(result.value == ChatAnswerPayload(answer: "overridden"))
     }
 
+    // MARK: - "summary_patch" / "final_title" / "summary_final" builtin defaults
+    // (kikimi.md 8 章, docs/design/summary-quality-topics-and-final-pass.md §7.4/§7.5)
+
+    @Test("stubResult decodes the \"summary_patch\" builtin default into SummaryPatch")
+    func stubResultUsesBuiltinDefaultForSummaryPatch() throws {
+        // Without this entry, every incremental summary update under KIKIMI_STUB_LLM=1
+        // (verify-smoke's `endMeeting()` -> `updateNow(.pauseFlush)`) throws
+        // missingStructuredOutput and no summary.md is ever produced in stub mode.
+        let provider = LLMStubProvider(environment: ["KIKIMI_STUB_LLM": "1"])
+
+        let result: LLMResult<SummaryPatch> = try provider.stubResult(for: makeRequest(stubKey: "summary_patch"))
+
+        #expect(result.value.title?.hasPrefix("[stub]") == true)
+        #expect(result.value.overview?.hasPrefix("[stub]") == true)
+        #expect(result.value.decisionsAdd?.first?.text.hasPrefix("[stub]") == true)
+        // Deliberately absent (see the builtinDefaults doc comment): topics_add/action_items.add
+        // lack SummaryPatchApplier's content-level de-duplication, so a static reply would
+        // accumulate duplicate entries across repeated "summary_patch" calls in one session.
+        #expect(result.value.topicsAdd == nil)
+        #expect(result.value.actionItems == nil)
+        #expect(result.usage == .zero)
+    }
+
+    @Test("stubResult decodes the \"final_title\" builtin default into TitleOnly")
+    func stubResultUsesBuiltinDefaultForFinalTitle() throws {
+        let provider = LLMStubProvider(environment: ["KIKIMI_STUB_LLM": "1"])
+
+        let result: LLMResult<TitleOnly> = try provider.stubResult(for: makeRequest(stubKey: "final_title"))
+
+        #expect(result.value.title.hasPrefix("[stub]"))
+        #expect(result.usage == .zero)
+    }
+
+    @Test("stubResult decodes the \"summary_final\" builtin default into SummaryFinalRevision, with no id fields")
+    func stubResultUsesBuiltinDefaultForSummaryFinal() throws {
+        let provider = LLMStubProvider(environment: ["KIKIMI_STUB_LLM": "1"])
+
+        let result: LLMResult<SummaryFinalRevision> = try provider.stubResult(for: makeRequest(stubKey: "summary_final"))
+
+        #expect(result.value.overview.hasPrefix("[stub]"))
+        #expect(result.value.decisions.first?.text.hasPrefix("[stub]") == true)
+        #expect(result.value.actionItems.first?.task.hasPrefix("[stub]") == true)
+        #expect(result.value.actionItems.first?.status == .open)
+        #expect(result.usage == .zero)
+    }
+
     private struct RefinementResponse: Decodable, Sendable, Equatable {
         struct Item: Decodable, Sendable, Equatable {
             var id: String
