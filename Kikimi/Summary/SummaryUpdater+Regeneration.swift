@@ -21,7 +21,7 @@ extension SummaryUpdater {
 
         let allSegments: [SummarySegmentInput]
         do {
-            allSegments = try await loadAllSegmentsSortedForRegeneration()
+            allSegments = try await loadAllSegmentsSorted()
         } catch {
             logger.error("Failed to load transcript for full regeneration: \(String(describing: error), privacy: .public)")
             return
@@ -91,9 +91,11 @@ extension SummaryUpdater {
         eventsContinuation.yield(SummaryUpdateEvent(summaryMarkdown: renderedMarkdown, metaChanged: metaChanged))
     }
 
-    /// Full transcript (refined preferred), `startMs` ascending, no cursor filtering -- used only by
-    /// `performRegeneration()` (§6).
-    private func loadAllSegmentsSortedForRegeneration() async throws -> [SummarySegmentInput] {
+    /// Full transcript (refined preferred), `startMs` ascending, no cursor filtering. Used by
+    /// `performRegeneration()` (§6) and, since `summary-quality-topics-and-final-pass.md` §7.2,
+    /// shared with `+FinalPass.swift`'s `performFinalPass(modelOverride:)`. Not `private` for that
+    /// reason (was `private` before the final pass needed it too).
+    func loadAllSegmentsSorted() async throws -> [SummarySegmentInput] {
         let transcriptSegments = try await sessionHandle.readTranscriptSegments()
         let refinedSegments = try await sessionHandle.readRefinedSegments()
         // §15.2.5: same `sourceSegIds`-expansion + last-wins robustness as `loadPendingInput()`

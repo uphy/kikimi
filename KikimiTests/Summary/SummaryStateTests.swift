@@ -108,6 +108,33 @@ struct SummaryStateTests {
         #expect(actionItems[0]["source_seg_ids"] != nil)
     }
 
+    /// A pre-existing `summary.state.json` written before `topics` / `decisions[].id` were
+    /// introduced (`docs/design/summary-quality-topics-and-final-pass.md` §2.2, §11).
+    static let legacyJSON = """
+    {
+      "title": "デイリースクラム",
+      "participants": ["田中さん", "system"],
+      "overview": "顧客A向け提案書作成の支援について",
+      "decisions": [
+        { "text": "スライド検索結果の新規UI開発はスコープ外", "source_seg_ids": ["seg_00087"] }
+      ],
+      "action_items": [],
+      "last_summarized_start_ms": 128100
+    }
+    """
+
+    @Test("decodes a legacy summary.state.json (no topics key, no decisions[].id) without throwing")
+    func decodesLegacyJSONWithoutTopicsOrDecisionIds() throws {
+        let decoder = SessionJSONCoding.makeDecoder()
+        let state = try decoder.decode(SummaryState.self, from: Data(Self.legacyJSON.utf8))
+
+        #expect(state.topics.isEmpty)
+        #expect(state.decisions == [
+            SummaryState.Decision(id: "", text: "スライド検索結果の新規UI開発はスコープ外", sourceSegIds: ["seg_00087"])
+        ])
+        #expect(state.decisions.first?.id == "")
+    }
+
     @Test("round-trips a session that has never been summarized (lastSummarizedStartMs nil, everything empty)")
     func roundTripsEmptyState() throws {
         let encoder = SessionJSONCoding.makeEncoder()
@@ -121,5 +148,6 @@ struct SummaryStateTests {
         #expect(decoded.participants.isEmpty)
         #expect(decoded.decisions.isEmpty)
         #expect(decoded.actionItems.isEmpty)
+        #expect(decoded.topics.isEmpty)
     }
 }

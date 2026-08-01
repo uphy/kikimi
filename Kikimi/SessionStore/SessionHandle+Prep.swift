@@ -20,34 +20,19 @@ extension SessionHandle {
     /// `summary_template.md`'s size limit (kikimi.md 8 章: "ファイルサイズ上限 16KB").
     private static let summaryTemplateSizeLimitBytes = 16 * 1_024
 
-    /// kikimi.md 8 章's default view template (Mustache), embedded verbatim as the fallback content
-    /// used whenever `summary_template.md` is missing/unreadable: `readSummaryTemplate()`'s own
-    /// missing-file fallback, `copyPrepFiles`'s missing-source-file fallback, and (per
+    /// kikimi.md 8 章's default view template (Mustache), used as the fallback content whenever
+    /// `summary_template.md` is missing/unreadable: `readSummaryTemplate()`'s own missing-file
+    /// fallback, `copyPrepFiles`'s missing-source-file fallback, and (per
     /// `docs/design/07-session-store.md` section 8's table) `createDraftSession()`'s fallback when
     /// the global `defaults.summary_template_file` itself can't be read. Kept `internal` (not
     /// `private`) so other files in this module — most notably the `SessionStore` registry that owns
     /// `createDraftSession()` — can reuse the exact same constant instead of duplicating it.
-    static let defaultSummaryTemplate = """
-    # {{title}}
-
-    ## 概要
-
-    {{overview}}
-
-    **参加者:** {{#participants}}{{name}}{{^is_last}}、{{/is_last}}{{/participants}}
-
-    ## 決定事項
-
-    {{#decisions}}- {{text}}
-    {{/decisions}}
-
-    ## アクションアイテム
-
-    | タスク | 担当 | 期限 |
-    |--------|------|------|
-    {{#action_items}}| {{task}} | {{assignee}} | {{#due}}{{due}}{{/due}}{{^due}}—{{/due}} |
-    {{/action_items}}
-    """
+    ///
+    /// Aliases `SummaryRenderer.defaultTemplate` rather than embedding its own copy: the two used to
+    /// be independently-maintained duplicate literals, which is exactly how they drifted (this
+    /// module's design doc §4.1's "現状重複定義されている" note). `SummaryRenderer.defaultTemplate` is
+    /// the single source of truth now.
+    static let defaultSummaryTemplate = SummaryRenderer.defaultTemplate
 
     /// `.context`/`.summaryTemplate` never throw from `SessionFile.relativePath()` (only the
     /// `watcherDefinition`/`watcherState` cases validate an `id` and can fail); the `try?` fallback

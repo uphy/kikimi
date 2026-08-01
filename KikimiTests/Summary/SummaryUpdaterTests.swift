@@ -22,9 +22,14 @@ private actor FakeLLM: LLMCompleting {
     var responses: [String: String] = [:]
     /// `stubKey -> error` overrides `responses` when both are set for the same key.
     var errors: [String: LLMClientError] = [:]
+    /// `stubKey -> artificial delay` before resolving that key's response/error. Lets a test
+    /// deterministically construct a window where a given request is still in-flight (used by
+    /// `SummaryUpdater`'s priority/coalescing tests below), instead of relying on incidental
+    /// actor-hop/disk-I/O timing the way `mergeParticipantsCoalescesBehindAnInFlightUpdate` does.
+    var delays: [String: Duration] = [:]
 
     func complete<T: Decodable & Sendable>(_ request: LLMRequest) async throws -> LLMResult<T> {
-        let data = try resolveData(for: request)
+        let data = try await resolveData(for: request)
         // Mirror `LLMClient.decodeResult`'s `.convertFromSnakeCase` decoding of `structured_output`
         // so snake_case fixture keys (`decisions_add`/`source_seg_ids`/...) map onto the camelCase
         // `SummaryPatch`/`SummaryState` properties exactly as they would in production.
@@ -37,13 +42,16 @@ private actor FakeLLM: LLMCompleting {
     /// `docs/design/05-watcher-runner.md` §5.1: not exercised by any `SummaryUpdater` test in this
     /// file, but required to satisfy `LLMCompleting`.
     func completeRaw(_ request: LLMRequest) async throws -> LLMResult<Data> {
-        LLMResult(value: try resolveData(for: request), usage: .zero)
+        LLMResult(value: try await resolveData(for: request), usage: .zero)
     }
 
-    private func resolveData(for request: LLMRequest) throws -> Data {
+    private func resolveData(for request: LLMRequest) async throws -> Data {
         callCount += 1
         receivedRequests.append(request)
         let key = request.stubKey ?? ""
+        if let delay = delays[key] {
+            try? await Task.sleep(for: delay)
+        }
         if let error = errors[key] {
             throw error
         }
@@ -518,6 +526,207 @@ struct SummaryUpdaterTests {
         #expect(request.system == injectedPolicyBody)
     }
 
+    // MARK: - Final pass (§7, docs/design/summary-quality-topics-and-final-pass.md)
+
+    @Test("runFinalPass wholesale-replaces overview/decisions/action_items, leaves title/participants/topics/cursor untouched, updates summary.md, and yields a metaChanged==false event")
+    func finalPassReplacesStateAndYieldsEvent() async throws {
+        let directory = makeTempSessionDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = makeHandle(directory: directory, meta: baseMeta())
+        try await appendSegments(3, to: handle)
+        try await handle.writeJSON(
+            SummaryState(
+                title: "既存タイトル",
+                participants: ["田中さん"],
+                overview: "旧概要",
+                decisions: [SummaryState.Decision(id: "dc_001", text: "旧決定", sourceSegIds: ["seg_00001"])],
+                actionItems: [
+                    SummaryState.ActionItem(id: "ai_001", task: "旧タスク", assignee: "田中さん", due: nil, status: .open, sourceSegIds: ["seg_00001"])
+                ],
+                topics: [SummaryState.Topic(id: "tp_001", heading: "既存トピック", body: "本文", sourceSegIds: ["seg_00001"])],
+                lastSummarizedStartMs: 1_000
+            ),
+            to: .summaryState
+        )
+
+        let fakeLLM = FakeLLM()
+        await fakeLLM.setResponse(
+            #"""
+            {"overview":"最終概要","decisions":[{"text":"最終決定","source_seg_ids":["seg_00001"]}],"action_items":[{"task":"最終タスク","assignee":"田中さん","due":null,"status":"open","source_seg_ids":["seg_00001"]}]}
+            """#,
+            for: "summary_final"
+        )
+
+        let updater = SummaryUpdater(sessionHandle: handle, llm: fakeLLM)
+        var eventsIterator = updater.events.makeAsyncIterator()
+
+        await updater.runFinalPass()
+
+        let event = try #require(await eventsIterator.next())
+        #expect(event.metaChanged == false)
+        #expect(event.summaryMarkdown?.contains("最終概要") == true)
+
+        let state = try #require(try await handle.readJSON(.summaryState, as: SummaryState.self))
+        #expect(state.overview == "最終概要")
+        #expect(state.decisions.map(\.text) == ["最終決定"])
+        #expect(state.actionItems.map(\.task) == ["最終タスク"])
+        // Untouched by the final pass (§7.2 scope note):
+        #expect(state.title == "既存タイトル")
+        #expect(state.participants == ["田中さん"])
+        #expect(state.topics.map(\.heading) == ["既存トピック"])
+        #expect(state.lastSummarizedStartMs == 1_000)
+
+        let markdown = try await handle.readText(.summaryMarkdown)
+        #expect(markdown?.contains("最終概要") == true)
+    }
+
+    @Test("a final-pass LLM failure leaves summary.state.json unchanged and does not throw")
+    func finalPassLLMFailureSkips() async throws {
+        let directory = makeTempSessionDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = makeHandle(directory: directory, meta: baseMeta())
+        try await appendSegments(3, to: handle)
+        try await handle.writeJSON(
+            SummaryState(title: nil, participants: [], overview: "既存概要", decisions: [], actionItems: [], lastSummarizedStartMs: 1_000),
+            to: .summaryState
+        )
+
+        let fakeLLM = FakeLLM()
+        await fakeLLM.setError(.processFailed(exitCode: 1, stderr: "boom"), for: "summary_final")
+
+        let updater = SummaryUpdater(sessionHandle: handle, llm: fakeLLM)
+        await updater.runFinalPass() // must not throw / crash
+
+        let state = try #require(try await handle.readJSON(.summaryState, as: SummaryState.self))
+        #expect(state.overview == "既存概要") // untouched -- the incremental state remains the final artifact
+    }
+
+    @Test("runFinalPass with no segments at all skips without ever calling the LLM")
+    func finalPassSkipsLLMCallWhenNoSegments() async throws {
+        let directory = makeTempSessionDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = makeHandle(directory: directory, meta: baseMeta())
+        // No segments appended.
+
+        let fakeLLM = FakeLLM()
+        let updater = SummaryUpdater(sessionHandle: handle, llm: fakeLLM)
+
+        await updater.runFinalPass()
+
+        #expect(await fakeLLM.callCount == 0)
+        let state = try await handle.readJSON(.summaryState, as: SummaryState.self)
+        #expect(state == nil) // never written
+    }
+
+    @Test("runFinalPass issues its LLMRequest with the 300s final-pass timeout (not the 60s default) and the summary_final stubKey")
+    func finalPassRequestUsesFinalPassTimeout() async throws {
+        let directory = makeTempSessionDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = makeHandle(directory: directory, meta: baseMeta())
+        try await appendSegments(1, to: handle)
+
+        let fakeLLM = FakeLLM()
+        await fakeLLM.setResponse(
+            #"""
+            {"overview":"最終概要","decisions":[],"action_items":[]}
+            """#,
+            for: "summary_final"
+        )
+
+        let updater = SummaryUpdater(sessionHandle: handle, llm: fakeLLM)
+        await updater.runFinalPass()
+
+        let request = try #require(await fakeLLM.receivedRequests.first)
+        #expect(request.timeout == SummaryUpdater.finalPassTimeout)
+        #expect(request.timeout == .seconds(300))
+        #expect(request.stubKey == "summary_final")
+    }
+
+    @Test("finalPass and finalTitleProposal both coalescing behind an in-flight request run in finalPass-then-finalTitleProposal order, regardless of request order (§7.5's priority: finalPass ahead of finalTitleProposal)")
+    func finalPassRunsBeforeFinalTitleProposalWhenCoalesced() async throws {
+        let directory = makeTempSessionDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = makeHandle(directory: directory, meta: baseMeta())
+        try await appendSegments(3, to: handle)
+
+        let fakeLLM = FakeLLM()
+        // The initial manual update is kept artificially in-flight so the other two requests below
+        // are guaranteed to arrive while `isRunning` is still `true` and coalesce, instead of
+        // relying on incidental actor-hop/disk-I/O timing.
+        await fakeLLM.setResponse(emptyPatchJSON, for: "summary_patch")
+        await fakeLLM.setDelay(.milliseconds(150), for: "summary_patch")
+        await fakeLLM.setResponse(
+            #"""
+            {"overview":"最終概要","decisions":[],"action_items":[]}
+            """#,
+            for: "summary_final"
+        )
+        await fakeLLM.setResponse(#"{"title":"最終提案タイトル"}"#, for: "final_title")
+
+        let updater = SummaryUpdater(sessionHandle: handle, llm: fakeLLM)
+
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await updater.updateNow(reason: .manual) }
+            group.addTask {
+                // A short head start so `updateNow` above is the one that wins the race into
+                // `isRunning = true`; these two must coalesce behind it, not race it.
+                try? await Task.sleep(for: .milliseconds(20))
+                // Requested *before* `runFinalPass()` below, to prove priority (not call order)
+                // decides the coalesced replay order.
+                await updater.generateFinalTitleProposal()
+            }
+            group.addTask {
+                try? await Task.sleep(for: .milliseconds(20))
+                await updater.runFinalPass()
+            }
+        }
+
+        let stubKeysInOrder = await fakeLLM.receivedRequests.map { $0.stubKey ?? "" }
+        #expect(stubKeysInOrder == ["summary_patch", "summary_final", "final_title"])
+    }
+
+    @Test("an incremental update requested while a final pass is running coalesces behind it and still applies once the final pass completes")
+    func incrementalUpdateCoalescesBehindAnInFlightFinalPass() async throws {
+        let directory = makeTempSessionDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = makeHandle(directory: directory, meta: baseMeta())
+        try await appendSegments(3, to: handle)
+
+        let fakeLLM = FakeLLM()
+        await fakeLLM.setResponse(
+            #"""
+            {"overview":"最終概要","decisions":[],"action_items":[]}
+            """#,
+            for: "summary_final"
+        )
+        await fakeLLM.setDelay(.milliseconds(150), for: "summary_final")
+        // No `overview` in this patch, so the incremental update's own effect (the title) is
+        // observable without clobbering the final pass's overview -- proving both landed, in order.
+        await fakeLLM.setResponse(
+            #"""
+            {"title":"新タイトル","participants_add":null,"overview":null,"decisions_add":null,"action_items":null}
+            """#,
+            for: "summary_patch"
+        )
+
+        let updater = SummaryUpdater(sessionHandle: handle, llm: fakeLLM)
+
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await updater.runFinalPass() }
+            group.addTask {
+                try? await Task.sleep(for: .milliseconds(20))
+                await updater.updateNow(reason: .manual)
+            }
+        }
+
+        let stubKeysInOrder = await fakeLLM.receivedRequests.map { $0.stubKey ?? "" }
+        #expect(stubKeysInOrder == ["summary_final", "summary_patch"])
+
+        let state = try #require(try await handle.readJSON(.summaryState, as: SummaryState.self))
+        #expect(state.overview == "最終概要") // from the final pass, not clobbered by the coalesced update
+        #expect(state.title == "新タイトル") // from the coalesced incremental update, applied afterward
+    }
+
     // MARK: - Full regeneration (§6)
 
     @Test("regenerateFromScratch rebuilds summary.state.json/summary.md idempotently from all segments")
@@ -805,5 +1014,9 @@ private extension FakeLLM {
 
     func setError(_ error: LLMClientError, for stubKey: String) {
         errors[stubKey] = error
+    }
+
+    func setDelay(_ delay: Duration, for stubKey: String) {
+        delays[stubKey] = delay
     }
 }

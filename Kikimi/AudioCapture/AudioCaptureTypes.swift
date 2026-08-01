@@ -8,7 +8,11 @@ import Foundation
 /// Kikimi captures microphone and system audio as two independent streams
 /// (see `docs/design/01-audio-capture.md` section 3); this type distinguishes them
 /// wherever a buffer, error, or level needs to be attributed to one of the two.
-enum AudioSourceKind: String, Codable, Sendable {
+///
+/// `CaseIterable` (`docs/design/summary-quality-topics-and-final-pass.md` §6.2): lets
+/// `SummaryPatchApplier`'s reserved-participant-name filter derive its channel-label set
+/// (`{"mic", "system"}`) from this type directly, instead of hand-duplicating the raw value list.
+enum AudioSourceKind: String, Codable, Sendable, CaseIterable {
     case mic
     case system
 }

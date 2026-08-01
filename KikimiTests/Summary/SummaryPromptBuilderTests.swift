@@ -84,4 +84,66 @@ struct SummaryPromptBuilderTests {
 
         #expect(userPrompt.contains("【直近の会話】"))
     }
+
+    @Test("buildFinalRevisionUserPrompt embeds context, the full state as JSON (including topics), and seg lines in startMs order")
+    func finalRevisionPromptEmbedsContextStateAndTranscript() throws {
+        var state = SummaryState.empty
+        state.title = "定例会議"
+        state.overview = "既存の概要"
+        state.topics = [
+            SummaryState.Topic(
+                id: "tp_001", heading: "検索基盤の移行方針", body: "- 移行先は X にする", sourceSegIds: ["seg_00001"]
+            )
+        ]
+
+        let segments = [
+            SummarySegmentInput(id: "seg_00001", startMs: 0, speaker: .mic, text: "最初の発言"),
+            SummarySegmentInput(id: "seg_00002", startMs: 100, speaker: .system, text: "了解しました")
+        ]
+
+        let prompt = try SummaryPromptBuilder.buildFinalRevisionUserPrompt(
+            state: state, segments: segments, contextMarkdown: "# 参加者\n- 田中さん"
+        )
+
+        #expect(prompt.contains("【事前知識】"))
+        #expect(prompt.contains("田中さん"))
+        #expect(prompt.contains("【現在の state】"))
+        #expect(prompt.contains("\"topics\""))
+        #expect(prompt.contains("検索基盤の移行方針"))
+        #expect(prompt.contains("【会議全体の書き起こし】"))
+        #expect(prompt.contains("seg_00001 (mic): 最初の発言"))
+        #expect(prompt.contains("seg_00002 (system): 了解しました"))
+        let firstIndex = try #require(prompt.range(of: "seg_00001"))
+        let secondIndex = try #require(prompt.range(of: "seg_00002"))
+        #expect(firstIndex.lowerBound < secondIndex.lowerBound)
+    }
+
+    @Test("buildFinalRevisionUserPrompt truncates the oldest transcript lines when the char budget is exceeded, but never truncates state")
+    func finalRevisionPromptTruncatesOldestSegmentsWhenBudgetExceeded() throws {
+        var state = SummaryState.empty
+        state.overview = "STATE_MARKER_保持されるべき概要"
+
+        let oldestText = "OLDEST_SEGMENT_TEXT"
+        let newestText = "NEWEST_SEGMENT_TEXT"
+        var segments = [SummarySegmentInput(id: "seg_00000", startMs: 0, speaker: .mic, text: oldestText)]
+        let padding = String(repeating: "あ", count: 2_000)
+        for index in 1...100 {
+            segments.append(
+                SummarySegmentInput(
+                    id: "seg_\(String(format: "%05d", index))", startMs: index * 1_000, speaker: .mic, text: padding
+                )
+            )
+        }
+        segments.append(SummarySegmentInput(id: "seg_99999", startMs: 999_000, speaker: .mic, text: newestText))
+
+        let prompt = try SummaryPromptBuilder.buildFinalRevisionUserPrompt(
+            state: state, segments: segments, contextMarkdown: ""
+        )
+
+        // state is never subject to the transcript budget, so its marker always survives.
+        #expect(prompt.contains("STATE_MARKER_保持されるべき概要"))
+        // The oldest segment line was dropped by the front-truncation, the newest was kept.
+        #expect(!prompt.contains(oldestText))
+        #expect(prompt.contains(newestText))
+    }
 }

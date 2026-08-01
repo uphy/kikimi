@@ -1,4 +1,7 @@
 import Foundation
+import OSLog
+
+private let logger = Logger(subsystem: "io.github.uphy.Kikimi", category: "SummaryPromptBuilder")
 
 // MARK: - SummarySegmentInput
 
@@ -34,7 +37,10 @@ enum SummaryPromptBuilder {
     static let patchContract = """
     - 出力は変更差分（patch）の JSON
     - participants は新たに登場した発言者・出席者だけを participants_add に追加する（既出の参加者は含めない）
-    - decisions は新規追加分のみ返す（既存には触らない）
+    - (mic) / (system) は音声チャネルのラベルであり発言者名ではない。participants_add に入れない
+    - decisions は decisions_add（新規）/ decisions_modify（既存の text 修正）/ decisions_remove（撤回・誤登録の削除）の 3 操作
+    - topics は「議事詳細」の時系列トピック列。新しい話題が始まったときだけ topics_add で追加し、進行中の話題への追記・修正は topics_update で該当 id の body を全文書き直して返す
+    - topics の id は "tp_001" 形式、decisions の id は "dc_001" 形式で採番する
     - action_items は add / modify / complete のいずれかの操作を返す
     - 何も変更がなければ全フィールド null で良い
     """
@@ -83,6 +89,62 @@ enum SummaryPromptBuilder {
         """
     }
 
+    /// Character budget for the transcript block in `buildFinalRevisionUserPrompt`
+    /// (`docs/design/summary-quality-topics-and-final-pass.md` §7.4). `state` (passed to that
+    /// function) is always sent in full and is never subject to this budget -- only the
+    /// `【会議全体の書き起こし】` block is.
+    ///
+    /// Paired with `SummaryUpdater.finalPassTimeout` (`Kikimi/Summary/SummaryUpdater+FinalPass.swift`,
+    /// 300s): a larger transcript takes the LLM longer to both read and turn into structured output,
+    /// so raising this bound requires raising that timeout too. Kept here rather than beside
+    /// `finalPassTimeout` per §7.5's "同じファイルに隣接して定義しコメントで相互参照" -- since the
+    /// two constants can't literally live in the same file (this one is consumed by the pure prompt
+    /// builder, that one by the LLM-calling `SummaryUpdater` extension), this doc comment is the
+    /// cross-reference; `finalPassTimeout`'s doc comment points back here.
+    ///
+    /// Value derivation (§7.4): the default `claude-haiku-4-5` context is ~200K tokens. Reserving
+    /// ~50K tokens of headroom for the state JSON (topics included), 事前知識/participants block,
+    /// fixed prompt text, and the structured JSON response leaves ~150K tokens -- approximated 1:1
+    /// as characters for Japanese text (conservative). Do not raise this toward something like 600K:
+    /// that would exceed the 200K-token context outright, so the LLM call would fail on context
+    /// overflow *before* this budget's truncation ever kicks in -- silently skipping the final pass
+    /// on long meetings instead of degrading gracefully.
+    static let finalPassMaxTranscriptChars = 150_000
+
+    /// Builds the per-call user prompt for the session-end final refinement pass
+    /// (`docs/design/summary-quality-topics-and-final-pass.md` §7.4):
+    /// 【事前知識】＋【現在の state】（浄化済み・`topics` 込みの全量 JSON）＋【会議全体の書き起こし】
+    /// （`seg_XXXXX (mic): text` 形式、`startMs` 昇順）＋指示文. Pure, like `buildUserPrompt`: the
+    /// caller sanitizes `state` and sorts `segments` before calling this.
+    ///
+    /// - Parameters:
+    ///   - state: The current (already-sanitized) `summary.state.json` contents. Sent in full --
+    ///     never truncated by `finalPassMaxTranscriptChars`, which only bounds the transcript block.
+    ///   - segments: All of the session's segments (refined-preferred, raw fallback -- resolved by
+    ///     the caller), expected to already be sorted `startMs` ascending.
+    ///   - contextMarkdown: The session's `context.md` contents (empty string if none).
+    static func buildFinalRevisionUserPrompt(
+        state: SummaryState,
+        segments: [SummarySegmentInput],
+        contextMarkdown: String
+    ) throws -> String {
+        let stateJSON = try encodeStateForPrompt(state)
+        let transcriptBlock = truncatedTranscriptBlock(from: segments, maxChars: finalPassMaxTranscriptChars)
+
+        return """
+        【事前知識】
+        \(contextMarkdown)
+
+        【現在の state】
+        \(stateJSON)
+
+        【会議全体の書き起こし】
+        \(transcriptBlock)
+
+        会議全体を俯瞰したうえで、overview / decisions / action_items の最終版を JSON で返してください。
+        """
+    }
+
     /// `seg_00350 (mic): テキスト` (kikimi.md 8 章). `internal`, not `private`: shared with
     /// `WatcherPromptBuilder` (`docs/design/05-watcher-runner.md` §6) so both prompt builders format a
     /// transcript line identically instead of maintaining two copies of the same one-line format.
@@ -92,6 +154,36 @@ enum SummaryPromptBuilder {
 
     private static func formatSegmentLine(_ segment: SummarySegmentInput) -> String {
         formatLine(id: segment.id, speaker: segment.speaker, text: segment.text)
+    }
+
+    /// Formats `segments` as `seg_XXXXX (mic): text` lines joined by newlines (`startMs` ascending,
+    /// per the caller's sort). If the joined block exceeds `maxChars`, drops whole lines from the
+    /// *front* (the oldest segments) until it fits, so the most recent conversation -- what a
+    /// wrap-up pass cares about most -- survives (`docs/design/summary-quality-topics-and-final-pass.md`
+    /// §7.4/§8: "古い側から超過分を切り捨てて warn").
+    private static func truncatedTranscriptBlock(from segments: [SummarySegmentInput], maxChars: Int) -> String {
+        let lines = segments.map(formatSegmentLine)
+        guard !lines.isEmpty else { return "" }
+
+        let separatorLength = 1 // "\n"
+        var totalLength = lines.reduce(0) { $0 + $1.count } + (lines.count - 1) * separatorLength
+        guard totalLength > maxChars else {
+            return lines.joined(separator: "\n")
+        }
+
+        // Drop oldest (front) lines until the remainder fits, always keeping at least the newest
+        // line even if that single line alone still exceeds the budget (unavoidable; §7.4's
+        // "final pass 自体は必ず実行される" takes priority over strict budget enforcement).
+        var startIndex = 0
+        while startIndex < lines.count - 1, totalLength > maxChars {
+            totalLength -= lines[startIndex].count + separatorLength
+            startIndex += 1
+        }
+
+        logger.warning(
+            "Final pass transcript exceeded \(maxChars, privacy: .public)-char budget; dropped \(startIndex, privacy: .public) of \(lines.count, privacy: .public) oldest segment line(s)"
+        )
+        return lines[startIndex...].joined(separator: "\n")
     }
 
     /// Encodes `state` as pretty-printed JSON for embedding in the prompt, using the same

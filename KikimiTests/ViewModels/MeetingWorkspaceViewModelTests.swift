@@ -1913,6 +1913,117 @@ struct MeetingWorkspaceViewModelTests {
         #expect(viewModel.meta.titleProposal == "最終タイトル案")
     }
 
+    // MARK: endMeeting() session-end final pass
+    // (`docs/design/summary-quality-topics-and-final-pass.md` §7.5/§7.6)
+
+    /// The session-end final pass's `SummaryFinalRevision` response (`SummaryJSONSchema
+    /// .finalRevisionSchemaJSON`'s shape). Distinct markers from `patchJSONWithTitle`/
+    /// `patchJSONWithDecisionForFinalPass` below so a test can tell whether the *incremental* patch's
+    /// content or the *final pass*'s wholesale-replacement content ended up in `summary.md`.
+    private let finalRevisionJSON = """
+    {
+      "overview": "最終版の概要です",
+      "decisions": [{"text": "最終決定", "source_seg_ids": ["seg_00000"]}],
+      "action_items": [
+        {"task": "最終タスク", "assignee": "田中", "due": null, "status": "open", "source_seg_ids": ["seg_00000"]}
+      ]
+    }
+    """
+    /// Same title as `patchJSONWithTitle` but also seeds a decision, so the final-pass test below can
+    /// prove the pre-final-pass decision is gone (wholesale replacement, not append) once the final
+    /// pass has run.
+    private let patchJSONWithDecisionForFinalPass = """
+    {"title":"新タイトル","participants_add":null,"overview":"初期概要","decisions_add":[{"id":"dc_001","text":"初期決定","source_seg_ids":["seg_00000"]}],"action_items":null}
+    """
+
+    @Test("endMeeting() from .recording runs the session-end final pass, wholesale-replacing overview/decisions/action_items in summary.md ahead of the final title call")
+    func endMeetingFromRecordingRunsFinalPass() async throws {
+        let root = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = makeStore(root: root)
+        let created = try await store.createDraftSession()
+        let handle = try await store.openSession(created.id)
+
+        let capture = FakeAudioCapture()
+        let pipeline = FakeTranscriptPipeline()
+        let llm = FakeSummaryLLM()
+        await llm.setResponse(patchJSONWithDecisionForFinalPass, for: "summary_patch")
+        await llm.setResponse(finalRevisionJSON, for: "summary_final")
+        await llm.setResponse(finalTitleJSON, for: "final_title")
+        let viewModel = makeViewModel(
+            handle: handle, store: store, capture: capture, pipeline: pipeline,
+            llm: llm, summaryConfig: SummaryConfig(updateTriggerSegments: 1)
+        )
+
+        await viewModel.startRecording()
+        let segment = try await handle.appendTranscriptSegment(source: .mic, startMs: 0, endMs: 500, text: "hello", confidence: 0.9)
+        pipeline.yield(segment)
+        // Let the incremental patch land first, so the assertions below can tell its content apart
+        // from the final pass's wholesale replacement.
+        try await waitUntil { await viewModel.summaryMarkdown?.contains("初期決定") == true }
+
+        await viewModel.endMeeting()
+
+        #expect(viewModel.recordingButtonState == .ended)
+        let markdown = try #require(viewModel.summaryMarkdown)
+        #expect(markdown.contains("最終版の概要です"))
+        #expect(markdown.contains("最終決定"))
+        #expect(markdown.contains("最終タスク"))
+        // §7.3: wholesale replacement, not an append -- the pre-final-pass overview/decision must be gone.
+        #expect(!markdown.contains("初期概要"))
+        #expect(!markdown.contains("初期決定"))
+
+        let state = try #require(try await handle.readJSON(.summaryState, as: SummaryState.self))
+        #expect(state.decisions == [SummaryState.Decision(id: "dc_001", text: "最終決定", sourceSegIds: ["seg_00000"])])
+        #expect(state.actionItems.map(\.id) == ["ai_001"])
+        #expect(state.actionItems.first?.task == "最終タスク")
+        // §7.6: final pass runs ahead of the final-title call, whose proposal is generated from this
+        // already-improved state.
+        #expect(viewModel.meta.titleProposal == "最終タイトル案")
+    }
+
+    @Test("endMeeting() from .paused (updater already torn down) still runs the session-end final pass via a transient updater")
+    func endMeetingFromPausedRunsFinalPass() async throws {
+        let root = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = makeStore(root: root)
+        let created = try await store.createDraftSession()
+        let handle = try await store.openSession(created.id)
+
+        let capture = FakeAudioCapture()
+        let pipeline = FakeTranscriptPipeline()
+        let llm = FakeSummaryLLM()
+        await llm.setResponse(patchJSONWithDecisionForFinalPass, for: "summary_patch")
+        await llm.setResponse(finalRevisionJSON, for: "summary_final")
+        await llm.setResponse(finalTitleJSON, for: "final_title")
+        let viewModel = makeViewModel(
+            handle: handle, store: store, capture: capture, pipeline: pipeline,
+            llm: llm, summaryConfig: SummaryConfig(updateTriggerSegments: 1)
+        )
+
+        await viewModel.startRecording()
+        let segment = try await handle.appendTranscriptSegment(source: .mic, startMs: 0, endMs: 500, text: "hello", confidence: 0.9)
+        pipeline.yield(segment)
+        try await waitUntil { await viewModel.summaryMarkdown?.contains("初期決定") == true }
+
+        // Recording -> Paused tears down the live updater; `endMeeting()` must spin up a transient
+        // one that still runs the final pass (`docs/design/summary-quality-topics-and-final-pass.md`
+        // §7.6's "Paused から Ended" branch).
+        await viewModel.pauseRecording()
+        await viewModel.endMeeting()
+
+        #expect(viewModel.recordingButtonState == .ended)
+        // The transient updater's events are never subscribed to, so read summary.md straight from
+        // disk (mirrors `regenerateSummary()`'s own re-read-from-disk shape for the transient case).
+        let markdown = try #require(try await handle.readText(.summaryMarkdown))
+        #expect(markdown.contains("最終版の概要です"))
+        #expect(markdown.contains("最終決定"))
+        #expect(!markdown.contains("初期決定"))
+
+        let state = try #require(try await handle.readJSON(.summaryState, as: SummaryState.self))
+        #expect(state.decisions == [SummaryState.Decision(id: "dc_001", text: "最終決定", sourceSegIds: ["seg_00000"])])
+    }
+
     @Test("adoptTitleProposal() replaces meta.title with the pending proposal and clears it, keeping titleAutoGenerated true")
     func adoptTitleProposalReplacesTitle() async throws {
         let root = makeTemporaryDirectory()

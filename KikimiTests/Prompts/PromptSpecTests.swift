@@ -24,13 +24,14 @@ struct PromptSpecTests {
         #expect(PromptID.simpleWatcher.rawValue == "simple-watcher")
         #expect(PromptID.glossaryHeader.rawValue == "glossary-header")
         #expect(PromptID.dictation.rawValue == "dictation")
+        #expect(PromptID.summaryFinal.rawValue == "summary-final")
     }
 
-    @Test("PromptID.allCases has exactly the 7 documented ids, no more, no fewer")
-    func allCasesHasExactlySevenIds() {
-        #expect(PromptID.allCases.count == 7)
+    @Test("PromptID.allCases has exactly the 8 documented ids, no more, no fewer")
+    func allCasesHasExactlyEightIds() {
+        #expect(PromptID.allCases.count == 8)
         #expect(Set(PromptID.allCases) == [
-            .refinement, .summary, .finalTitle, .chat, .simpleWatcher, .glossaryHeader, .dictation,
+            .refinement, .summary, .finalTitle, .chat, .simpleWatcher, .glossaryHeader, .dictation, .summaryFinal,
         ])
     }
 
@@ -99,9 +100,20 @@ struct PromptSpecTests {
         #expect(PromptSpec.spec(for: .refinement).reload == .sessionStart)
         #expect(PromptSpec.spec(for: .simpleWatcher).reload == .sessionStart)
 
-        for id in [PromptID.summary, .finalTitle, .chat, .glossaryHeader, .dictation] {
+        for id in [PromptID.summary, .finalTitle, .chat, .glossaryHeader, .dictation, .summaryFinal] {
             #expect(PromptSpec.spec(for: id).reload == .immediate, "\(id) must be .immediate")
         }
+    }
+
+    @Test("spec(for: .summaryFinal) is resolvable and matches §7.4's facts: immediate reload, no required/optional placeholders, no eject comments")
+    func summaryFinalSpecMatchesDesignFacts() {
+        let spec = PromptSpec.spec(for: .summaryFinal)
+        #expect(spec.id == .summaryFinal)
+        #expect(spec.reload == .immediate)
+        #expect(spec.requiredPlaceholders.isEmpty)
+        #expect(spec.optionalPlaceholders.isEmpty)
+        #expect(spec.ejectComments.isEmpty)
+        #expect(!spec.defaultBody.isEmpty)
     }
 
     @Test("requiredPlaceholders: only simple-watcher requires {{viewpoint}}; every other id requires none")
@@ -146,6 +158,23 @@ struct PromptSpecTests {
     @Test("refinement's defaultBody contains the {{leak_dedup_rule}} placeholder it declares optional")
     func refinementDefaultBodyContainsItsOptionalPlaceholder() {
         #expect(PromptSpec.spec(for: .refinement).defaultBody.contains("{{leak_dedup_rule}}"))
+    }
+
+    @Test("summary's defaultBody includes §5.2's decision-qualification, decision-revision, and topic-scoping bullets")
+    func summaryDefaultBodyIncludesDesignSection52Bullets() {
+        let body = PromptSpec.spec(for: .summary).defaultBody
+        #expect(body.contains("認識共有・現状理解の確認・可能性やアイデアの言及・単なる進捗報告は decision に入れない"))
+        #expect(body.contains("decisions_modify"))
+        #expect(body.contains("decisions_remove"))
+        #expect(body.contains("topics_update"))
+    }
+
+    @Test("summary-final's defaultBody includes §7.4's whole-meeting overview, decision-validity, and done-preservation bullets")
+    func summaryFinalDefaultBodyIncludesDesignSection74Bullets() {
+        let body = PromptSpec.spec(for: .summaryFinal).defaultBody
+        #expect(body.contains("会議全体を俯瞰した要約"))
+        #expect(body.contains("会議終了時点で有効な決定だけを残す"))
+        #expect(body.contains("done"))
     }
 
     // MARK: - defaultBodyHash

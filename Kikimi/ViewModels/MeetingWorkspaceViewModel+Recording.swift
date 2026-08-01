@@ -166,12 +166,19 @@ extension MeetingWorkspaceViewModel {
         }
 
         // Section 3.4/4.1/7 (on_session_end, once): if still Recording, `summaryUpdater` is live --
-        // flush trailing segments, then the final-title call, then discard it. If already Paused,
-        // it was already torn down by `pauseRecording()`, so a transient instance handles this
-        // one-shot call (`summary.state.json` is file-backed, no continuity lost). `meta` reloaded
-        // below surfaces the final title proposal -- this never goes through `SummaryUpdater.events`.
+        // flush trailing segments, then the session-wide final pass, then the final-title call,
+        // then discard it. If already Paused, it was already torn down by `pauseRecording()`, so a
+        // transient instance handles these one-shot calls (`summary.state.json` is file-backed, no
+        // continuity lost). `meta` reloaded below surfaces the final title proposal -- this never
+        // goes through `SummaryUpdater.events`.
         if let updater = summaryUpdater {
             await updater.updateNow(reason: .pauseFlush)
+            // `docs/design/summary-quality-topics-and-final-pass.md` §7.5/7.6: a session-wide
+            // final refinement pass (overview/decisions/action_items全置換) runs once per
+            // `endMeeting()` call, ahead of the final-title call so the title is generated from
+            // the improved state. Best-effort like the final-title call below -- a failure here
+            // must never abort `endMeeting()`'s own confirmation processing.
+            await updater.runFinalPass()
             await updater.generateFinalTitleProposal()
             // `docs/design/13-speaker-diarization.md` section 4.4/6.2 ("R2 module 4"): the
             // Ended-time moving-average voiceprint update + participants merge, run exactly once
@@ -182,6 +189,9 @@ extension MeetingWorkspaceViewModel {
             stopSummaryUpdater()
         } else {
             let transientUpdater = summaryUpdaterFactory(sessionHandle)
+            // See the `runFinalPass()` comment above -- same best-effort semantics for the
+            // Paused -> Ended (transient updater) branch.
+            await transientUpdater.runFinalPass()
             await transientUpdater.generateFinalTitleProposal()
             await applyDiarizationEndedHooks(updater: transientUpdater)
         }
