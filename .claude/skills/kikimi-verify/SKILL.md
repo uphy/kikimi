@@ -619,6 +619,28 @@ $SCRIPTS/restart.sh   # もしくは通常の起動手順
 両方を E2E で検証できる。ダミー音源にフィラー（「えーと」を含む発話）を混ぜておくと、ドロップの検証が
 しやすい。
 
+### LLM スタブのサマリ系 3 キー（`summary_patch` / `final_title` / `summary_final`）
+
+`refinement`（上記の id エコースタブ）と `chat` に加えて、`LLMStubProvider.builtinDefaults` は
+`SummaryUpdater` が使う 3 キーの固定 JSON も持つ（kikimi.md 8 章、いずれも `"[stub] "` プレフィックス付き
+の固定文字列。`Date` や乱数は使わない決定論的な値）。これが無いと `KIKIMI_STUB_LLM=1` 下ではサマリ更新が
+すべて `missingStructuredOutput` で失敗し、`summary.md` が生成されない。
+
+- **`summary_patch`**（`SummaryPatch` にデコード）— 増分サマリ更新（20セグメント/3分ごと、または
+  会議終了時の `updateNow(.pauseFlush)`）が使う。`title` / `overview` / `decisions_add` のみを返す。
+  `topics_add` と `action_items`（add）は**意図的に含めない**: `decisions_add` と違い
+  `SummaryPatchApplier` に内容ベースの重複排除が無く、id 衝突時はリネームして追記するだけなので、
+  同じ固定 JSON を1セッション内で複数回リプレイすると `## 議事詳細` やアクションアイテムが
+  重複蓄積してしまう（詳細は `LLMStubProvider.swift` の `builtinDefaults` doc comment）。topics /
+  action items のスタブ内容が要る検証は `KIKIMI_STUB_LLM_FILE` で個別に差し込む
+- **`final_title`**（`TitleOnly` にデコード）— 会議終了時の最終タイトル案生成が使う
+- **`summary_final`**（`SummaryFinalRevision` にデコード）— 会議終了時の最終整形パス（overview /
+  decisions / action_items の全置換）が使う。contract どおり `id` は含まない（適用時にアプリが
+  `dc_00N` / `ai_00N` を採番し直す）。全置換なのでリプレイしても重複蓄積の問題は無い
+
+`mise run verify-smoke` はこの3キーのおかげで `summary.md` が実際に生成されるようになったので、
+`webview.sh wait summary "..."` でサマリタブの描画まで確認する（4 章「WebView で描画される画面の検証」参照）。
+
 ## 6. 確認フローの基本パターン
 
 1. `build_and_apply.sh` でビルド・再起動（再起動で focus 状態はリセットされる）

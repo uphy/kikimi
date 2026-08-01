@@ -428,19 +428,20 @@ Recording 中に context.md が変わってもリアルタイムでは反映せ�
 
 ## 8. サマリ更新戦略
 
-### スコープ（MVP）
-
-サマリは以下の**軽量セクション**に絞る。**議事詳細（トピック別 H3 セクションで詳細を積む形式）は MVP では作らない**。
-
-- 会議のトピック境界判定はリアルタイムでは精度・安定性ともに担保が難しく、Phase 4 実戦で本当に必要か見極めてから将来的に追加する
-- 詳細を残したいユーザーは、当面は Watcher（例: 話題リスト系）で埋めるか、Wiki export の書き起こしセクションを見る
+### スコープ
 
 対象セクション:
 
 - 概要（overview）
 - 決定事項（decisions）
 - アクションアイテム（action_items）
+- 議事詳細（topics）: 会議の話題ごとに時系列で積む詳細記録
 - meta として title / participants
+
+議事詳細（topics）は実戦データ（人手議事録との比較）で必要性を確認した上で追加した。トピック境界の
+判定は単語単位のリアルタイム判定ではなく、増分更新と同じバッチ patch（20セグメント/3分粒度）の
+判断に委ね、進行中の話題への追記・修正は `topics_update` で後追い統合することで、リアルタイム判定の
+精度不足を緩和する（詳細後述）。
 
 ### 更新トリガ
 
@@ -464,8 +465,14 @@ MVP ではアプリ内蔵の固定 schema。ユーザーが session ごとに書
 title: string
 participants: [string]
 overview: string
+topics:                      # 時系列。配列順 = 発生順
+  - id: string               # "tp_001" 形式。採番規則は action_items の "ai_00N" と同じ
+    heading: string          # 短いトピック見出し
+    body: string             # Markdown（要点の箇条書き想定）
+    source_seg_ids: [string]
 decisions:
-  - text: string
+  - id: string                # "dc_001" 形式。decisions_modify/decisions_remove の参照キー
+    text: string
     source_seg_ids: [string]
 action_items:
   - id: string
@@ -483,17 +490,29 @@ state は `sessions/<id>/summary.state.json` に保存される。長時間会�
 | セクション | 更新モード | LLM が返すもの |
 |-----------|-----------|----------------|
 | title | cumulative | 変更があれば新値、なければ null |
-| participants | append_only | 追加された人だけ |
+| participants | append_only | 追加された人だけ（`mic` / `system` などチャネルラベルと同名の要素はアプリ側でフィルタし、追加しない。詳細後述） |
 | overview | snapshot | 全文（量が少ないので許容） |
-| decisions | append_only | 新規追加分のみ |
+| topics | add/update | 新しい話題が始まったときだけ `topics_add` で追加。進行中の話題への追記・修正は `topics_update` で該当 id の `body` を全文書き直す |
+| decisions | add/modify/remove | `decisions_add`（新規）/ `decisions_modify`（既存 text の言い直し・修正）/ `decisions_remove`（撤回・誤登録の削除）の3操作。append_only だと言い直し・撤回のたびに新規追加され不要な決定が蓄積するため、この3操作にしている |
 | action_items | patch（add/modify/complete）| 差分操作 |
+
+### participants の予約チャネル名フィルタ
+
+サマリプロンプトのセグメント行は `seg_00350 (mic): ...` / `seg_00351 (system): ...` のように
+チャネルラベルを含む形式のため、LLM がラベルを発言者名と誤解し `participants_add` に
+`mic` / `system` を含めてしまうことがある。これを防ぐため、`participants_add` の適用時に
+（trim + 小文字化した完全一致で）`mic` / `system` と一致する要素をアプリ側で除外する。
+既存セッションの state に混入済みの `mic` / `system` も、次に state を読み込む操作のタイミングで
+同じ規則で浄化する。
 
 ### LLM への入出力の例
 
 **System prompt**（編集方針＝方針層は `Kikimi/Prompts/PromptSpec.swift` の default。
-`~/.config/kikimi/prompts/summary.md` で上書き可能で、patch 操作の構造ルール（decisions は追加のみ・
-action_items は add/modify/complete 等）はアプリが【patch 契約】として自動付与する。以下は現在の
-default での例）:
+`~/.config/kikimi/prompts/summary.md` で上書き可能で、patch 操作の構造ルール（topics は
+add/update・decisions は add/modify/remove・action_items は add/modify/complete 等）はアプリが
+【patch 契約】として自動付与する。以下は現在の default の要旨で、正確な全文は
+`PromptSpec.swift` の `summaryDefaultBody` / `SummaryPromptBuilder.patchContract`、または
+`--eject-prompt summary` で確認する）:
 
 ```
 あなたは会議サマリを更新するエディタです。前サマリ state と直近の会話を受け取り、変更差分（patch）を JSON で返してください。
@@ -501,13 +520,17 @@ default での例）:
 【編集方針】
 - title: 現在の state.title が空の場合は、会議内容を表す簡潔なタイトルを必ず提案する（会議名が明確でなければ議題や会話内容から推定する）。既に付いているタイトルは、明確に良くなる場合だけ新しい title を返し、実質同じ内容の言い換えなら null を返す
 - overview は必要に応じて全文書き直す。会議の流れと現時点の論点が短時間で掴める要約に保ち、発言の羅列にしない
-- decisions は会話で明確に合意・決定された事項だけを追加する。提案・検討段階のものを決定として書かない
+- decisions は「これをやる/やらない/この方針で進める」と明確に合意された事項だけにする。認識共有・現状理解の確認・可能性の言及は decision に入れない。既存の decision が後の会話で覆された・条件付きに変わった場合は decisions_modify で書き直すか decisions_remove で取り下げる
+- topics は会議の話題のまとまりごとに時系列で作る。見出しは内容が特定できる短い名詞句にし、body は要点の箇条書きにする。直近の会話が既存トピックの続きなら新トピックを作らず topics_update で該当トピックに統合する
 - action_items は担当や期限が発言から読み取れる場合のみ埋める。読み取れないときは assignee は空文字、due は null にする（推測で埋めない）
 - 書き起こしには誤変換があり得る。意味の取れない断片は無理にサマリへ反映しない
 
 【patch 契約】
-（アプリが自動付与: 出力は patch の JSON / participants_add は新規の発言者のみ / decisions は
-新規追加分のみ / action_items は add・modify・complete のいずれか / 変更がなければ全フィールド null）
+（アプリが自動付与: 出力は patch の JSON / participants_add は新規の発言者のみ、`(mic)` / `(system)`
+は音声チャネルのラベルであり発言者名ではないので入れない / topics_add・topics_update・
+decisions_add・decisions_modify・decisions_remove はそれぞれの操作分のみ / topics の id は
+"tp_001"、decisions の id は "dc_001" 形式で採番 / action_items は add・modify・complete の
+いずれか / 変更がなければ全フィールド null）
 ```
 
 **User prompt（毎回）**:
@@ -531,11 +554,12 @@ patch を返してください。
 ```json
 {
   "overview": "顧客A向け提案書作成の支援について...",
-  "decisions": {
-    "add": [
-      {"text": "スライド検索結果の新規UI開発はスコープ外", "source_seg_ids": ["seg_00087"]}
-    ]
-  },
+  "decisions_add": [
+    {"id": "dc_003", "text": "スライド検索結果の新規UI開発はスコープ外", "source_seg_ids": ["seg_00087"]}
+  ],
+  "topics_update": [
+    {"id": "tp_002", "body": "- 検索対象テーブルのデータ量を確認してから設計する\n- 新規UI開発はスコープ外", "source_seg_ids": ["seg_00087"]}
+  ],
   "action_items": {
     "add": [
       {"id": "ai_003", "task": "検索対象テーブルのデータ量確認", "assignee": "tanaka-san", "source_seg_ids": ["seg_00102"]}
@@ -546,6 +570,9 @@ patch を返してください。
   }
 }
 ```
+
+（`title` / `participants_add` / `topics_add` / `decisions_modify` / `decisions_remove` など
+変更のないフィールドは `null` のため省略。すべて JSON Schema 上は `required: []`。）
 
 ### view template（Mustache）
 
@@ -571,16 +598,31 @@ patch を返してください。
 |--------|------|------|
 {{#action_items}}| {{task}} | {{assignee}} | {{#due}}{{due}}{{/due}}{{^due}}—{{/due}} |
 {{/action_items}}
+
+## 議事詳細
+
+{{#topics}}### {{heading}}
+
+{{body}}
+
+{{/topics}}
 ```
 
-- 見出しの追加・削除・改名は可能。ただし **schema は固定**なので参照可能な変数は schema に定義された field のみ
+- 見出しの追加・削除・改名は可能。ただし **schema は固定**なので参照可能な変数は schema に定義された
+  field のみ（`{{title}}` `{{overview}}` `{{decisions}}` `{{action_items}}` `{{participants}}`
+  `{{topics}}`）
 - **participants の記法**: 実装の Mustache（GRMustache.swift）は `{{^-last}}` 拡張を持たないため、各参加者は
   `{{name}}`（名前）と `{{is_last}}`（末尾判定 bool）を持つオブジェクトとして展開される。区切りは
   `{{^is_last}}、{{/is_last}}` で表現する（詳細は `docs/design/04-summary-updater.md` §5）
-- **`{{#decisions}}`/`{{#action_items}}` の開始タグは行内（前の行の末尾ではなく、繰り返し行の直前）に詰めて書く**。
+- **topics の記法**: 各要素は `{{heading}}`（見出し）と `{{body}}`（Markdown 複数行）を持つ
+  オブジェクトとして展開される。`id` / `source_seg_ids` は内部管理キーなので template には露出しない
+- **`{{#decisions}}`/`{{#action_items}}`/`{{#topics}}` の開始タグは行内（前の行の末尾ではなく、繰り返し行の直前）に詰めて書く**。
   GRMustache.swift は「タグだけの行」を単独行として折りたたむため、開始タグを単独行のままにすると
   セクション前後に空行が入り、GFM のテーブルは空行で分断されてヘッダー行だけが表として解釈されてしまう
   （`action_items` のテーブルで特に致命的）。終了タグは単独行のままで問題ない
+- **レンダリングは text コンテンツ種別で固定**（`{{% CONTENT_TYPE:TEXT }}` プラグマを template 先頭に
+  付与）。既定の HTML コンテンツ種別のままだと `body` 等の Markdown 内の `& < >` がエスケープされ、
+  引用や比較演算子が壊れるため
 - 新規ウィンドウ作成時に `defaults.summary_template_file`（既定 `~/.config/kikimi/templates/summary.md`）をコピー
 
 ### テンプレート読み込み規則
@@ -599,8 +641,30 @@ patch を返してください。
 - 以降の patch の title は自動反映せず、`meta.title_proposal` にだけ保存し、**ヘッダに「新しいタイトル案: XX [採用]」の提案バッジ**を出す
   - ユーザーが `[採用]` を押すと `meta.title` に反映し、`title_proposal = null`
   - ユーザーが無視すれば次の patch で `title_proposal` が上書きされる
-- **セッション終了時（`on_session_end`）**: 全 refined から最終タイトル案を生成し、同じ提案バッジで通知。手動採用まで自動反映しない
+- **セッション終了時（`on_session_end`）**: 下記の最終整形パスの後に、全 refined から最終タイトル案を生成し、同じ提案バッジで通知。手動採用まで自動反映しない（改善後の overview / decisions を材料に命名できるよう、最終整形パスを先に行う）
 - ユーザーが UI で手動編集すると `title_auto_generated = false` に固定され、以降は提案バッジも出さない
+
+### セッション終了時の最終整形パス
+
+増分 patch は直近セグメントへの局所最適を積むため、overview の直近話題への偏り・decisions の
+粒度不揃いが構造的に残る。これを補うため、`on_session_end`（会議終了時）に**会議全体を一望する
+1 回の LLM 呼び出し**で overview / decisions / action_items を最終版に全置換する。
+
+- **入力**: 全セグメント（refined 優先・無ければ raw）+ 現在の state（浄化済み。topics も含めて
+  参考材料として渡す）
+- **対象外**: title（上記の最終タイトル案生成が担当）・participants（diarization merge が担当）・
+  topics（増分で時系列に積むこと自体に価値があり、全体俯瞰による再編の効果が薄いため書き直さない。
+  劣化時は下記の全文再生成モードで作り直せる）
+- **実行順序**: `Ended` 遷移時、末尾セグメントを topics に反映する増分更新（`pauseFlush`）→
+  最終整形パス → 最終タイトル案生成、の順で直列に実行する。`Paused` 経由の終了では増分更新は
+  pause 時に実行済みのため、最終整形パスから始まる（flush が最終整形パスより先という順序保証は
+  どちらの経路でも変わらない）
+- LLM 呼び出しが失敗（CLI 不在・認証・タイムアウト等）した場合は warn して skip し、増分で積んだ
+  state / summary.md がそのまま最終成果物になる。`on_session_end` の完了は妨げない
+- 応答が実質空（overview が空 かつ decisions / action_items も空）で、かつ適用前 state が非空の
+  場合は適用せず skip する（LLM の空応答で積み上げを消す事故の防止）
+- **Ended の再開・再終了**: `on_session_end` は冪等（4 章参照）なので、再開して録り足した後の
+  再終了でも最終整形パスは再実行され、追加分が反映される
 
 ### 全文再生成モード（救済パス）
 
@@ -1347,9 +1411,10 @@ Kikimi は Chirami から会議書き起こしを分離した専用アプリで�
 4. **セッションローカルな context / summary_template / Watcher** でプリセット登録なしにアドホック準備が完結。過去セッション複製で繰り返し会議を最短化
 5. **モデル分離**（refinement / summary / watchers で個別指定）で用途に応じたコスト/品質バランス
 6. **schema + view + patch の分離**をサマリ・Watcher の両方に適用。LLM は差分だけ返し、表示は決定論的にレンダリング。会議が長くなっても更新コストが増えにくい
-7. **議事詳細は MVP スコープ外**。トピック境界のリアルタイム判定が難しいため、実戦で必要性を確認してから追加検討
-8. **LLM Wiki への自動 export**で個人ナレッジベースにシームレスに接続する
-9. **Chirami との完全分離**で、両アプリがそれぞれの本質に集中できるようにする
+7. **議事詳細（topics）はサマリに含める**。境界判定はリアルタイムの単語単位ではなくバッチ patch（20セグメント/3分粒度）の判断に委ね、`topics_update` による後追い統合で精度不足を緩和する（実戦データでの必要性確認を経て追加）
+8. **セッション終了時に会議全体を俯瞰した最終整形パスを1回実行**し、overview / decisions / action_items を作り直す。増分 patch は直近セグメントへの局所最適が蓄積しやすいため、終了時点で品質を底上げする
+9. **LLM Wiki への自動 export**で個人ナレッジベースにシームレスに接続する
+10. **Chirami との完全分離**で、両アプリがそれぞれの本質に集中できるようにする
 
 Phase 4（実戦3本）でチェックポイントを置き、そこで Chirami からの transcript 削除に踏み込む。
 

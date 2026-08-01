@@ -25,8 +25,57 @@ struct LLMStubProvider: Sendable {
     /// `KIKIMI_STUB_LLM_FILE` fixture: without it every chat send under `KIKIMI_STUB_LLM=1`
     /// (`mise run verify-smoke`, the `kikimi-verify` skill) throws `missingStructuredOutput`. The
     /// canned answer is Markdown so the tab's web-view rendering is exercised too.
+    ///
+    /// `"summary_patch"` / `"final_title"` / `"summary_final"` (kikimi.md 8 章,
+    /// `docs/design/summary-quality-topics-and-final-pass.md` §7.4/§7.5) close the same gap for
+    /// `SummaryUpdater`: without them, the incremental update / final title proposal / session-end
+    /// final pass all throw `missingStructuredOutput` under `KIKIMI_STUB_LLM=1`, so
+    /// `summary.state.json` / `summary.md` are never produced in stub mode.
+    ///
+    /// Replay-safety (`SummaryUpdater` can call `"summary_patch"` more than once per session --
+    /// every 20 new segments or 3 minutes, `kikimi.md` 8 章's "更新トリガ"): a raw JSON string
+    /// answers *every* call identically, so any patch op that is not naturally idempotent under
+    /// replay would accumulate garbage across repeated calls in one long session. `title`
+    /// (cumulative overwrite) / `overview` (snapshot overwrite) / `decisions_add` (de-duplicated by
+    /// normalized `text` in `SummaryPatchApplier.applyDecisionsAdd`) are all safe to replay
+    /// unchanged. `topics_add` and `action_items.add` are deliberately **omitted** here: unlike
+    /// `decisions_add`, `SummaryPatchApplier.applyTopicsAdd`/`applyActionItemAdds` have no
+    /// content-level de-duplication -- an `id` collision is renamed and appended, never merged/
+    /// dropped -- so a static `topics_add`/`action_items.add` entry replayed across multiple
+    /// `"summary_patch"` calls would grow a duplicate topic under 議事詳細 / a duplicate action
+    /// item (same heading/task text, incrementing `tp_00N`/`ai_00N` id) every time. Callers that
+    /// need deterministic topics/action-item stub output (e.g. to exercise the 議事詳細 template
+    /// section) should supply it via `KIKIMI_STUB_LLM_FILE` instead, scoped to a run that only
+    /// triggers one `"summary_patch"` call.
+    ///
+    /// `"summary_final"` (`SummaryFinalRevision`) does not have this problem: `applyFinalRevision`
+    /// replaces `overview`/`decisions`/`action_items` wholesale, so replaying the same response is
+    /// idempotent by construction. Per contract (§7.2), it must not -- and does not -- include an
+    /// `id` field on any decision/action item; `applyFinalRevision` renumbers `dc_00N`/`ai_00N` on
+    /// apply.
     private static let builtinDefaults: [String: String] = [
-        "chat": #"{"answer": "[stub] スタブ応答です。\n\n- 実際の LLM は呼ばれていません\n- `KIKIMI_STUB_LLM_FILE` で上書きできます"}"#
+        "chat": #"{"answer": "[stub] スタブ応答です。\n\n- 実際の LLM は呼ばれていません\n- `KIKIMI_STUB_LLM_FILE` で上書きできます"}"#,
+        "summary_patch": #"""
+        {
+          "title": "[stub] スタブ会議サマリ",
+          "overview": "[stub] スタブ応答による概要です。実際の LLM は呼ばれていません。`KIKIMI_STUB_LLM_FILE` で上書きできます。",
+          "decisions_add": [
+            {"id": "dc_001", "text": "[stub] スタブの決定事項です", "source_seg_ids": []}
+          ]
+        }
+        """#,
+        "final_title": #"{"title": "[stub] スタブ会議サマリ"}"#,
+        "summary_final": #"""
+        {
+          "overview": "[stub] スタブ応答による最終概要です。実際の LLM は呼ばれていません。`KIKIMI_STUB_LLM_FILE` で上書きできます。",
+          "decisions": [
+            {"text": "[stub] スタブの決定事項です", "source_seg_ids": []}
+          ],
+          "action_items": [
+            {"task": "[stub] スタブのアクションアイテムです", "assignee": "", "due": null, "status": "open", "source_seg_ids": []}
+          ]
+        }
+        """#
     ]
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment) {
