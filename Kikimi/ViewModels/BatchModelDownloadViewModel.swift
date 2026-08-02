@@ -87,6 +87,59 @@ final class BatchModelDownloadViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Downloaded models list (design 45 §5.1)
+
+    /// One row of the "ダウンロード済みモデル" list.
+    struct CachedModel: Identifiable {
+        let id: String
+        let label: String
+        let bytes: Int64
+        /// Non-nil when deletion is blocked, and says why (shown instead of the button).
+        let inUseReason: String?
+        let target: BatchModelDownload.Target
+    }
+
+    @Published private(set) var cachedModels: [CachedModel] = []
+
+    var cachedTotalBytes: Int64 { cachedModels.reduce(0) { $0 + $1.bytes } }
+
+    /// Rebuilds the list from disk. Only models actually present are listed -- an entry for
+    /// something never downloaded would just be a second, worse copy of the picker.
+    func refreshCachedModels(
+        batchModel: String,
+        language: String,
+        twoPassDecode: Bool,
+        dictationEnabled: Bool,
+        dictationTwoPassDecode: Bool
+    ) {
+        cachedModels = BatchModelDownload.allTargets(language: language).compactMap { entry in
+            guard let bytes = BatchModelDownload.cachedBytes(entry.target) else { return nil }
+            return CachedModel(
+                id: entry.label,
+                label: entry.label,
+                bytes: bytes,
+                inUseReason: BatchModelDownload.usageBlockingDeletion(
+                    entry.target,
+                    meetingBatchModel: batchModel,
+                    meetingTwoPassDecode: twoPassDecode,
+                    dictationEnabled: dictationEnabled,
+                    dictationTwoPassDecode: dictationTwoPassDecode,
+                    language: language),
+                target: entry.target)
+        }
+    }
+
+    /// Deletes one model's weights. The caller confirms first: re-downloading is minutes and up to
+    /// 2.3GB, so a mis-click is expensive even though nothing is permanently lost.
+    func delete(_ model: CachedModel) {
+        do {
+            try BatchModelDownload.delete(model.target)
+            cachedModels.removeAll { $0.id == model.id }
+        } catch {
+            phase = .failed("削除に失敗しました: \(error.localizedDescription)")
+        }
+    }
+
     /// Human-readable size for the ready state. `nil` bytes prints nothing rather than "0 MB",
     /// which would read as "downloaded but empty".
     static func formatBytes(_ bytes: Int64?) -> String? {

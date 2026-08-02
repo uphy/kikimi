@@ -32,12 +32,78 @@ struct BatchModelSection: View {
             // downloads even with the model row unchanged.
             .onChange(of: appConfig.data.stt.batchModel) { _, _ in refresh() }
             .onChange(of: appConfig.data.stt.language) { _, _ in refresh() }
+            // A finished download puts a new model on disk; without this the list below would not
+            // show it until the tab is left and reopened.
+            .onChange(of: downloadModel.phase) { _, _ in refreshCachedModels() }
+
+        cachedModelsGroup
     }
+
+    /// Every model actually on disk, with its size and a delete action. Separate from the row
+    /// above because that one only ever describes the *selected* model: after switching, the model
+    /// you want to reclaim space from is by definition the one no longer selected, so a
+    /// delete button up there could never reach it.
+    @ViewBuilder
+    private var cachedModelsGroup: some View {
+        if !downloadModel.cachedModels.isEmpty {
+            DisclosureGroup {
+                ForEach(downloadModel.cachedModels) { model in
+                    LabeledContent(model.label) {
+                        HStack(spacing: 8) {
+                            Text(BatchModelDownloadViewModel.formatBytes(model.bytes) ?? "")
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                            if let reason = model.inUseReason {
+                                Text(reason).foregroundStyle(.secondary)
+                            } else {
+                                Button("削除") { pendingDeletion = model }
+                            }
+                        }
+                    }
+                }
+            } label: {
+                LabeledContent("ダウンロード済みモデル") {
+                    Text("合計 \(BatchModelDownloadViewModel.formatBytes(downloadModel.cachedTotalBytes) ?? "")")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .confirmationDialog(
+                pendingDeletion.map { "\($0.label) を削除しますか？" } ?? "",
+                isPresented: Binding(
+                    get: { pendingDeletion != nil },
+                    set: { if !$0 { pendingDeletion = nil } }),
+                titleVisibility: .visible
+            ) {
+                Button("削除", role: .destructive) {
+                    if let model = pendingDeletion { downloadModel.delete(model) }
+                    pendingDeletion = nil
+                }
+                Button("キャンセル", role: .cancel) { pendingDeletion = nil }
+            } message: {
+                Text("再び使うときはダウンロードし直しになります（最大 2.3 GB・数分）")
+            }
+        }
+    }
+
+    /// Set while the confirmation dialog is up. Deleting is reversible in principle -- the weights
+    /// can be fetched again -- but "again" is minutes and up to 2.3GB, so a mis-click is worth a
+    /// confirmation.
+    @State private var pendingDeletion: BatchModelDownloadViewModel.CachedModel?
 
     private func refresh() {
         downloadModel.refresh(
             batchModel: appConfig.data.stt.batchModel,
             language: appConfig.data.stt.language)
+        refreshCachedModels()
+    }
+
+    private func refreshCachedModels() {
+        downloadModel.refreshCachedModels(
+            batchModel: appConfig.data.stt.batchModel,
+            language: appConfig.data.stt.language,
+            twoPassDecode: appConfig.data.stt.twoPassDecode,
+            dictationEnabled: appConfig.data.dictation.enabled,
+            dictationTwoPassDecode: appConfig.data.dictation.twoPassDecode)
     }
 
     /// The state of the selected model's weights. Present as its own row rather than only as an

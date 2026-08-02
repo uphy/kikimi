@@ -95,6 +95,64 @@ enum BatchModelDownload {
         return total
     }
 
+    /// Every model the picker can select, in display order, for the "downloaded models" list.
+    /// `language` only affects the Parakeet entry (it still resolves its variant by BCP-47
+    /// subtag), so the list follows whatever the STT section currently has.
+    static func allTargets(language: String) -> [(label: String, target: Target)] {
+        var targets: [(String, Target)] = []
+        #if canImport(Qwen3ASR)
+        targets += Qwen3Variant.allCases.map { ($0.displayName, Target.qwen3($0)) }
+        #endif
+        targets.append(("Parakeet 日本語", .parakeet(BatchAsrDecoder.resolveModelVersion(language: language))))
+        return targets
+    }
+
+    /// Deletes the cached weights.
+    ///
+    /// Only ever removes the resolved model directory, never a shared parent: FluidAudio keeps
+    /// every model it manages (diarization, the streaming Nemotron, …) under one root, and
+    /// deleting that root to reclaim one ASR model would silently take the rest with it.
+    static func delete(_ target: Target) throws {
+        guard let dir = cacheDirectory(for: target) else { return }
+        guard FileManager.default.fileExists(atPath: dir.path) else { return }
+        try FileManager.default.removeItem(at: dir)
+        logger.info("deleted cached model at \(dir.lastPathComponent, privacy: .public)")
+    }
+
+    /// Why a model must not be deleted right now, or nil when it is safe to remove.
+    ///
+    /// Dictation matters here and is easy to miss: it runs its own second pass through
+    /// `BatchAsrDecoderPool` (`DictationBatchTranscriber`), so Parakeet stays in use even when a
+    /// meeting is set to Qwen3. Deleting it would work, and then quietly re-download ~590MB on the
+    /// next key-up.
+    static func usageBlockingDeletion(
+        _ target: Target,
+        meetingBatchModel: String,
+        meetingTwoPassDecode: Bool,
+        dictationEnabled: Bool,
+        dictationTwoPassDecode: Bool,
+        language: String
+    ) -> String? {
+        let selected = self.target(batchModel: meetingBatchModel, language: language)
+        if meetingTwoPassDecode, isSameKind(target, selected) {
+            return "使用中"
+        }
+        if dictationEnabled, dictationTwoPassDecode, case .parakeet = target {
+            return "ディクテーションで使用中"
+        }
+        return nil
+    }
+
+    /// `Target` cannot be `Equatable` for free -- FluidAudio's `AsrModelVersion` is not -- and the
+    /// comparison only ever needs to say "same model", so it is spelled out.
+    private static func isSameKind(_ lhs: Target, _ rhs: Target) -> Bool {
+        switch (lhs, rhs) {
+        case (.qwen3(let a), .qwen3(let b)): return a == b
+        case (.parakeet(let a), .parakeet(let b)): return a == b
+        default: return false
+        }
+    }
+
     /// Fetches the weights, reporting progress as a 0...1 fraction plus a status message.
     ///
     /// Qwen3 loads as well as downloads (speech-swift exposes no download-only entry point) and

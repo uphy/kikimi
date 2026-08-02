@@ -23,6 +23,14 @@ enum Qwen3Variant: String, Codable, Equatable, Sendable, CaseIterable {
     /// on a memory-constrained machine that trade may be the right one.
     case small = "qwen3-0.6b"
 
+    /// Shown in Settings' picker and downloaded-models list.
+    var displayName: String {
+        switch self {
+        case .large: return "Qwen3-ASR 1.7B"
+        case .small: return "Qwen3-ASR 0.6B"
+        }
+    }
+
     var modelId: String {
         switch self {
         case .large: return "aufklarer/Qwen3-ASR-1.7B-MLX-8bit"
