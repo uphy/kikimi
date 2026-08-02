@@ -57,12 +57,13 @@ private func makeConfig(
 /// key purely from `config`/`environment`, never the real Keychain (`docs/design/26-settings-ui.md`
 /// §6.1).
 private func makeBackend(
+    providerName: String = "openai",
     config: OpenAIBackendConfig,
     transport: HTTPTransporting,
     environment: [String: String] = [:],
     credentialStore: CredentialStoring = InMemoryCredentialStore()
 ) -> OpenAIChatBackend {
-    OpenAIChatBackend(config: config, transport: transport, environment: environment, credentialStore: credentialStore)
+    OpenAIChatBackend(providerName: providerName, config: config, transport: transport, environment: environment, credentialStore: credentialStore)
 }
 
 private func makeChatRequest(model: String = "gpt-4o-mini", timeout: Duration = .seconds(30)) -> LLMRequest {
@@ -147,43 +148,126 @@ struct OpenAIChatBackendTests {
         #expect(OpenAIChatBackend.resolveAuthHeaderKind(authHeader: "", apiVersion: "") == .bearer)
     }
 
-    // MARK: - API key resolution (`docs/design/26-settings-ui.md` §3.2)
+    // MARK: - API key resolution (`docs/design/44-llm-model-config.md` §6)
 
-    @Test("resolveAPIKey prefers a non-empty Keychain value over api_key/api_key_env")
-    func resolveAPIKeyPrefersKeychain() throws {
+    @Test("resolveAPIKey prefers the per-provider account over api_key/api_key_env")
+    func resolveAPIKeyPrefersProviderAccount() throws {
         let config = makeConfig(apiKey: "direct-key", apiKeyEnv: "OPENAI_API_KEY")
         let credentialStore = InMemoryCredentialStore()
-        try credentialStore.write("keychain-key", account: CredentialAccount.openAIAPIKey)
-        let key = OpenAIChatBackend.resolveAPIKey(config: config, environment: ["OPENAI_API_KEY": "env-key"], credentialStore: credentialStore)
-        #expect(key == "keychain-key")
+        try credentialStore.write("provider-key", account: CredentialAccount.providerAPIKey(name: "azure"))
+        let key = OpenAIChatBackend.resolveAPIKey(providerName: "azure", config: config, environment: ["OPENAI_API_KEY": "env-key"], credentialStore: credentialStore)
+        #expect(key == "provider-key")
     }
 
-    @Test("resolveAPIKey prefers a non-empty api_key over api_key_env when Keychain is empty")
+    @Test("resolveAPIKey prefers a non-empty api_key over api_key_env when the provider account is empty")
     func resolveAPIKeyPrefersDirectKey() throws {
         let config = makeConfig(apiKey: "direct-key", apiKeyEnv: "OPENAI_API_KEY")
-        let key = OpenAIChatBackend.resolveAPIKey(config: config, environment: ["OPENAI_API_KEY": "env-key"], credentialStore: InMemoryCredentialStore())
+        let key = OpenAIChatBackend.resolveAPIKey(providerName: "azure", config: config, environment: ["OPENAI_API_KEY": "env-key"], credentialStore: InMemoryCredentialStore())
         #expect(key == "direct-key")
     }
 
-    @Test("resolveAPIKey falls back to api_key_env when Keychain and api_key are both empty")
+    @Test("resolveAPIKey falls back to api_key_env when the provider account and api_key are both empty")
     func resolveAPIKeyFallsBackToEnv() throws {
         let config = makeConfig(apiKey: "", apiKeyEnv: "OPENAI_API_KEY")
-        let key = OpenAIChatBackend.resolveAPIKey(config: config, environment: ["OPENAI_API_KEY": "env-key"], credentialStore: InMemoryCredentialStore())
+        let key = OpenAIChatBackend.resolveAPIKey(providerName: "azure", config: config, environment: ["OPENAI_API_KEY": "env-key"], credentialStore: InMemoryCredentialStore())
         #expect(key == "env-key")
     }
 
-    @Test("resolveAPIKey returns nil when Keychain, api_key, and api_key_env all resolve empty")
+    @Test("resolveAPIKey returns nil when the provider account, api_key, and api_key_env all resolve empty")
     func resolveAPIKeyThrowsMissingAPIKey() throws {
         let config = makeConfig(apiKey: "", apiKeyEnv: "")
-        let key = OpenAIChatBackend.resolveAPIKey(config: config, environment: [:], credentialStore: InMemoryCredentialStore())
+        let key = OpenAIChatBackend.resolveAPIKey(providerName: "azure", config: config, environment: [:], credentialStore: InMemoryCredentialStore())
         #expect(key == nil)
     }
 
     @Test("resolveAPIKey returns nil when api_key_env names an unset environment variable")
     func resolveAPIKeyThrowsMissingAPIKeyForUnsetEnv() throws {
         let config = makeConfig(apiKey: "", apiKeyEnv: "OPENAI_API_KEY")
-        let key = OpenAIChatBackend.resolveAPIKey(config: config, environment: [:], credentialStore: InMemoryCredentialStore())
+        let key = OpenAIChatBackend.resolveAPIKey(providerName: "azure", config: config, environment: [:], credentialStore: InMemoryCredentialStore())
         #expect(key == nil)
+    }
+
+    // MARK: - Legacy account migration (§6 step 2)
+
+    @Test("resolveAPIKey migrates the legacy llm.openai.api_key account when the provider is named \"openai\"")
+    func resolveAPIKeyMigratesLegacyAccountForOpenAIProvider() throws {
+        let config = makeConfig(apiKey: "direct-key", apiKeyEnv: "")
+        let credentialStore = InMemoryCredentialStore()
+        try credentialStore.write("legacy-key", account: CredentialAccount.openAIAPIKey)
+
+        let key = OpenAIChatBackend.resolveAPIKey(providerName: "openai", config: config, environment: [:], credentialStore: credentialStore)
+
+        #expect(key == "legacy-key")
+        // §6 step 2's "コピー → 削除": the value now lives under the new per-provider account, and the
+        // legacy account is gone, so the next resolution goes straight through step 1.
+        #expect(credentialStore.read(account: CredentialAccount.providerAPIKey(name: "openai")) == "legacy-key")
+        #expect(credentialStore.read(account: CredentialAccount.openAIAPIKey) == nil)
+    }
+
+    @Test("resolveAPIKey never reads the legacy account for a provider not named \"openai\"")
+    func resolveAPIKeyDoesNotMigrateForOtherProviderNames() throws {
+        let config = makeConfig(apiKey: "", apiKeyEnv: "")
+        let credentialStore = InMemoryCredentialStore()
+        try credentialStore.write("legacy-key", account: CredentialAccount.openAIAPIKey)
+
+        let key = OpenAIChatBackend.resolveAPIKey(providerName: "azure", config: config, environment: [:], credentialStore: credentialStore)
+
+        #expect(key == nil)
+        // The legacy account is untouched -- migration is gated to the literal name "openai" (§4's
+        // migration always uses that name for a migrated openai-kind provider).
+        #expect(credentialStore.read(account: CredentialAccount.openAIAPIKey) == "legacy-key")
+    }
+
+    /// Selectively fails `write`/`delete` while delegating everything else to an in-memory backing
+    /// store -- exercises §6 step 2's "コピー → 削除、失敗は次回リトライ" failure tolerance without a
+    /// real credential store.
+    private final class SelectivelyFailingCredentialStore: CredentialStoring, @unchecked Sendable {
+        private let backing = InMemoryCredentialStore()
+        var failWrite = false
+        var failDelete = false
+
+        func read(account: String) -> String? { backing.read(account: account) }
+
+        func write(_ value: String, account: String) throws {
+            if failWrite { throw CredentialStoreError.invalidEncoding }
+            try backing.write(value, account: account)
+        }
+
+        func delete(account: String) throws {
+            if failDelete { throw CredentialStoreError.invalidEncoding }
+            try backing.delete(account: account)
+        }
+    }
+
+    @Test("resolveAPIKey still returns the legacy value when the migration write fails, leaving the legacy account intact for the next retry")
+    func resolveAPIKeyMigrationSurvivesWriteFailure() throws {
+        let config = makeConfig(apiKey: "direct-key", apiKeyEnv: "")
+        let credentialStore = SelectivelyFailingCredentialStore()
+        try credentialStore.write("legacy-key", account: CredentialAccount.openAIAPIKey)
+        credentialStore.failWrite = true // only the migration's own write (inside resolveAPIKey) fails
+
+        let key = OpenAIChatBackend.resolveAPIKey(providerName: "openai", config: config, environment: [:], credentialStore: credentialStore)
+
+        #expect(key == "legacy-key")
+        // Nothing was moved: the new account stays empty and the legacy account is untouched, so the
+        // next call retries the same copy step from scratch.
+        #expect(credentialStore.read(account: CredentialAccount.providerAPIKey(name: "openai")) == nil)
+        #expect(credentialStore.read(account: CredentialAccount.openAIAPIKey) == "legacy-key")
+    }
+
+    @Test("resolveAPIKey still returns the migrated value when deleting the stale legacy account fails")
+    func resolveAPIKeyMigrationSurvivesDeleteFailure() throws {
+        let config = makeConfig(apiKey: "direct-key", apiKeyEnv: "")
+        let credentialStore = SelectivelyFailingCredentialStore()
+        try credentialStore.write("legacy-key", account: CredentialAccount.openAIAPIKey)
+        credentialStore.failDelete = true
+
+        let key = OpenAIChatBackend.resolveAPIKey(providerName: "openai", config: config, environment: [:], credentialStore: credentialStore)
+
+        #expect(key == "legacy-key")
+        // The copy still landed under the new account even though cleanup of the old one failed.
+        #expect(credentialStore.read(account: CredentialAccount.providerAPIKey(name: "openai")) == "legacy-key")
+        #expect(credentialStore.read(account: CredentialAccount.openAIAPIKey) == "legacy-key")
     }
 
     // MARK: - Model resolution (section 3)
@@ -198,6 +282,59 @@ struct OpenAIChatBackendTests {
     func resolveModelFallsBackToRequestModel() {
         let config = makeConfig(model: "")
         #expect(OpenAIChatBackend.resolveModel(config: config, requestModel: "gpt-4o-mini") == "gpt-4o-mini")
+    }
+
+    // MARK: - reasoning_effort resolution (`docs/design/44-llm-model-config.md` §5.3)
+
+    @Test("resolveReasoningEffort prefers request.params.effort over the provider's reasoning_effort")
+    func resolveReasoningEffortPrefersParams() {
+        #expect(OpenAIChatBackend.resolveReasoningEffort(paramsEffort: "high", providerReasoningEffort: "low") == "high")
+    }
+
+    @Test("resolveReasoningEffort falls back to the provider's reasoning_effort when params.effort is nil")
+    func resolveReasoningEffortFallsBackToProviderWhenParamsNil() {
+        #expect(OpenAIChatBackend.resolveReasoningEffort(paramsEffort: nil, providerReasoningEffort: "low") == "low")
+    }
+
+    @Test("resolveReasoningEffort falls back to the provider's reasoning_effort when params.effort is empty")
+    func resolveReasoningEffortFallsBackToProviderWhenParamsEmpty() {
+        #expect(OpenAIChatBackend.resolveReasoningEffort(paramsEffort: "", providerReasoningEffort: "low") == "low")
+    }
+
+    @Test("resolveReasoningEffort is nil when neither params.effort nor the provider default is set")
+    func resolveReasoningEffortNilWhenBothUnset() {
+        #expect(OpenAIChatBackend.resolveReasoningEffort(paramsEffort: nil, providerReasoningEffort: "") == nil)
+    }
+
+    @Test("buildURLRequest sends request.params.effort as reasoning_effort, overriding the provider default")
+    func buildURLRequestSendsParamsEffortOverridingProviderDefault() throws {
+        let config = makeConfig(reasoningEffort: "low")
+        var request = makeChatRequest()
+        request.params = LLMCallParams(effort: "high")
+        let urlRequest = try OpenAIChatBackend.buildURLRequest(request: request, config: config, apiKey: "sk-test")
+
+        let body = try #require(urlRequest.httpBody)
+        let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        #expect(json["reasoning_effort"] as? String == "high")
+    }
+
+    @Test("buildURLRequest falls back to the provider's reasoning_effort when request.params.effort is nil")
+    func buildURLRequestFallsBackToProviderReasoningEffort() throws {
+        let config = makeConfig(reasoningEffort: "low")
+        let urlRequest = try OpenAIChatBackend.buildURLRequest(request: makeChatRequest(), config: config, apiKey: "sk-test")
+
+        let body = try #require(urlRequest.httpBody)
+        let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        #expect(json["reasoning_effort"] as? String == "low")
+    }
+
+    @Test("buildURLRequest omits reasoning_effort when neither request.params.effort nor the provider default is set")
+    func buildURLRequestOmitsReasoningEffortWhenBothUnset() throws {
+        let urlRequest = try OpenAIChatBackend.buildURLRequest(request: makeChatRequest(), config: makeConfig(), apiKey: "sk-test")
+
+        let body = try #require(urlRequest.httpBody)
+        let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        #expect(json["reasoning_effort"] == nil)
     }
 
     // MARK: - Request body assembly (section 4.1)
@@ -500,6 +637,25 @@ struct OpenAIChatBackendTests {
         // `parseResponse` alone (`resolveRespondedModel`'s fallback chain).
         #expect(response.respondedModel == "gpt-5.4-nano")
         #expect(await transport.callCount == 1)
+    }
+
+    @Test("complete(_:) resolves the API key from the per-provider credential account, not just config.api_key")
+    func completeResolvesAPIKeyFromPerProviderCredentialAccount() async throws {
+        // Distinct from `completeSendsRequestAndReturnsParsedResponse` (which relies on `makeConfig`'s
+        // default `config.apiKey`): this exercises the full `init` -> `apiKeySource` -> `resolveAPIKey`
+        // path end to end for a non-default provider name, proving the `Authorization` header a real
+        // `complete(_:)` call sends is actually built from `CredentialAccount.providerAPIKey(name:)`
+        // (`docs/design/44-llm-model-config.md` §6), not merely that the static `resolveAPIKey`
+        // function alone returns the right value.
+        let credentialStore = InMemoryCredentialStore()
+        try credentialStore.write("azure-secret", account: CredentialAccount.providerAPIKey(name: "azure"))
+        let transport = FakeHTTPTransport(dataToReturn: chatCompletionJSON(content: "{\"title\":\"hello\"}", model: "gpt-5.4-nano"))
+        let backend = makeBackend(providerName: "azure", config: makeConfig(apiKey: "", apiKeyEnv: ""), transport: transport, credentialStore: credentialStore)
+
+        _ = try await backend.complete(makeChatRequest())
+
+        let sentRequest = await transport.lastRequest
+        #expect(sentRequest?.value(forHTTPHeaderField: "Authorization") == "Bearer azure-secret")
     }
 
     @Test("complete(_:) throws missingAPIKey without sending a request when no API key resolves")

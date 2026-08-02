@@ -1,100 +1,6 @@
 import Foundation
 import OSLog
 
-// MARK: - SummaryConfig
-
-/// `summary:` section of `config.yaml` (kikimi.md 12 章, `docs/design/04-summary-updater.md` §8).
-/// Wired into `AppConfig`/`KikimiConfigData` (`Kikimi/Config/AppConfig.swift`) and consumed by
-/// `MeetingWorkspaceViewModel.defaultSummaryUpdaterFactory`
-/// (`MeetingWorkspaceViewModel+Factories.swift`), which passes `AppConfig.shared.data.summary`
-/// instead of a struct-literal default.
-struct SummaryConfig: Codable, Sendable, Equatable {
-    /// `summary.model`. Independent of `refinement.model` / Watcher models (kikimi.md 12 章: each is
-    /// configured separately).
-    var model: String
-    /// `summary.update_trigger_segments`.
-    var updateTriggerSegments: Int
-    /// `summary.update_trigger_seconds`.
-    var updateTriggerSeconds: Int
-    /// `summary.auto_naming`. When `false`, every auto-title mechanism in §3 is suppressed (the
-    /// summary body itself still updates normally).
-    var autoNaming: Bool
-
-    enum CodingKeys: String, CodingKey {
-        case model
-        case updateTriggerSegments = "update_trigger_segments"
-        case updateTriggerSeconds = "update_trigger_seconds"
-        case autoNaming = "auto_naming"
-    }
-
-    /// The exact defaults documented in kikimi.md 12 章's `config.yaml` sample.
-    static let `default` = SummaryConfig(
-        model: "claude-haiku-4-5-20251001",
-        updateTriggerSegments: 20,
-        updateTriggerSeconds: 180,
-        autoNaming: true
-    )
-
-    /// Every parameter defaults to `SummaryConfig.default`'s own value so existing call sites that
-    /// construct this with only a subset of fields (e.g. `SummaryConfig(updateTriggerSegments: 1)` in
-    /// `SummaryUpdaterTests`/`MeetingWorkspaceViewModelTests`) keep compiling unchanged even though
-    /// `init(from:)` below suppresses the memberwise initializer Swift would otherwise synthesize.
-    init(
-        model: String = "claude-haiku-4-5-20251001",
-        updateTriggerSegments: Int = 20,
-        updateTriggerSeconds: Int = 180,
-        autoNaming: Bool = true
-    ) {
-        self.model = model
-        self.updateTriggerSegments = updateTriggerSegments
-        self.updateTriggerSeconds = updateTriggerSeconds
-        self.autoNaming = autoNaming
-    }
-
-    private static let logger = Logger(subsystem: "io.github.uphy.Kikimi", category: "SummaryConfig")
-
-    /// Custom decoder mirroring `RefinementConfig.init(from:)` (`Kikimi/Config/AppConfig.swift`): a
-    /// partial (or absent) `summary:` section fills every missing field from `SummaryConfig.default`
-    /// rather than failing the whole `config.yaml` decode. `update_trigger_segments`/
-    /// `update_trigger_seconds` are additionally clamped to their default with a `.warning` log when
-    /// out of range, since they feed directly into `SummaryUpdater`'s flush-timer arithmetic where a
-    /// negative or zero value would misbehave rather than merely look wrong.
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        model = try container.decodeIfPresent(String.self, forKey: .model) ?? Self.default.model
-
-        let decodedUpdateTriggerSegments =
-            try container.decodeIfPresent(Int.self, forKey: .updateTriggerSegments) ?? Self.default.updateTriggerSegments
-        if decodedUpdateTriggerSegments < 1 {
-            Self.logger.warning(
-                """
-                summary.update_trigger_segments=\(decodedUpdateTriggerSegments, privacy: .public) must be >= 1; \
-                falling back to \(Self.default.updateTriggerSegments, privacy: .public)
-                """
-            )
-            updateTriggerSegments = Self.default.updateTriggerSegments
-        } else {
-            updateTriggerSegments = decodedUpdateTriggerSegments
-        }
-
-        let decodedUpdateTriggerSeconds =
-            try container.decodeIfPresent(Int.self, forKey: .updateTriggerSeconds) ?? Self.default.updateTriggerSeconds
-        if decodedUpdateTriggerSeconds < 0 {
-            Self.logger.warning(
-                """
-                summary.update_trigger_seconds=\(decodedUpdateTriggerSeconds, privacy: .public) must be >= 0; \
-                falling back to \(Self.default.updateTriggerSeconds, privacy: .public)
-                """
-            )
-            updateTriggerSeconds = Self.default.updateTriggerSeconds
-        } else {
-            updateTriggerSeconds = decodedUpdateTriggerSeconds
-        }
-
-        autoNaming = try container.decodeIfPresent(Bool.self, forKey: .autoNaming) ?? Self.default.autoNaming
-    }
-}
-
 // MARK: - UpdateReason
 
 /// Why a given `updateNow(reason:)`/internal trigger fired (`docs/design/04-summary-updater.md`
@@ -135,6 +41,33 @@ actor SummaryUpdater {
     let sessionHandle: SessionHandle
     let llm: LLMCompleting
     let config: SummaryConfig
+    /// Session-start snapshot of `ModelResolver.resolve(candidates: [config.model], ...)`
+    /// (`docs/design/44-llm-model-config.md` §7): the incremental update / full regeneration /
+    /// final-title flows' resolved model. `defaultSummaryUpdaterFactory`
+    /// (`MeetingWorkspaceViewModel+Factories.swift`) passes the real resolved value; `init` derives a
+    /// fallback straight from `config.model` under the builtin provider when omitted (mirrors
+    /// `RefinementQueue.resolvedModel`'s doc comment), so every existing test/DI call site that never
+    /// passes this parameter keeps building the same `LLMRequest.model` it did before this field
+    /// existed.
+    ///
+    /// `nonisolated`: `docs/design/44-llm-model-config.md` §8's manual-override menu displays this
+    /// value verbatim as the "既定" item's label (`MeetingWorkspaceViewModel+Summary.swift`'s
+    /// `summaryDefaultModelLabel(final:)`) without an `await` -- reading it is synchronous the same
+    /// way `LLMClient.availableProviders` is, since it is a `let` set once at `init` and never
+    /// mutated afterward.
+    nonisolated let resolvedModel: ResolvedModel
+    /// Session-start snapshot of `ModelResolver.resolve(candidates: [config.finalModel, config.model],
+    /// ...)` (§7, §3.2): the session-end final pass's own resolved model, used by
+    /// `+FinalPass.swift`'s `performFinalPass(modelOverride:)` whenever no `modelOverride` was given.
+    /// Resolved from the two-element candidate list, never `config.finalModel ?? config.model`
+    /// collapsed first -- see `SummaryConfig.finalModel`'s doc comment for why. Falls back to
+    /// `resolvedModel` itself (not a fresh `config.model`-only resolution) when omitted, since an
+    /// unset `finalModel` candidate is exactly what falls through to `model` in the real candidate
+    /// list anyway.
+    ///
+    /// `nonisolated`: same rationale as `resolvedModel` above -- the manual-override menu's "既定"
+    /// label for the final-pass re-run button reads this synchronously.
+    nonisolated let resolvedFinalModel: ResolvedModel
     let now: @Sendable () -> Date
     /// Resolves `sessionHandle.readParticipants()`'s ids to display names for the §9 "【参加者】" block
     /// injected into every `readContext()` call (`docs/design/22-participant-hints.md` §9). Defaults
@@ -168,14 +101,17 @@ actor SummaryUpdater {
     /// "更新待ちフラグを立て、完了後にもう一度回す").
     private var pendingIncrementalUpdate: UpdateReason?
     private var pendingFinalTitleProposal = false
-    private var pendingRegeneration = false
+    /// Coalesced follow-up for `.regeneration` (`docs/design/44-llm-model-config.md` §7): `modelOverride`
+    /// is last-writer-wins across coalesced requests, the same shape (and rationale) as
+    /// `pendingFinalPass` below.
+    private var pendingRegeneration: (requested: Bool, modelOverride: ResolvedModel?) = (false, nil)
     /// Coalesced names for a pending `mergeParticipants(_:)` call (design section 6.2, "R2 module 4").
     /// A `Set`, not an array: coalescing while a merge is already running only needs the union of
     /// names, never duplicates (`performParticipantsMerge(_:)`'s own dedup would collapse them anyway).
     private var pendingParticipantsMergeNames: Set<String> = []
     /// Coalesced follow-up for `.finalPass` (summary-quality-topics-and-final-pass.md §7.5):
     /// `modelOverride` is last-writer-wins across coalesced requests.
-    private var pendingFinalPass: (requested: Bool, modelOverride: String?) = (false, nil)
+    private var pendingFinalPass: (requested: Bool, modelOverride: ResolvedModel?) = (false, nil)
 
     /// `true` while `regenerateFromScratch()` is in progress. §4.1.1: incremental triggers must
     /// stand down while a full regeneration is rewriting `summary.state.json` from scratch, so
@@ -196,6 +132,8 @@ actor SummaryUpdater {
         sessionHandle: SessionHandle,
         llm: LLMCompleting,
         config: SummaryConfig = SummaryConfig(),
+        resolvedModel: ResolvedModel? = nil,
+        resolvedFinalModel: ResolvedModel? = nil,
         now: @escaping @Sendable () -> Date = Date.init,
         voiceprintStore: VoiceprintStore = .shared,
         promptBodyProvider: @escaping @Sendable (PromptID) -> String = { PromptStore.shared.policyBody(for: .builtin($0)) }
@@ -203,6 +141,9 @@ actor SummaryUpdater {
         self.sessionHandle = sessionHandle
         self.llm = llm
         self.config = config
+        let fallbackResolvedModel = resolvedModel ?? ResolvedModel(provider: ModelResolver.builtinProviderName, model: config.model)
+        self.resolvedModel = fallbackResolvedModel
+        self.resolvedFinalModel = resolvedFinalModel ?? fallbackResolvedModel
         self.now = now
         self.voiceprintStore = voiceprintStore
         self.promptBodyProvider = promptBodyProvider
@@ -264,9 +205,11 @@ actor SummaryUpdater {
         await runSerialized(kind: .finalTitleProposal)
     }
 
-    /// Full regeneration from all segments (救済パス, §6). Awaitable.
-    func regenerateFromScratch() async {
-        await runSerialized(kind: .regeneration)
+    /// Full regeneration from all segments (救済パス, §6). Awaitable. `modelOverride`: forward-looking
+    /// hook for a future manual re-run UI (`docs/design/44-llm-model-config.md` §7/§8); every current
+    /// call site passes `nil`, which resolves to `resolvedModel` (`performRegeneration(modelOverride:)`).
+    func regenerateFromScratch(modelOverride: ResolvedModel? = nil) async {
+        await runSerialized(kind: .regeneration(modelOverride: modelOverride))
     }
 
     // `mergeParticipants(_:)` (design section 6.2, "R2 module 4") lives in `+ParticipantsMerge.swift`,
@@ -281,12 +224,15 @@ actor SummaryUpdater {
     enum RequestKind {
         case incrementalUpdate(UpdateReason)
         case finalTitleProposal
-        case regeneration
+        /// Full regeneration (救済パス, §6). `modelOverride`: forward-looking hook for a future manual
+        /// re-run UI (`docs/design/44-llm-model-config.md` §7/§8); every current call site passes
+        /// `nil` (`regenerateFromScratch(modelOverride:)`).
+        case regeneration(modelOverride: ResolvedModel?)
         case participantsMerge([String])
         /// Session-end final refinement pass (summary-quality-topics-and-final-pass.md §7.5).
         /// `modelOverride`: forward-looking hook for a future manual re-run UI; every current call
         /// site passes `nil` (`+FinalPass.swift`'s `runFinalPass(modelOverride:)`).
-        case finalPass(modelOverride: String?)
+        case finalPass(modelOverride: ResolvedModel?)
     }
 
     /// Single in-flight gate covering every entry point (§4.1.1). If a request is already running,
@@ -324,8 +270,8 @@ actor SummaryUpdater {
             pendingIncrementalUpdate = mergedReason(pendingIncrementalUpdate, reason)
         case .finalTitleProposal:
             pendingFinalTitleProposal = true
-        case .regeneration:
-            pendingRegeneration = true
+        case .regeneration(let modelOverride):
+            pendingRegeneration = (true, modelOverride)
         case .participantsMerge(let names):
             pendingParticipantsMergeNames.formUnion(names)
         case .finalPass(let modelOverride):
@@ -352,9 +298,10 @@ actor SummaryUpdater {
     private func takePendingRequest() -> RequestKind? {
         // Regeneration takes priority: it is the "救済パス" the user explicitly asked for, and
         // §4.1.1 already dedicates a special standdown for incremental updates while it runs.
-        if pendingRegeneration {
-            pendingRegeneration = false
-            return .regeneration
+        if pendingRegeneration.requested {
+            let modelOverride = pendingRegeneration.modelOverride
+            pendingRegeneration = (false, nil)
+            return .regeneration(modelOverride: modelOverride)
         }
         if pendingFinalPass.requested {
             let modelOverride = pendingFinalPass.modelOverride
@@ -383,8 +330,8 @@ actor SummaryUpdater {
             await performIncrementalUpdate(reason: reason)
         case .finalTitleProposal:
             await performFinalTitleProposal()
-        case .regeneration:
-            await performRegeneration()
+        case .regeneration(let modelOverride):
+            await performRegeneration(modelOverride: modelOverride)
         case .participantsMerge(let names):
             await performParticipantsMerge(names)
         case .finalPass(let modelOverride):
@@ -476,7 +423,7 @@ actor SummaryUpdater {
                     system: SummaryPromptBuilder.systemPrompt(policyBody: promptBodyProvider(.summary)),
                     user: userPrompt,
                     schema: SummaryJSONSchema.patchSchemaJSON,
-                    model: config.model,
+                    resolved: resolvedModel,
                     stubKey: "summary_patch"
                 )
             )

@@ -39,6 +39,17 @@ actor RefinementQueue {
     let sessionHandle: SessionHandle
     let llm: LLMCompleting
     let config: RefinementConfig
+    /// Session-start snapshot of `ModelResolver.resolve(candidates: [config.model], ...)`
+    /// (`docs/design/44-llm-model-config.md` §7). `defaultRefinementQueueFactory`
+    /// (`MeetingWorkspaceViewModel+Factories.swift`) passes the real resolved value, live-`AppConfig`/
+    /// `LLMClient.shared.availableProviders` never touched from this actor directly (same "capture a
+    /// value, not a live reference" rule `glossaryProvider`'s doc comment above states). The `init`
+    /// parameter defaults to `nil`, in which case `init` derives a `ResolvedModel` straight from
+    /// `config.model` under the builtin provider -- reproducing exactly what `LLMRequest(model:
+    /// config.model)` (`provider` left `nil`, dispatching to whatever `LLMCompleting` considers its
+    /// own default) did before this field existed, so every pre-existing test/DI call site that never
+    /// passes this parameter keeps behaving unchanged.
+    let resolvedModel: ResolvedModel
     let now: @Sendable () -> Date
     /// Resolves `sessionHandle.readParticipants()`'s ids to display names for the §9 "【参加者】" block
     /// injected into every `context.md` reload (`docs/design/22-participant-hints.md` §9). Defaults to
@@ -201,6 +212,7 @@ actor RefinementQueue {
         sessionHandle: SessionHandle,
         llm: LLMCompleting,
         config: RefinementConfig,
+        resolvedModel: ResolvedModel? = nil,
         now: @escaping @Sendable () -> Date = Date.init,
         retryDelay: Duration = .seconds(2),
         voiceprintStore: VoiceprintStore = .shared,
@@ -212,6 +224,7 @@ actor RefinementQueue {
         self.sessionHandle = sessionHandle
         self.llm = llm
         self.config = config
+        self.resolvedModel = resolvedModel ?? ResolvedModel(provider: ModelResolver.builtinProviderName, model: config.model)
         self.now = now
         self.retryDelay = retryDelay
         self.voiceprintStore = voiceprintStore

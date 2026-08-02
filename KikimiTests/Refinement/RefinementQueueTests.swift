@@ -480,6 +480,59 @@ struct RefinementQueueTests {
         #expect(refined.allSatisfy { $0.model == "claude-haiku-4-5-20251001" })
     }
 
+    // MARK: - resolvedModel (docs/design/44-llm-model-config.md §7)
+
+    @Test("an explicit resolvedModel flows into the batch LLMRequest's model/provider/params, diverging from config.model")
+    func explicitResolvedModelAppliesToRequest() async throws {
+        let handle = makeHandle()
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(
+            sessionHandle: handle,
+            llm: fakeLLM,
+            config: makeConfig(batchSize: 2),
+            resolvedModel: ResolvedModel(provider: "azure", model: "gpt-5.4-mini", params: LLMCallParams(effort: "high"))
+        )
+        await queue.start()
+        let segments = try await appendSegments(2, to: handle)
+        await fakeLLM.enqueueResponse(successJSON(segments.map { ($0.id, "refined \($0.id)") }))
+
+        for segment in segments {
+            await queue.enqueue(segment)
+        }
+        await queue.drain()
+
+        let request = try #require(await fakeLLM.receivedRequests.first)
+        #expect(request.model == "gpt-5.4-mini")
+        #expect(request.provider == "azure")
+        #expect(request.params.effort == "high")
+
+        // §7's table: `refined.jsonl`'s fallback (no `respondedModel` reported) now stamps
+        // `resolvedModel.model`, not `config.model` -- this only distinguishes the two paths because
+        // this test's `resolvedModel` deliberately diverges from `config.model`
+        // ("claude-haiku-4-5-20251001").
+        let refined = try await handle.readRefinedSegments()
+        #expect(refined.allSatisfy { $0.model == "gpt-5.4-mini" })
+    }
+
+    @Test("resolvedModel omitted at init falls back to config.model under the builtin provider (back-compat)")
+    func omittedResolvedModelDerivesFromConfigModel() async throws {
+        let handle = makeHandle()
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 2))
+        await queue.start()
+        let segments = try await appendSegments(2, to: handle)
+        await fakeLLM.enqueueResponse(successJSON(segments.map { ($0.id, "refined \($0.id)") }))
+
+        for segment in segments {
+            await queue.enqueue(segment)
+        }
+        await queue.drain()
+
+        let request = try #require(await fakeLLM.receivedRequests.first)
+        #expect(request.model == "claude-haiku-4-5-20251001")
+        #expect(request.provider == ModelResolver.builtinProviderName)
+    }
+
     @Test("a retried batch's refined.jsonl rows also use the retry's respondedModel")
     func retriedBatchUsesRespondedModelFromSuccessfulRetry() async throws {
         let handle = makeHandle()
@@ -562,6 +615,33 @@ struct RefinementQueueTests {
         #expect(refined.allSatisfy { $0.error?.contains("first-attempt-failure") == false })
     }
 
+    @Test("two consecutive transient failures stamp resolvedModel.model on the null rows (docs/design/44-llm-model-config.md §7), not config.model")
+    func twoTransientFailuresStampResolvedModelOnNullRows() async throws {
+        let handle = makeHandle()
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(
+            sessionHandle: handle,
+            llm: fakeLLM,
+            config: makeConfig(batchSize: 2),
+            resolvedModel: ResolvedModel(provider: "azure", model: "gpt-5.4-mini"),
+            retryDelay: .milliseconds(20)
+        )
+        await queue.start()
+        let segments = try await appendSegments(2, to: handle)
+        await fakeLLM.enqueueError(.processFailed(exitCode: 1, stderr: "first-attempt-failure"))
+        await fakeLLM.enqueueError(.processFailed(exitCode: 2, stderr: "second-attempt-failure"))
+
+        for segment in segments {
+            await queue.enqueue(segment)
+        }
+        await queue.drain()
+
+        let refined = try await handle.readRefinedSegments()
+        #expect(refined.count == 2)
+        #expect(refined.allSatisfy { $0.refinedText == nil })
+        #expect(refined.allSatisfy { $0.model == "gpt-5.4-mini" })
+    }
+
     // MARK: - Stop / recover (§5.2/§7)
 
     @Test("a fatal LLM failure stops the queue without retrying, discards pending, and fires .disabled")
@@ -614,6 +694,39 @@ struct RefinementQueueTests {
         await queue.drain()
 
         #expect(await fakeLLM.callCount == 1, "missingAPIKey must not be retried")
+        let refined = try await handle.readRefinedSegments()
+        #expect(refined.isEmpty, "nothing should be written to refined.jsonl on a fatal failure")
+        #expect(await queue.stopped)
+        #expect(await queue.knownIds.isEmpty, "discarded ids must be removed from knownIds so the next start() recovers them")
+
+        try await waitUntil {
+            await collector.events.contains {
+                if case .disabled = $0 { return true }
+                return false
+            }
+        }
+    }
+
+    @Test("unknownProvider is fatal: stops the queue without retrying, discards pending, and fires .disabled")
+    func unknownProviderStopsWithoutRetry() async throws {
+        // `docs/design/44-llm-model-config.md` §5.2/§10: `.unknownProvider` (a `LLMRequest.provider`
+        // the registry has no backend for) is a configuration/wiring problem, same bucket as
+        // `cliNotFound`/`missingAPIKey` -- mirrors the two tests above, just with the new error case.
+        let handle = makeHandle()
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 2))
+        let (collector, collectTask) = collectEvents(from: queue)
+        defer { collectTask.cancel() }
+        await queue.start()
+        let segments = try await appendSegments(2, to: handle)
+        await fakeLLM.enqueueError(.unknownProvider(name: "azure"))
+
+        for segment in segments {
+            await queue.enqueue(segment)
+        }
+        await queue.drain()
+
+        #expect(await fakeLLM.callCount == 1, "unknownProvider must not be retried")
         let refined = try await handle.readRefinedSegments()
         #expect(refined.isEmpty, "nothing should be written to refined.jsonl on a fatal failure")
         #expect(await queue.stopped)

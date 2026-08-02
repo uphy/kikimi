@@ -76,6 +76,28 @@ struct LLMUsageRecordFactoryTests {
         #expect(record.model == "claude-haiku-4-5-20251001")
     }
 
+    @Test("provider is nil when omitted, and carries through unchanged when given")
+    func providerDefaultsToNilAndCarriesThrough() {
+        let withoutProvider = LLMUsageRecord.make(
+            usage: makeUsage(totalCostUSD: 0),
+            respondedModel: nil,
+            requestedModel: "claude-haiku-4-5-20251001",
+            purpose: "refinement",
+            timestamp: timestamp
+        )
+        #expect(withoutProvider.provider == nil)
+
+        let withProvider = LLMUsageRecord.make(
+            usage: makeUsage(totalCostUSD: 0),
+            respondedModel: nil,
+            requestedModel: "gpt-5.4-mini",
+            purpose: "refinement",
+            timestamp: timestamp,
+            provider: "azure"
+        )
+        #expect(withProvider.provider == "azure")
+    }
+
     @Test("every other field is a straight copy from usage/purpose/timestamp")
     func copiesRemainingFieldsUnchanged() {
         let record = LLMUsageRecord.make(

@@ -169,7 +169,7 @@ struct WatcherRunnerTests {
         await llm.setResponse("{\"source_seg_id\":\"seg_00001\"}", for: "watcher_watcher-a")
         await llm.setResponse("{\"source_seg_id\":\"seg_00002\"}", for: "watcher_watcher-b")
 
-        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), defaultModel: "claude-haiku-4-5-20251001")
+        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), resolveModel: { _ in ResolvedModel(provider: ModelResolver.builtinProviderName, model: "claude-haiku-4-5-20251001") })
         await runner.run(trigger: .onSummaryUpdate)
 
         #expect(await llm.callCount(for: "watcher_watcher-a") == 1)
@@ -187,7 +187,7 @@ struct WatcherRunnerTests {
         let llm = FakeWatcherLLM()
         await llm.setResponse("{\"source_seg_id\":\"seg_00001\"}", for: "watcher_watcher-a")
 
-        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), defaultModel: "claude-haiku-4-5-20251001")
+        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), resolveModel: { _ in ResolvedModel(provider: ModelResolver.builtinProviderName, model: "claude-haiku-4-5-20251001") })
         await runner.runManually(id: "watcher-a")
 
         #expect(await llm.callCount(for: "watcher_watcher-a") == 1)
@@ -206,7 +206,7 @@ struct WatcherRunnerTests {
         let llm = FakeWatcherLLM()
         await llm.setResponse("{\"source_seg_id\":\"seg_00099\"}", for: "watcher_watcher-a")
 
-        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), defaultModel: "claude-haiku-4-5-20251001")
+        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), resolveModel: { _ in ResolvedModel(provider: ModelResolver.builtinProviderName, model: "claude-haiku-4-5-20251001") })
         await runner.runManually(id: "watcher-a")
 
         let stateText = try await handle.readText(.watcherState(id: "watcher-a"))
@@ -234,7 +234,7 @@ struct WatcherRunnerTests {
         // sub-second precision, so a fractional timestamp would not round-trip exactly.
         let finishedAt = Date(timeIntervalSince1970: 1_700_000_000)
         let runner = WatcherRunner(
-            sessionHandle: handle, llm: llm, library: makeLibrary(), defaultModel: "claude-haiku-4-5-20251001",
+            sessionHandle: handle, llm: llm, library: makeLibrary(), resolveModel: { _ in ResolvedModel(provider: ModelResolver.builtinProviderName, model: "claude-haiku-4-5-20251001") },
             now: { finishedAt }
         )
         await runner.runManually(id: "watcher-a")
@@ -256,7 +256,7 @@ struct WatcherRunnerTests {
         await llm.setResponse("{\"source_seg_id\":\"seg_00001\"}", for: "watcher_watcher-a")
         let finishedAt = Date(timeIntervalSince1970: 1_700_000_000)
         let runner = WatcherRunner(
-            sessionHandle: handle, llm: llm, library: makeLibrary(), defaultModel: "claude-haiku-4-5-20251001",
+            sessionHandle: handle, llm: llm, library: makeLibrary(), resolveModel: { _ in ResolvedModel(provider: ModelResolver.builtinProviderName, model: "claude-haiku-4-5-20251001") },
             now: { finishedAt }
         )
         await runner.runManually(id: "watcher-a")
@@ -288,7 +288,7 @@ struct WatcherRunnerTests {
 
         let llm = FakeWatcherLLM()
         await llm.setResponse("{\"source_seg_id\":\"seg_00001\"}", for: "watcher_watcher-a")
-        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), defaultModel: "claude-haiku-4-5-20251001")
+        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), resolveModel: { _ in ResolvedModel(provider: ModelResolver.builtinProviderName, model: "claude-haiku-4-5-20251001") })
         await runner.runManually(id: "watcher-a")
         let stateAfterSuccess = try await handle.readText(.watcherState(id: "watcher-a"))
 
@@ -343,7 +343,7 @@ struct WatcherRunnerTests {
 
         let llm = FakeWatcherLLM()
         await llm.setResponse("{\"source_seg_id\":\"seg_00001\"}", for: "watcher_watcher-a")
-        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), defaultModel: "claude-haiku-4-5-20251001")
+        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), resolveModel: { _ in ResolvedModel(provider: ModelResolver.builtinProviderName, model: "claude-haiku-4-5-20251001") })
 
         let collector = EventCollector()
         let collectTask = Task {
@@ -369,7 +369,7 @@ struct WatcherRunnerTests {
         let llm = FakeWatcherLLM()
         await llm.setResponse("{\"source_seg_id\":\"seg_00001\"}", for: "watcher_watcher-a")
         await llm.setDelay(.milliseconds(300), for: "watcher_watcher-a")
-        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), defaultModel: "claude-haiku-4-5-20251001")
+        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), resolveModel: { _ in ResolvedModel(provider: ModelResolver.builtinProviderName, model: "claude-haiku-4-5-20251001") })
 
         async let first: Void = runner.runManually(id: "watcher-a")
         // Give the first call a moment to actually start (claim the in-flight flag) before firing
@@ -398,7 +398,7 @@ struct WatcherRunnerTests {
         await llm.setResponse("{\"source_seg_id\":\"seg_00002\"}", for: "watcher_watcher-b")
         await llm.setDelay(.milliseconds(200), for: "watcher_watcher-a")
         await llm.setDelay(.milliseconds(200), for: "watcher_watcher-b")
-        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), defaultModel: "claude-haiku-4-5-20251001")
+        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), resolveModel: { _ in ResolvedModel(provider: ModelResolver.builtinProviderName, model: "claude-haiku-4-5-20251001") })
 
         await runner.run(trigger: .onSummaryUpdate)
 
@@ -420,7 +420,7 @@ struct WatcherRunnerTests {
         let handle = makeHandle(directory: directory)
         try await handle.writeEnabledWatchers(["missing-watcher"])
         let llm = FakeWatcherLLM()
-        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), defaultModel: "claude-haiku-4-5-20251001")
+        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), resolveModel: { _ in ResolvedModel(provider: ModelResolver.builtinProviderName, model: "claude-haiku-4-5-20251001") })
 
         let collector = EventCollector()
         let collectTask = Task {
@@ -485,7 +485,7 @@ struct WatcherRunnerTests {
 
         let llm = FakeWatcherLLM()
         await llm.setResponse("{\"source_seg_id\":\"seg_00001\"}", for: "watcher_watcher-a")
-        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), defaultModel: "claude-haiku-4-5-20251001")
+        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), resolveModel: { _ in ResolvedModel(provider: ModelResolver.builtinProviderName, model: "claude-haiku-4-5-20251001") })
         await runner.runManually(id: "watcher-a")
 
         let receivedUserPrompt = await llm.receivedRequests.last?.user ?? ""
@@ -568,7 +568,7 @@ struct WatcherRunnerTests {
 
         let llm = FakeWatcherLLM()
         await llm.setResponse("{\"source_seg_id\":\"seg_00001\"}", for: "watcher_watcher-a")
-        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), defaultModel: "claude-haiku-4-5-20251001")
+        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), resolveModel: { _ in ResolvedModel(provider: ModelResolver.builtinProviderName, model: "claude-haiku-4-5-20251001") })
         await runner.runManually(id: "watcher-a")
 
         let receivedUserPrompt = await llm.receivedRequests.last?.user ?? ""
@@ -598,7 +598,7 @@ struct WatcherRunnerTests {
 
         let llm = FakeWatcherLLM()
         await llm.setResponse("{\"source_seg_id\":\"seg_00001\"}", for: "watcher_watcher-a")
-        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), defaultModel: "claude-haiku-4-5-20251001")
+        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), resolveModel: { _ in ResolvedModel(provider: ModelResolver.builtinProviderName, model: "claude-haiku-4-5-20251001") })
         await runner.runManually(id: "watcher-a")
 
         let receivedUserPrompt = await llm.receivedRequests.last?.user ?? ""
@@ -626,7 +626,7 @@ struct WatcherRunnerTests {
 
         let llm = FakeWatcherLLM()
         await llm.setResponse("{\"source_seg_id\":\"seg_00001\"}", for: "watcher_watcher-a")
-        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), defaultModel: "claude-haiku-4-5-20251001")
+        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), resolveModel: { _ in ResolvedModel(provider: ModelResolver.builtinProviderName, model: "claude-haiku-4-5-20251001") })
         await runner.runManually(id: "watcher-a")
 
         let receivedUserPrompt = await llm.receivedRequests.last?.user ?? ""
@@ -650,7 +650,7 @@ struct WatcherRunnerTests {
 
         let llm = FakeWatcherLLM()
         await llm.setResponse("{\"source_seg_id\":\"seg_00001\"}", for: "watcher_watcher-a")
-        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), defaultModel: "claude-haiku-4-5-20251001")
+        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), resolveModel: { _ in ResolvedModel(provider: ModelResolver.builtinProviderName, model: "claude-haiku-4-5-20251001") })
         await runner.runManually(id: "watcher-a")
 
         let receivedUserPrompt = await llm.receivedRequests.last?.user ?? ""
@@ -672,7 +672,7 @@ struct WatcherRunnerTests {
 
         let llm = FakeWatcherLLM()
         await llm.setResponse("{\"source_seg_id\":\"seg_00001\"}", for: "watcher_watcher-a")
-        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), defaultModel: "claude-haiku-4-5-20251001")
+        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), resolveModel: { _ in ResolvedModel(provider: ModelResolver.builtinProviderName, model: "claude-haiku-4-5-20251001") })
         await runner.runManually(id: "watcher-a")
 
         let receivedUserPrompt = await llm.receivedRequests.last?.user ?? ""
@@ -704,7 +704,7 @@ struct WatcherRunnerTests {
 
         let llm = FakeWatcherLLM()
         await llm.setResponse("{\"source_seg_id\":\"seg_00001\"}", for: "watcher_watcher-a")
-        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), defaultModel: "claude-haiku-4-5-20251001")
+        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), resolveModel: { _ in ResolvedModel(provider: ModelResolver.builtinProviderName, model: "claude-haiku-4-5-20251001") })
         await runner.runManually(id: "watcher-a")
 
         let receivedUserPrompt = await llm.receivedRequests.last?.user ?? ""
@@ -744,7 +744,7 @@ struct WatcherRunnerTests {
 
         let customTemplate = "CUSTOM PREAMBLE\n{{viewpoint}}\nCUSTOM FOOTER"
         let runner = WatcherRunner(
-            sessionHandle: handle, llm: llm, library: makeLibrary(), defaultModel: "claude-haiku-4-5-20251001",
+            sessionHandle: handle, llm: llm, library: makeLibrary(), resolveModel: { _ in ResolvedModel(provider: ModelResolver.builtinProviderName, model: "claude-haiku-4-5-20251001") },
             simpleWatcherTemplate: customTemplate
         )
         await runner.runManually(id: "watcher-a")
@@ -770,7 +770,7 @@ struct WatcherRunnerTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let handle = makeHandle(directory: directory)
         let llm = FakeWatcherLLM()
-        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), defaultModel: "claude-haiku-4-5-20251001")
+        let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), resolveModel: { _ in ResolvedModel(provider: ModelResolver.builtinProviderName, model: "claude-haiku-4-5-20251001") })
 
         let collector = EventCollector()
         let collectTask = Task {
@@ -781,5 +781,89 @@ struct WatcherRunnerTests {
         await runner.runManually(id: "missing-watcher")
         try await waitUntil { await collector.events.contains { if case .failed = $0.kind { return true }; return false } }
         collectTask.cancel()
+    }
+
+    // MARK: - resolveModel runtime resolution (docs/design/44-llm-model-config.md §7)
+
+    /// A definition whose frontmatter sets `model:`, so `resolveModel`'s `definitionModel` argument
+    /// can be asserted directly.
+    private func definitionTextWithModel(id: String, model: String) -> String {
+        """
+        ---
+        id: \(id)
+        name: Test Watcher \(id)
+        trigger: on_manual
+        state_mode: cumulative
+        input_scope: summary
+        model: \(model)
+        schema:
+          source_seg_id: string
+        view: |
+          {{source_seg_id}}
+        ---
+
+        # System
+
+        system prompt
+
+        # User
+
+        {{state}}
+        """
+    }
+
+    @Test("execute(id:definition:) passes the definition's frontmatter model: as resolveModel's candidate, and the closure's result flows into the LLMRequest")
+    func resolveModelReceivesDefinitionModelAndFlowsIntoRequest() async throws {
+        let directory = makeTempSessionDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = makeHandle(directory: directory)
+        try await handle.writeText(definitionTextWithModel(id: "watcher-a", model: "claude-sonnet-5"), to: .watcherDefinition(id: "watcher-a"))
+        try await handle.writeEnabledWatchers(["watcher-a"])
+
+        let llm = FakeWatcherLLM()
+        await llm.setResponse("{\"source_seg_id\":\"seg_00001\"}", for: "watcher_watcher-a")
+
+        var receivedCandidates: [String?] = []
+        let runner = WatcherRunner(
+            sessionHandle: handle, llm: llm, library: makeLibrary(),
+            resolveModel: { definitionModel in
+                receivedCandidates.append(definitionModel)
+                return ResolvedModel(provider: "azure", model: "gpt-5.4-mini", params: LLMCallParams(effort: "high"))
+            }
+        )
+        await runner.runManually(id: "watcher-a")
+
+        #expect(receivedCandidates == ["claude-sonnet-5"])
+        let request = try #require(await llm.receivedRequests.first)
+        #expect(request.model == "gpt-5.4-mini")
+        #expect(request.provider == "azure")
+        #expect(request.params.effort == "high")
+    }
+
+    @Test("resolveModel is called fresh on every execution, not cached from construction (Watcher preset reload, §7)")
+    func resolveModelIsCalledFreshOnEveryExecution() async throws {
+        let directory = makeTempSessionDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = makeHandle(directory: directory)
+        try await handle.writeText(definitionText(id: "watcher-a"), to: .watcherDefinition(id: "watcher-a"))
+        try await handle.writeEnabledWatchers(["watcher-a"])
+
+        let llm = FakeWatcherLLM()
+        await llm.setResponse("{\"source_seg_id\":\"seg_00001\"}", for: "watcher_watcher-a")
+
+        // Simulates a live-config edit landing between two runs: the first call sees "before", the
+        // second sees "after" -- the closure re-reads its own state on every invocation.
+        var currentModel = "before-edit-model"
+        let runner = WatcherRunner(
+            sessionHandle: handle, llm: llm, library: makeLibrary(),
+            resolveModel: { _ in ResolvedModel(provider: "claude", model: currentModel) }
+        )
+
+        await runner.runManually(id: "watcher-a")
+        currentModel = "after-edit-model"
+        await runner.runManually(id: "watcher-a")
+
+        let models = await llm.receivedRequests.map(\.model)
+        #expect(models == ["before-edit-model", "after-edit-model"])
     }
 }

@@ -47,13 +47,19 @@ extension MeetingWorkspaceViewModel {
     /// `ChatRunner` knowing the decorator is there.
     @MainActor
     static func defaultChatRunnerFactory(_ sessionHandle: SessionHandle) -> ChatRunner {
-        ChatRunner(
+        let chatConfig = AppConfig.shared.data.chat
+        return ChatRunner(
             llm: UsageRecordingLLM(base: LLMClient.shared, sessionHandle: sessionHandle),
             source: TranscriptMarkdownSource(
                 diarization: AppConfig.shared.data.diarization,
                 voiceprintStore: .shared
             ),
-            config: AppConfig.shared.data.chat
+            config: chatConfig,
+            resolvedModel: ModelResolver.resolve(
+                candidates: [chatConfig.model],
+                config: AppConfig.shared.data.llm,
+                availableProviders: LLMClient.shared.availableProviders
+            )
         )
     }
 
@@ -89,10 +95,25 @@ extension MeetingWorkspaceViewModel {
     /// recorded to `llm_usage.jsonl`, without `SummaryUpdater` itself knowing that decorator exists.
     @MainActor
     static func defaultSummaryUpdaterFactory(_ sessionHandle: SessionHandle) -> SummaryUpdater {
-        SummaryUpdater(
+        let summaryConfig = AppConfig.shared.data.summary
+        let llmConfig = AppConfig.shared.data.llm
+        let availableProviders = LLMClient.shared.availableProviders
+        return SummaryUpdater(
             sessionHandle: sessionHandle,
             llm: UsageRecordingLLM(base: LLMClient.shared, sessionHandle: sessionHandle),
-            config: AppConfig.shared.data.summary
+            config: summaryConfig,
+            resolvedModel: ModelResolver.resolve(
+                candidates: [summaryConfig.model],
+                config: llmConfig,
+                availableProviders: availableProviders
+            ),
+            // §7's row for summary finalPass: `resolve(candidates: [config.finalModel, config.model])`
+            // -- a two-element candidate list, never `finalModel ?? model` collapsed first (§3.2).
+            resolvedFinalModel: ModelResolver.resolve(
+                candidates: [summaryConfig.finalModel, summaryConfig.model],
+                config: llmConfig,
+                availableProviders: availableProviders
+            )
         )
     }
 
@@ -127,10 +148,16 @@ extension MeetingWorkspaceViewModel {
         PromptStore.shared.refreshIfStale()
         let ruleBody = PromptStore.shared.policyBody(for: .builtin(.refinement))
         let glossaryHeader = PromptStore.shared.policyBody(for: .builtin(.glossaryHeader))
+        let refinementConfig = AppConfig.shared.data.refinement
         return RefinementQueue(
             sessionHandle: sessionHandle,
             llm: UsageRecordingLLM(base: LLMClient.shared, sessionHandle: sessionHandle),
-            config: AppConfig.shared.data.refinement,
+            config: refinementConfig,
+            resolvedModel: ModelResolver.resolve(
+                candidates: [refinementConfig.model],
+                config: AppConfig.shared.data.llm,
+                availableProviders: LLMClient.shared.availableProviders
+            ),
             glossaryProvider: { glossary },
             glossaryCategoriesProvider: { glossaryCategories },
             ruleBodyProvider: { ruleBody },
@@ -180,7 +207,17 @@ extension MeetingWorkspaceViewModel {
             sessionHandle: sessionHandle,
             llm: UsageRecordingLLM(base: LLMClient.shared, sessionHandle: sessionHandle),
             library: defaultWatcherLibrary(),
-            defaultModel: AppConfig.shared.data.watchers.defaultModel,
+            // §7's row for watcher: candidates `[definition.model, watchersDefaultModel]`, resolved
+            // at execution time against *live* `AppConfig` (not snapshotted here) -- Watchers reload
+            // their preset on every trigger, so the model assignment should track that (see
+            // `WatcherRunner.resolveModel`'s doc comment).
+            resolveModel: { definitionModel in
+                ModelResolver.resolve(
+                    candidates: [definitionModel, AppConfig.shared.data.watchers.defaultModel],
+                    config: AppConfig.shared.data.llm,
+                    availableProviders: LLMClient.shared.availableProviders
+                )
+            },
             simpleWatcherTemplate: simpleWatcherTemplate
         )
     }

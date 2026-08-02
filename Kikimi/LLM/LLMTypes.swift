@@ -52,6 +52,54 @@ struct LLMRequest: Sendable {
     /// Stub-mode dispatch key (section 5). Ignored by `ClaudeCLIProcessRunner`; only
     /// `LLMStubProvider` reads it, and only when `KIKIMI_STUB_LLM=1`.
     var stubKey: String?
+    /// Resolved provider name (`llm.providers` key, `docs/design/44-llm-model-config.md` §5.1). `nil`
+    /// means the default provider -- the exact back-compat condition: every existing call site (and
+    /// test) that never sets this field keeps hitting the same single-backend path as before this
+    /// field existed.
+    var provider: String?
+    /// `ModelResolver`'s resolved per-call parameters (§5.1/§3.3), carried alongside `model` rather
+    /// than folded into it. Defaults to no params at all, again for back-compat.
+    var params: LLMCallParams = .init()
+}
+
+// MARK: - LLMRequest + ResolvedModel
+
+extension LLMRequest {
+    /// Convenience for building a request straight from a `ModelResolver.resolve(...)` result
+    /// (`docs/design/44-llm-model-config.md` §5.1: "呼び出し側は `ResolvedModel` から `model` /
+    /// `provider` / `params` を詰める"). Every field `resolved` carries (`provider`/`model`/`params`)
+    /// is copied through unchanged; `timeout` is computed here rather than left to the caller, per
+    /// §5.3's "`timeoutSeconds` は backend に渡る前に `LLMRequest.timeout` へ反映する" -- so every
+    /// backend can keep reading `request.timeout` alone (§3.3's "延長専用" max rule, via
+    /// `ModelResolver.resolvedTimeoutSeconds`).
+    ///
+    /// - Parameter functionDefaultSeconds: The caller's own default timeout in seconds (what
+    ///   `timeout` would have been without a model-definition override) -- `LLMRequest.timeout`'s own
+    ///   60s default when the caller has no more specific one.
+    init(
+        system: String,
+        user: String,
+        messages: [LLMMessage]? = nil,
+        schema: String,
+        resolved: ResolvedModel,
+        functionDefaultSeconds: Int = 60,
+        stubKey: String? = nil
+    ) {
+        self.init(
+            system: system,
+            user: user,
+            messages: messages,
+            schema: schema,
+            model: resolved.model,
+            timeout: .seconds(ModelResolver.resolvedTimeoutSeconds(
+                functionDefaultSeconds: functionDefaultSeconds,
+                modelDefinitionSeconds: resolved.params.timeoutSeconds
+            )),
+            stubKey: stubKey,
+            provider: resolved.provider,
+            params: resolved.params
+        )
+    }
 }
 
 // MARK: - LLMMessage
@@ -139,6 +187,12 @@ enum LLMClientError: Error, Equatable, Sendable {
     /// `openai` provider: a `URLSession` transport-layer failure other than a timeout (which
     /// classifies as `.timedOut` instead; section 4.2).
     case networkFailed(description: String)
+    /// `LLMRequest.provider` named a provider absent from `LLMClient`'s registry
+    /// (`docs/design/44-llm-model-config.md` §5.2). `ModelResolver` validates provider existence
+    /// against `LLMClient.shared.availableProviders` before ever producing a `ResolvedModel`
+    /// (§3.2), so this is a last line of defense against a DI/wiring bug (or a future call site
+    /// that skips the resolver) rather than something a normal config mistake reaches.
+    case unknownProvider(name: String)
 }
 
 extension LLMClientError: LocalizedError {
@@ -164,6 +218,8 @@ extension LLMClientError: LocalizedError {
             return "OpenAI-compatible endpoint returned HTTP \(status): \(body)"
         case .networkFailed(let description):
             return "OpenAI-compatible endpoint request failed: \(description)"
+        case .unknownProvider(let name):
+            return "no LLM backend registered for provider \"\(name)\""
         }
     }
 }

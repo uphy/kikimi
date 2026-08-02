@@ -113,6 +113,8 @@ struct ChatRunnerTests {
         question: String = "決まったことは？",
         config: ChatConfig = .default,
         llm: RecordingChatLLM = RecordingChatLLM(),
+        resolvedModel: ResolvedModel? = nil,
+        modelOverride: ResolvedModel? = nil,
         promptBodyProvider: @escaping @Sendable (PromptID) -> String = { _ in ChatRunnerTests.testSystemPrompt }
     ) async throws -> (answer: ChatAnswer, request: LLMRequest) {
         let sessionDir = makeTemporaryDirectory(prefix: prefix)
@@ -139,9 +141,10 @@ struct ChatRunnerTests {
             llm: llm,
             source: TranscriptMarkdownSource(diarization: .default, voiceprintStore: voiceprintStore),
             config: config,
+            resolvedModel: resolvedModel,
             promptBodyProvider: promptBodyProvider
         )
-        let answer = try await runner.ask(question: question, history: history, sessionHandle: handle)
+        let answer = try await runner.ask(question: question, history: history, sessionHandle: handle, modelOverride: modelOverride)
         let request = try #require(await llm.receivedRequests.last)
         return (answer, request)
     }
@@ -269,6 +272,85 @@ struct ChatRunnerTests {
         #expect(result.request.schema == ChatPromptBuilder.answerSchema)
         #expect(result.request.user == "決まったことは？", "the latest question rides alone in `user`")
         #expect(result.request.system == ChatRunnerTests.testSystemPrompt)
+    }
+
+    // MARK: - (e2) resolvedModel (docs/design/44-llm-model-config.md §7)
+
+    @Test("resolvedModel omitted at init derives model/provider from config.model under the builtin provider (back-compat)")
+    func omittedResolvedModelDerivesFromConfigModel() async throws {
+        let result = try await runOneQuestion(
+            prefix: "ChatRunnerTests-e3",
+            segmentCount: 1,
+            config: ChatConfig(model: "configured-model", maxContextChars: 120_000, historyTurns: 6, timeoutSeconds: 30)
+        )
+
+        #expect(result.request.model == "configured-model")
+        #expect(result.request.provider == ModelResolver.builtinProviderName)
+        #expect(result.request.params == LLMCallParams())
+    }
+
+    @Test("an explicit resolvedModel flows into the request's model/provider/params, overriding config.model")
+    func explicitResolvedModelAppliesToRequest() async throws {
+        let result = try await runOneQuestion(
+            prefix: "ChatRunnerTests-e4",
+            segmentCount: 1,
+            config: ChatConfig(model: "configured-model", maxContextChars: 120_000, historyTurns: 6, timeoutSeconds: 30),
+            resolvedModel: ResolvedModel(provider: "azure", model: "gpt-5.4-mini", params: LLMCallParams(effort: "high"))
+        )
+
+        #expect(result.request.model == "gpt-5.4-mini")
+        #expect(result.request.provider == "azure")
+        #expect(result.request.params.effort == "high")
+    }
+
+    @Test("resolvedModel's timeoutSeconds extends (never shortens) config.timeoutSeconds -- §3.3's max rule")
+    func resolvedModelTimeoutExtendsButNeverShortens() async throws {
+        // Extends: a 300s model-definition timeout beats chat's own 30s functionDefaultSeconds.
+        let extended = try await runOneQuestion(
+            prefix: "ChatRunnerTests-e5",
+            segmentCount: 1,
+            config: ChatConfig(model: "configured-model", maxContextChars: 120_000, historyTurns: 6, timeoutSeconds: 30),
+            resolvedModel: ResolvedModel(provider: "claude", model: "premium-model", params: LLMCallParams(timeoutSeconds: 300))
+        )
+        #expect(extended.request.timeout == .seconds(300))
+
+        // Never shortens: a 5s model-definition timeout does not undercut chat's own 30s.
+        let unshortened = try await runOneQuestion(
+            prefix: "ChatRunnerTests-e6",
+            segmentCount: 1,
+            config: ChatConfig(model: "configured-model", maxContextChars: 120_000, historyTurns: 6, timeoutSeconds: 30),
+            resolvedModel: ResolvedModel(provider: "claude", model: "short-timeout-model", params: LLMCallParams(timeoutSeconds: 5))
+        )
+        #expect(unshortened.request.timeout == .seconds(30))
+    }
+
+    @Test("an ask-time modelOverride wins over the runner's own resolvedModel (§8's チャット picker)")
+    func askTimeModelOverrideWinsOverResolvedModel() async throws {
+        let result = try await runOneQuestion(
+            prefix: "ChatRunnerTests-e7",
+            segmentCount: 1,
+            config: ChatConfig(model: "configured-model", maxContextChars: 120_000, historyTurns: 6, timeoutSeconds: 30),
+            resolvedModel: ResolvedModel(provider: "claude", model: "session-start-model"),
+            modelOverride: ResolvedModel(provider: "azure", model: "picker-selected-model", params: LLMCallParams(effort: "high"))
+        )
+
+        #expect(result.request.model == "picker-selected-model")
+        #expect(result.request.provider == "azure")
+        #expect(result.request.params.effort == "high")
+    }
+
+    @Test("a nil ask-time modelOverride keeps using the runner's own resolvedModel")
+    func nilModelOverrideKeepsResolvedModel() async throws {
+        let result = try await runOneQuestion(
+            prefix: "ChatRunnerTests-e8",
+            segmentCount: 1,
+            config: ChatConfig(model: "configured-model", maxContextChars: 120_000, historyTurns: 6, timeoutSeconds: 30),
+            resolvedModel: ResolvedModel(provider: "claude", model: "session-start-model"),
+            modelOverride: nil
+        )
+
+        #expect(result.request.model == "session-start-model")
+        #expect(result.request.provider == "claude")
     }
 
     // MARK: - (f) prompt override injection (docs/design/42-prompt-overrides.md §4.3)

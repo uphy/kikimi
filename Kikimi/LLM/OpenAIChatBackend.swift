@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 // MARK: - HTTPTransporting
 
@@ -62,28 +63,34 @@ private final class LazyAPIKey: @unchecked Sendable {
 /// `static` pure functions (section 4.3) so they are directly unit-testable without `transport` at
 /// all, mirroring `ClaudeCLIBackend.buildArguments`/`decodeEnvelope`.
 struct OpenAIChatBackend: LLMBackend {
+    /// `llm.providers` key this backend was built for (`docs/design/44-llm-model-config.md` §5.2/§6).
+    /// Only used to resolve the API key's credential account (`CredentialAccount.providerAPIKey(name:)`)
+    /// and to gate the legacy-migration step (§6 step 2: name `"openai"` only).
+    private let providerName: String
     private let config: OpenAIBackendConfig
     private let transport: HTTPTransporting
     /// Resolved at most once per backend, on the first `complete(_:)` -- never in `init`. Eagerly
     /// resolving would make merely *constructing* a backend read the credential store, which is a
     /// real side effect: it can trigger the Keychain-to-Secure-Enclave migration and its one-time OS
-    /// dialog (`docs/design/35-secure-enclave-credentials.md` §4). `LLMClient.shared` builds a
-    /// backend from `llm.provider` at startup, and unit tests reach it, so construction must stay
-    /// pure. `nil` means no key resolved anywhere in the precedence chain; `complete(_:)` throws
-    /// `.missingAPIKey` off that cached `nil` without re-reading on every call
-    /// (`docs/design/26-settings-ui.md` §3.2).
+    /// dialog (`docs/design/35-secure-enclave-credentials.md` §4). `LLMClient` builds registry
+    /// backends lazily but still at a point construction must stay pure -- unit tests reach `init`
+    /// directly too. `nil` means no key resolved anywhere in the precedence chain; `complete(_:)`
+    /// throws `.missingAPIKey` off that cached `nil` without re-reading on every call
+    /// (`docs/design/26-settings-ui.md` §3.2, `docs/design/44-llm-model-config.md` §6).
     private let apiKeySource: LazyAPIKey
 
     init(
+        providerName: String,
         config: OpenAIBackendConfig,
         transport: HTTPTransporting = URLSessionHTTPTransport(),
         environment: [String: String] = ProcessInfo.processInfo.environment,
         credentialStore: CredentialStoring = DefaultCredentialStore.shared
     ) {
+        self.providerName = providerName
         self.config = config
         self.transport = transport
         self.apiKeySource = LazyAPIKey {
-            Self.resolveAPIKey(config: config, environment: environment, credentialStore: credentialStore)
+            Self.resolveAPIKey(providerName: providerName, config: config, environment: environment, credentialStore: credentialStore)
         }
     }
 
@@ -110,20 +117,35 @@ struct OpenAIChatBackend: LLMBackend {
         return try Self.parseResponse(data: data, httpResponse: httpResponse, config: config, requestModel: request.model)
     }
 
-    // MARK: - API key resolution (`docs/design/26-settings-ui.md` §3.2: "API キー解決順")
+    // MARK: - API key resolution (`docs/design/44-llm-model-config.md` §6: "API キー解決順")
 
-    /// Pure precedence chain: credential store -> `config.apiKey` (config.yaml plaintext, back-compat
-    /// fallback) -> `api_key_env` environment variable -> `nil`. `throws` is dropped in favor of
-    /// `Optional` because the sole caller runs inside `LazyAPIKey`, which cannot propagate a thrown
-    /// error -- `complete(_:)` throws `.missingAPIKey` off the cached `nil` result instead (see
-    /// `apiKeySource`'s doc comment).
+    private static let logger = Logger(subsystem: "io.github.uphy.Kikimi", category: "OpenAIChatBackend")
+
+    /// Precedence chain (§6): the per-provider credential-store account
+    /// (`CredentialAccount.providerAPIKey(name:)`) -> a one-time legacy migration from the pre-44-章
+    /// single-provider account (`CredentialAccount.openAIAPIKey`), gated to providers literally named
+    /// `"openai"` (§4's migration always uses that name for a migrated `openai`-kind provider) ->
+    /// `config.apiKey` (config.yaml plaintext, back-compat fallback) -> `api_key_env` environment
+    /// variable -> `nil`.
+    ///
+    /// `throws` is dropped in favor of `Optional` because the sole caller runs inside `LazyAPIKey`,
+    /// which cannot propagate a thrown error -- `complete(_:)` throws `.missingAPIKey` off the cached
+    /// `nil` result instead (see `apiKeySource`'s doc comment). The migration step does have a side
+    /// effect (a credential-store write + delete), unlike every other step here, but it only ever
+    /// runs once per backend lifetime (this function itself is only ever invoked once, memoized by
+    /// `LazyAPIKey`).
     static func resolveAPIKey(
+        providerName: String,
         config: OpenAIBackendConfig,
         environment: [String: String],
         credentialStore: CredentialStoring
     ) -> String? {
-        if let keychainValue = credentialStore.read(account: CredentialAccount.openAIAPIKey), !keychainValue.isEmpty {
-            return keychainValue
+        let newAccount = CredentialAccount.providerAPIKey(name: providerName)
+        if let storedValue = credentialStore.read(account: newAccount), !storedValue.isEmpty {
+            return storedValue
+        }
+        if providerName == "openai", let migrated = migrateLegacyAPIKey(newAccount: newAccount, credentialStore: credentialStore) {
+            return migrated
         }
         if !config.apiKey.isEmpty {
             return config.apiKey
@@ -132,6 +154,34 @@ struct OpenAIChatBackend: LLMBackend {
             return envValue
         }
         return nil
+    }
+
+    /// §6 step 2: "コピー → 削除、失敗は次回リトライ" -- the same pattern
+    /// `EncryptedFileCredentialStore.migrateFromLegacyStore` uses for its own Keychain migration, one
+    /// layer up (that one moves *store implementations*; this one moves *accounts* within whichever
+    /// store is configured). A write failure keeps the legacy account intact and returns the value
+    /// anyway, so this call still succeeds and simply retries the copy on the next resolution.
+    private static func migrateLegacyAPIKey(newAccount: String, credentialStore: CredentialStoring) -> String? {
+        guard let legacyValue = credentialStore.read(account: CredentialAccount.openAIAPIKey), !legacyValue.isEmpty else {
+            return nil
+        }
+        do {
+            try credentialStore.write(legacyValue, account: newAccount)
+        } catch {
+            logger.error(
+                "Failed to migrate \(CredentialAccount.openAIAPIKey, privacy: .public) to \(newAccount, privacy: .public); will retry: \(error, privacy: .public)"
+            )
+            return legacyValue
+        }
+        do {
+            try credentialStore.delete(account: CredentialAccount.openAIAPIKey)
+            logger.info("Migrated \(CredentialAccount.openAIAPIKey, privacy: .public) to \(newAccount, privacy: .public)")
+        } catch {
+            logger.warning(
+                "Migrated \(CredentialAccount.openAIAPIKey, privacy: .public) to \(newAccount, privacy: .public) but could not remove the stale legacy entry: \(error, privacy: .public)"
+            )
+        }
+        return legacyValue
     }
 
     // MARK: - Model resolution (section 3: "モデル解決")
@@ -215,6 +265,18 @@ struct OpenAIChatBackend: LLMBackend {
         }
     }
 
+    // MARK: - reasoning_effort resolution (`docs/design/44-llm-model-config.md` §5.3)
+
+    /// `request.params.effort` (per-call, from an `llm.models` alias) wins when non-nil and
+    /// non-empty; otherwise the provider config's own `reasoning_effort` default (non-empty); `nil`
+    /// omits the field from the request body entirely.
+    static func resolveReasoningEffort(paramsEffort: String?, providerReasoningEffort: String) -> String? {
+        if let paramsEffort, !paramsEffort.isEmpty {
+            return paramsEffort
+        }
+        return providerReasoningEffort.isEmpty ? nil : providerReasoningEffort
+    }
+
     // MARK: - Request body assembly (section 4.1)
 
     /// `[system] + request.messages + [user]` (38-session-chat.md §4.1). Unlike `ClaudeCLIBackend`,
@@ -258,12 +320,15 @@ struct OpenAIChatBackend: LLMBackend {
                 ]
             ]
         ]
-        // `reasoning_effort` is sent only when configured (section 4.1): non-reasoning models
-        // (`gpt-4.1-mini` etc.) reject the field, so an empty config value must omit it entirely.
-        // gpt-5-series reasoning models take `"none"`/`"minimal"`/.../`"xhigh"` to trade latency
-        // and thinking-token cost against quality.
-        if !config.reasoningEffort.isEmpty {
-            body["reasoning_effort"] = config.reasoningEffort
+        // `reasoning_effort` is sent only when it resolves to a non-empty value (section 4.1):
+        // non-reasoning models (`gpt-4.1-mini` etc.) reject the field entirely.
+        // `docs/design/44-llm-model-config.md` §5.3 extends the old "config value only" behavior to a
+        // 2-stage resolution: the per-call `request.params.effort` (an `llm.models` alias's own
+        // `effort`, §3.3) wins when set, otherwise the provider's own `reasoning_effort` default is
+        // used, otherwise the field is omitted. gpt-5-series reasoning models take
+        // `"none"`/`"minimal"`/.../`"xhigh"` to trade latency and thinking-token cost against quality.
+        if let effort = resolveReasoningEffort(paramsEffort: request.params.effort, providerReasoningEffort: config.reasoningEffort) {
+            body["reasoning_effort"] = effort
         }
         let bodyData = try JSONSerialization.data(withJSONObject: body)
 

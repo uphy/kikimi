@@ -42,8 +42,13 @@ struct ClaudeCLIBackend: LLMBackend {
     /// Builds the fixed-flag argument list every call uses (`docs/design/12-llm-client.md` section
     /// 2.1's verified invocation shape). `static` and pure so it is directly unit-testable without a
     /// runner (section 7).
+    ///
+    /// `request.params.effort` (`docs/design/44-llm-model-config.md` §5.3) appends `--effort <value>`
+    /// at the very end when non-nil; `nil` (every call site before that module, and any call that
+    /// resolves to a param-less `ModelRef`) leaves this argument list byte-for-byte identical to
+    /// before `params` existed -- "検証済みの CLI 呼び出し形を壊さない" (14 章 §2).
     static func buildArguments(request: LLMRequest) -> [String] {
-        [
+        var arguments = [
             "-p",
             "--system-prompt", request.system,
             "--tools",
@@ -53,6 +58,10 @@ struct ClaudeCLIBackend: LLMBackend {
             "--json-schema", request.schema,
             "--model", request.model
         ]
+        if let effort = request.params.effort {
+            arguments += ["--effort", effort]
+        }
+        return arguments
     }
 
     // MARK: - stdin assembly (38-session-chat.md section 4.1)

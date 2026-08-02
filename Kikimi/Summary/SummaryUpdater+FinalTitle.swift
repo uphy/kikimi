@@ -33,7 +33,7 @@ extension SummaryUpdater {
                     system: promptBodyProvider(.finalTitle),
                     user: prompt,
                     schema: SummaryJSONSchema.titleSchemaJSON,
-                    model: config.model,
+                    resolved: resolvedModel,
                     stubKey: "final_title"
                 )
             )

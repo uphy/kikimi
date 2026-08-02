@@ -27,10 +27,11 @@ protocol LLMProcessRunner: Sendable {
 actor ClaudeCLIProcessRunner: LLMProcessRunner {
     private let logger = Logger(subsystem: "io.github.uphy.Kikimi", category: "ClaudeCLIProcessRunner")
 
-    /// Explicit override (section 3.1 step 1), wired from `AppConfig.shared.data.llm.claude.cliPath`
-    /// by `LLMClient.makeBackend(from:)` (`docs/design/14-llm-provider.md` section 3). This runner
-    /// deliberately does not read `AppConfig` itself, keeping this module config-agnostic per the
-    /// design doc's stated interface boundary.
+    /// Explicit override (section 3.1 step 1), wired from a `llm.providers.<name>.cli_path` entry by
+    /// `LLMClient.makeBackend(name:config:...)` (`docs/design/44-llm-model-config.md` §5.2, evolving
+    /// `docs/design/14-llm-provider.md` section 3's single-provider `llm.claude.cli_path`). This
+    /// runner deliberately does not read `AppConfig` itself, keeping this module config-agnostic per
+    /// the design doc's stated interface boundary.
     private let claudePathOverride: String?
 
     /// Injectable so path-resolution tests are fully deterministic (section 7: "候補順・不在時

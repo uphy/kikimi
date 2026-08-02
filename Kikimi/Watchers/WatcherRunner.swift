@@ -51,7 +51,24 @@ actor WatcherRunner {
     private let sessionHandle: SessionHandle
     private let llm: LLMCompleting
     private let library: WatcherLibrary
-    private let defaultModel: String
+    /// Resolves one execution's model, called fresh on every `execute(id:definition:)` rather than
+    /// snapshotted at construction (`docs/design/44-llm-model-config.md` §7: "Watcher は preset
+    /// リロードがあるため実行時解決が自然"). `defaultWatcherRunnerFactory`
+    /// (`MeetingWorkspaceViewModel+Factories.swift`) wires this to
+    /// `ModelResolver.resolve(candidates: [definitionModel, AppConfig.shared.data.watchers
+    /// .defaultModel], config: AppConfig.shared.data.llm, availableProviders: LLMClient.shared
+    /// .availableProviders)` -- i.e. the candidate list §7's table calls for, `[definition.model,
+    /// watchersDefaultModel]`, resolved against *live* `AppConfig` on every call (not this runner's
+    /// construction-time snapshot), matching a Watcher's frontmatter `model:` field also being
+    /// re-parsed on every preset reload.
+    ///
+    /// `@MainActor`, not plain `@Sendable`, because the production closure reads `AppConfig.shared`
+    /// (a `@MainActor`-by-convention `ObservableObject`, `Kikimi/Config/AppConfig.swift`) -- mirroring
+    /// `DictationController.watchersDefaultModelProvider`'s identical shape/rationale
+    /// (`Kikimi/Dictation/DictationController.swift`). `execute(id:definition:)` hops to it via
+    /// `await`, the same executor-hop `DictationController+Refine.swift` performs implicitly by
+    /// itself being `@MainActor`.
+    private let resolveModel: @Sendable @MainActor (_ definitionModel: String?) -> ResolvedModel
     /// The `simple-watcher` prompt override's session-start snapshot (`docs/design/42-prompt-overrides.md`
     /// §4.3/§5.2): captured once by `defaultWatcherRunnerFactory` when this runner is constructed, then
     /// threaded unchanged into every `WatcherDefinitionParser.parse(text:expectedId:simpleWatcherTemplate:)`
@@ -81,7 +98,7 @@ actor WatcherRunner {
         sessionHandle: SessionHandle,
         llm: LLMCompleting,
         library: WatcherLibrary,
-        defaultModel: String,
+        resolveModel: @escaping @Sendable @MainActor (_ definitionModel: String?) -> ResolvedModel,
         simpleWatcherTemplate: String = SimpleWatcherSpec.defaultSystemPromptTemplate,
         now: @escaping @Sendable () -> Date = Date.init,
         sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
@@ -89,7 +106,7 @@ actor WatcherRunner {
         self.sessionHandle = sessionHandle
         self.llm = llm
         self.library = library
-        self.defaultModel = defaultModel
+        self.resolveModel = resolveModel
         self.simpleWatcherTemplate = simpleWatcherTemplate
         self.now = now
         self.sleep = sleep
@@ -266,11 +283,12 @@ actor WatcherRunner {
             recentSegmentsText: WatcherPromptBuilder.recentSegmentsText(recentSegments)
         )
 
+        let resolvedModel = await resolveModel(definition.model)
         let request = LLMRequest(
             system: definition.systemPrompt,
             user: userPrompt,
             schema: definition.schema.jsonSchemaString(),
-            model: definition.model ?? defaultModel,
+            resolved: resolvedModel,
             stubKey: "watcher_\(id)"
         )
 
