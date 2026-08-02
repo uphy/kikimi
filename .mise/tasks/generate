@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 #MISE description="xcodegen でプロジェクトファイルを生成"
-#MISE sources=["project.yml"]
+# The Swift sources are inputs too, not just project.yml: xcodegen enumerates them into the
+# pbxproj, so adding a file without re-running this leaves it out of the build entirely. That was
+# invisible while `swift build` (which globs the directory itself) was the build path; since the
+# move to xcodebuild it shows up as "cannot find X in scope" for a file that plainly exists.
+#MISE sources=["project.yml", "Kikimi/**/*.swift", "KikimiTests/**/*.swift"]
 #MISE outputs=["Kikimi.xcodeproj/project.pbxproj"]
 set -euo pipefail
 
