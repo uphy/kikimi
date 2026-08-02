@@ -198,7 +198,7 @@ struct TranscriptPipelineTwoPassTests {
         let pipeline = TranscriptPipeline(
             sessionHandle: sessionHandle,
             backendFactory: { _, _ in ScriptedSttStreamingBackend(chunkSampleCount: Self.chunkSampleCount, responses: ["テスト", "テストです。"]) },
-            batchDecoderAcquire: { _ in TranscriptPipeline.AcquiredBatchDecoder(decoder: fakeDecoder, release: {}) }
+            batchDecoderAcquire: { _, _ in TranscriptPipeline.AcquiredBatchDecoder(decoder: fakeDecoder, release: {}) }
         )
         try await pipeline.prepare()
         // The (immediately-resolving) fake acquire must land before the window is confirmed, or the
@@ -226,7 +226,7 @@ struct TranscriptPipelineTwoPassTests {
         let pipeline = TranscriptPipeline(
             sessionHandle: sessionHandle,
             backendFactory: { _, _ in ScriptedSttStreamingBackend(chunkSampleCount: Self.chunkSampleCount, responses: ["テスト", "テストです。"]) },
-            batchDecoderAcquire: { _ in throw AcquireFailure() }
+            batchDecoderAcquire: { _, _ in throw AcquireFailure() }
         )
         try await pipeline.prepare()
         try await Task.sleep(for: .milliseconds(50))
@@ -251,7 +251,7 @@ struct TranscriptPipelineTwoPassTests {
         let pipeline = TranscriptPipeline(
             sessionHandle: sessionHandle,
             backendFactory: { _, _ in ScriptedSttStreamingBackend(chunkSampleCount: Self.chunkSampleCount, responses: ["テスト", "テストです。"]) },
-            batchDecoderAcquire: { _ in TranscriptPipeline.AcquiredBatchDecoder(decoder: fakeDecoder, release: {}) }
+            batchDecoderAcquire: { _, _ in TranscriptPipeline.AcquiredBatchDecoder(decoder: fakeDecoder, release: {}) }
         )
         try await pipeline.prepare()
         // The decoder has to be in place for the window to reach `transcribe()` at all -- otherwise
@@ -288,7 +288,7 @@ struct TranscriptPipelineTwoPassTests {
             backendFactory: { _, _ in
                 ScriptedSttStreamingBackend(chunkSampleCount: Self.chunkSampleCount, responses: ["あ", "あ。い", "あ。いう。", "あ。いう。え。"])
             },
-            batchDecoderAcquire: { _ in
+            batchDecoderAcquire: { _, _ in
                 await acquireGate.wait()
                 return TranscriptPipeline.AcquiredBatchDecoder(decoder: fakeDecoder, release: {})
             }
@@ -340,7 +340,7 @@ struct TranscriptPipelineTwoPassTests {
             backendFactory: { _, _ in
                 ScriptedSttStreamingBackend(chunkSampleCount: Self.chunkSampleCount, responses: ["a", "a。"])
             },
-            batchDecoderAcquire: { _ in TranscriptPipeline.AcquiredBatchDecoder(decoder: fakeDecoder, release: {}) }
+            batchDecoderAcquire: { _, _ in TranscriptPipeline.AcquiredBatchDecoder(decoder: fakeDecoder, release: {}) }
         )
         try await pipeline.prepare()
         try await waitUntil { pipeline.hasAcquiredBatchDecoder }
@@ -379,7 +379,7 @@ struct TranscriptPipelineTwoPassTests {
         let pipeline = TranscriptPipeline(
             sessionHandle: sessionHandle,
             backendFactory: { _, _ in ScriptedSttStreamingBackend(chunkSampleCount: Self.chunkSampleCount, responses: ["残り"]) },
-            batchDecoderAcquire: { _ in TranscriptPipeline.AcquiredBatchDecoder(decoder: fakeDecoder, release: {}) }
+            batchDecoderAcquire: { _, _ in TranscriptPipeline.AcquiredBatchDecoder(decoder: fakeDecoder, release: {}) }
         )
         try await pipeline.prepare()
         try await waitUntil { pipeline.hasAcquiredBatchDecoder }
@@ -413,7 +413,7 @@ struct TranscriptPipelineTwoPassTests {
         let pipeline = TranscriptPipeline(
             sessionHandle: sessionHandle,
             backendFactory: { _, _ in ScriptedSttStreamingBackend(chunkSampleCount: Self.chunkSampleCount, responses: []) },
-            batchDecoderAcquire: { _ in
+            batchDecoderAcquire: { _, _ in
                 TranscriptPipeline.AcquiredBatchDecoder(
                     decoder: fakeDecoder,
                     release: { Task { await releaseCounter.increment() } }

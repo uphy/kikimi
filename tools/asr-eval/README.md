@@ -19,7 +19,7 @@ Kikimi の 2 段目（確定セグメントのバッチ再デコード、`docs/d
 ## 手順
 
 ```bash
-# 1. 録音済みセッションから評価クリップを切り出す（既定 24 本 / 約 10 分）
+# 1. 録音済みセッションから評価クリップを切り出す（既定 24 本 / 約 10 分。30 秒超は捨てられる）
 python3 tools/asr-eval/make_clips.py
 
 # 2. 各モデルを回す（順不同・追加可能）
@@ -27,7 +27,8 @@ tools/asr-eval/runners/tdtja.sh          # 現行ベースライン
 tools/asr-eval/runners/parakeet_v3.sh    # 多言語 Parakeet（ja 以外に振れたときの実力）
 tools/asr-eval/runners/cohere.sh         # Cohere Transcribe（FluidAudio 同梱）
 tools/asr-eval/runners/whisperkit.sh     # WhisperKit large-v3-turbo
-tools/asr-eval/runners/qwen3_draft.sh    # 比較対象外。reference の下書き専用（下記）
+tools/asr-eval/runners/qwen3_swift.sh    # Qwen3-ASR (MLX) — design 45 の採用モデル
+tools/asr-eval/runners/qwen3_draft.sh    # reference の下書き専用（Python/MLX）
 
 # 3. reference 確定シートを作る → 音声を聞いて直す → 反映
 python3 tools/asr-eval/review.py --build --draft qwen3_draft
@@ -38,33 +39,58 @@ python3 tools/asr-eval/review.py --apply
 python3 tools/asr-eval/score.py
 ```
 
-## 現在の状態（2026-08-02 時点）
+## 結果（2026-08-03 時点）
 
-クリップ 24 本 / 582 秒（mic 6・system 18、8 セッション横断）。全モデルのデコードは完了済みで、
-**reference の人手確定だけが残っている**（`review.md`）。CER は確定後に `score.py` で出る。
+クリップ 23 本 / 550 秒（mic 6・system 17、8 セッション横断）。**この比較の結論は
+`docs/design/45-qwen3-batch-decode.md`**: 2 段目を Qwen3-ASR (MLX) に差し替える。
 
-速度は先に測れたので載せる。M4 Pro / 48GB、モデルロードとウォームアップを除いた実推論のみ。
+CER は出していない。reference の人手確定を伴う一方、**決め手になった 2 つの差はどちらも CER では
+過小評価される**ため（下記）。判断は総文字数（= 欠落量）と固有名詞・技術用語の質的比較で行った。
 
-| モデル | RTF | 備考 |
-|---|---|---|
-| `tdtja`（現行） | 0.0081 | 582 秒を 4.7 秒 |
-| `parakeet_v3` | 0.0086 | 日本語では出力が崩壊（下記） |
-| `qwen3_draft` | 0.0442 | MLX/GPU。比較対象外の下書き専用 |
-| `cohere` | 0.3281 | 初回推論は CoreML の特殊化で 87 秒かかる（ウォームアップ済みの値） |
-| `whisperkit` | 0.6463 | 582 秒を 376 秒 |
+M4 Pro / 48GB、モデルロードとウォームアップを除いた実推論のみ。
 
-**この差は採用判断に直接効く。** 会議パイプラインはセグメント確定のたびに再デコードし、mic と
-system の 2 ソースが同じ ANE を共有する（design 33 MT5）。RTF 0.65 のモデルは実効 1.3 相当になり、
-確定テキストがライブ表示に追いつかなくなる可能性がある。CER がどう出ても、WhisperKit を採用する
-なら「確定を遅らせない」設計が別途要る。
+| モデル | RTF | 25 秒窓 | 総文字数 |
+|---|---|---|---|
+| `tdtja`（旧既定） | 0.0081 | 0.20 秒 | 2711 |
+| `parakeet_v3` | 0.0086 | 0.22 秒 | — |
+| **`qwen3_swift`（1.7B/8bit、新既定）** | **0.0461** | **1.15 秒** | **3270** |
+| `qwen3_swift_mlx`（0.6B/4bit） | 0.0185 | 0.46 秒 | 3261 |
+| `qwen3_soniqo_coreml` | 0.1446 | 3.6 秒 | 3283 |
+| `qwen3_coreml_f32`（FluidAudio 0.15.2） | 0.1251 | 3.1 秒 | 3316 |
+| `whisper_small` | 0.0941 | 2.4 秒 | 2820 |
+| `cohere` | 0.3281 | 8.2 秒 | 2532 |
+| `whisperkit`（large-v3-turbo） | 0.6463 | 16.2 秒 | 2931 |
 
-`parakeet_v3` は日本語音声をローマ字と多言語の混合として出力し、事実上使いものにならなかった
-（例: `What's going on this? Ah, so so none this yeah.`）。外部ベンチで報告されている CER 174% と
-一致する。**現行の `ja → tdtJa` 分岐は正しい**という確認になった。
+**文字数の差がそのまま欠落の差。** tdtJa は Qwen3 より 17% 短く、23 本中 6 本で 15% 以上短い。
+clip_09 では中間の約 10 秒を丸ごと落としていた。**技術用語も壊す**（`AWS` → `マルダル` /
+`エダピス` / `エアウィーヴ`、`Glue` → `グループ活`）。どちらも文字数が小さいので CER にはほとんど
+乗らないが、サマリ・Watcher・検索のすべてに効く。
 
-Cohere の 108 トークン上限は 30 秒クリップでは 1 本も当たらなかった（`token_capped_clips: 0/24`、
-最大 92 トークン）。ただし Kikimi の実際の窓は最大 120 秒なので、**長い窓では確実に当たる**。
-Cohere を採用するなら窓を 30 秒前後に切り直す設計変更がセットで要る。
+**Whisper 系は速度で落ちた。** large-v3-turbo は品質こそ tdtJa より上だが RTF 0.65 で、確定の
+たびに再デコードし mic/system が同じ ANE を共有する会議パイプライン（design 33 MT5）では実効 1.3
+相当になり、確定テキストが 16 秒遅れる。small まで落とすと速度は足りるが、欠落も用語崩れも tdtJa
+と同水準に戻る（2820 対 2711、`AWS` → `IWC`）ので替える意味がない。
+
+**CoreML 変換版は同じ Qwen3 でも精度が落ちる。** FluidAudio 0.15.2 版は `固态`（簡体字）や
+`AWS` の消失、soniqo 版は `AWS` → `ダブルス` を出し、しかも MLX より 5〜8 倍遅い。FluidAudio が
+この変換を削除した判断（PR #676）と一致する。
+
+`parakeet_v3` は日本語をローマ字と多言語の混合として出力し崩壊した（`What's going on this? Ah, so
+so none this yeah.`）。外部ベンチの CER 174% と一致し、**`ja → tdtJa` の言語分岐が正しかった**
+確認になった。
+
+Cohere の 108 トークン上限は 30 秒クリップでは 1 本も当たらなかった（最大 92）。ただし Kikimi の
+実際の窓は最大 120 秒なので長い窓では確実に当たる。
+
+## Qwen3 を測る（別パッケージ）
+
+`qwen3-probe/` は独立した SPM パッケージ。**KikimiTests には置けない**: speech-swift の `yyjson`
+依存がテストバンドルへのリンクに失敗する（`-target arm64-apple-macos10.13`、`symbol(s) not
+found`。Debug/Release どちらでも。アプリターゲットへは問題なくリンクされる）。
+
+`swift build` ではなく xcodebuild で建てる必要もある。SwiftPM は Metal シェーダをコンパイルしない
+ので、mlx-swift が `default.metallib` なしで生成され、最初の MLX 呼び出しで落ちる — ビルドは成功
+するので気づけない。`runners/qwen3_swift.sh` がこれを引き受ける。
 
 ## 設計上の判断
 
@@ -119,5 +145,6 @@ python3 tools/asr-eval/review.py --build --draft qwen3_draft
 - FluidAudio の `AsrModelVersion` で表せるもの → `KIKIMI_ASR_EVAL_MODEL` に名前を足すだけ
   （`KikimiTests/Stt/AsrEvalHarness.swift`）
 - 別パイプラインのもの → `AsrEvalCohereHarness.swift` を雛形に 1 ファイル追加
+- MLX を使うもの → テストバンドルにリンクできないので `qwen3-probe/` に倣って別パッケージにする
 - CLI で回すもの → `runners/` にスクリプトを足して `hyp/<名前>/clip_NN.txt` を書く。
   `score.py` と `review.py` は `hyp/` のサブディレクトリを自動で拾う

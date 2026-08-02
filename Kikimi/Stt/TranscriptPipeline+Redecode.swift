@@ -1,6 +1,5 @@
 import Foundation
 import OSLog
-import os
 
 // MARK: - TranscriptPipeline + two-pass window re-decode (design 33 MT4/MT5/section 3.3)
 
@@ -10,6 +9,10 @@ import os
 /// decision (MT4), whose pure selection half is kept `static` for direct unit testing (section 3.12's
 /// convention, same as `SttEngine+PureHelpers.swift`).
 extension TranscriptPipeline {
+    /// `defaultBatchDecoderAcquire` is `static`, so it cannot reach the instance `logger`.
+    private static let redecodeLogger = Logger(
+        subsystem: "io.github.uphy.Kikimi", category: "TranscriptPipeline.Redecode")
+
     /// One acquired two-pass batch decoder plus its release callback
     /// (`docs/design/33-meeting-two-pass-decode.md` MT7/MT8). Production wraps a real
     /// `BatchAsrDecoderLease`; tests construct one directly from a fake `SttBatchDecoding` and a
@@ -20,12 +23,71 @@ extension TranscriptPipeline {
         var release: @Sendable () -> Void
     }
 
-    /// Resolves the two-pass decoder for `language` and acquires it from the shared pool (MT1/MT7).
+    /// Resolves the two-pass decoder for `language`/`batchModel` and acquires it from the matching
+    /// shared pool (MT1/MT7, extended by `docs/design/45-qwen3-batch-decode.md` Q2/Q4).
     /// The default `batchDecoderAcquire` passed to `init`.
-    static func defaultBatchDecoderAcquire(language: String) async throws -> AcquiredBatchDecoder {
+    ///
+    /// This is the **only** place design 45 changes: everything downstream -- window tiling,
+    /// re-split, the batch-vs-streaming choice, `stt_source` -- sees an opaque `SttBatchDecoding`
+    /// and cannot tell which engine produced the text.
+    static func defaultBatchDecoderAcquire(
+        language: String,
+        batchModel: String
+    ) async throws -> AcquiredBatchDecoder {
+        #if canImport(Qwen3ASR)
+        if let variant = Qwen3Variant(rawValue: batchModel) {
+            let lease = try await Qwen3BatchDecoderPool.shared.acquire(
+                variant: variant, language: language)
+            return AcquiredBatchDecoder(decoder: lease.decoder, release: lease.release)
+        }
+        #else
+        // The SwiftPM build has no MLX (design 45 §4), so a `qwen3-*` setting cannot be honoured
+        // here. Falling back to Parakeet keeps `swift test` and any non-Xcode build working with
+        // the pre-design-45 behaviour rather than failing the acquire and silently disabling the
+        // second pass for the whole session.
+        if Qwen3Variant(rawValue: batchModel) != nil {
+            Self.redecodeLogger.warning(
+                """
+                stt.batch_model=\(batchModel, privacy: .public) needs the Xcode/Metal build; \
+                using \(SttConfig.parakeetBatchModel, privacy: .public) instead
+                """
+            )
+        }
+        #endif
         let version = BatchAsrDecoder.resolveModelVersion(language: language)
         let lease = try await BatchAsrDecoderPool.shared.acquire(version: version)
         return AcquiredBatchDecoder(decoder: lease.decoder, release: lease.release)
+    }
+
+    /// The body of `startBatchDecoderAcquire` (MT8), lifted here so `TranscriptPipeline.swift` stays
+    /// under the `file_length` limit -- and because this file already owns the acquire/release
+    /// plumbing. Writes the lease into `storage` on success; both failure paths leave it `nil`, which
+    /// `redecodeOrFallback`'s `decoder == nil` guard reads as "fall back to streaming text".
+    static func makeBatchDecoderAcquireTask(
+        acquire: @escaping @Sendable (String, String) async throws -> AcquiredBatchDecoder,
+        language: String,
+        batchModel: String,
+        storage: OSAllocatedUnfairLock<AcquiredBatchDecoder?>,
+        logger: Logger
+    ) -> Task<AcquiredBatchDecoder, Error> {
+        Task {
+            do {
+                let acquired = try await acquire(language, batchModel)
+                storage.withLock { $0 = acquired }
+                return acquired
+            } catch is CancellationError {
+                // Expected when the recording stops before the model finished loading (MT8) -- not a
+                // failure worth an `.error` log, just this recording's session falling back to
+                // streaming text for whatever windows were still pending.
+                logger.debug("two-pass batch decoder acquire cancelled before completing; falling back to streaming text for this recording")
+                throw CancellationError()
+            } catch {
+                logger.error(
+                    "two-pass batch decoder acquire failed; falling back to streaming text for this recording: \(String(describing: error), privacy: .public)"
+                )
+                throw error
+            }
+        }
     }
 
     /// The result of one window's redecode-or-fallback decision (MT4): the segments to append, and
