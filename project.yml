@@ -6,10 +6,28 @@ options:
     macOS: "14.2"
   createIntermediateGroups: true
 
+# Must stay in sync with Package.swift. The two are not redundant any more: since the batch
+# decoder moved to MLX, `swift build` can no longer produce a runnable binary (SwiftPM on the
+# command line does not compile Metal shaders, so mlx-swift ships without its `default.metallib`
+# and every MLX call traps at runtime). The real build path is now `xcodebuild` against the
+# project generated from this file; Package.swift remains for `swift package` tooling and for
+# consumers who only need the sources.
 packages:
   Yams:
     url: https://github.com/jpsim/Yams
     from: "5.0.0"
+  FluidAudio:
+    url: https://github.com/FluidInference/FluidAudio.git
+    exactVersion: "0.15.4"
+  Mustache:
+    url: https://github.com/groue/GRMustache.swift
+    from: "7.0.0"
+  KeyboardShortcuts:
+    url: https://github.com/sindresorhus/KeyboardShortcuts
+    exactVersion: "1.15.0"
+  SwiftTesting:
+    url: https://github.com/swiftlang/swift-testing
+    from: "0.12.0"
 
 targets:
   Kikimi:
@@ -27,6 +45,11 @@ targets:
           fi
     sources:
       - path: Kikimi
+        excludes:
+          # Build output of `mise run build:web`, copied into the .app by
+          # `.mise/tasks/build/_default` rather than compiled in (design 39 §9).
+          - "Resources/editor"
+          - "Resources/editor-spike"
     info:
       path: Kikimi/Info.plist
       properties:
@@ -72,6 +95,12 @@ targets:
     dependencies:
       - package: Yams
         product: Yams
+      - package: FluidAudio
+        product: FluidAudio
+      - package: Mustache
+        product: Mustache
+      - package: KeyboardShortcuts
+        product: KeyboardShortcuts
   KikimiTests:
     type: bundle.unit-test
     platform: macOS
@@ -81,6 +110,11 @@ targets:
       - target: Kikimi
       - package: Yams
         product: Yams
+      - package: SwiftTesting
+        product: Testing
     settings:
       base:
         SWIFT_VERSION: "5.9"
+        # The test bundle is code signed like any other bundle, and signing needs an Info.plist.
+        # Nothing in the suite reads it, so let Xcode synthesize one rather than carry a file.
+        GENERATE_INFOPLIST_FILE: YES

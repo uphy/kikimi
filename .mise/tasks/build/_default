@@ -79,8 +79,12 @@ done
 
 # The KeyboardShortcuts bundle is not optional: the 入力 settings tab instantiates
 # `KeyboardShortcuts.Recorder`, whose init reads a localized string on the spot.
-require_file "$bundle_dest/KeyboardShortcuts_KeyboardShortcuts.bundle/en.lproj/Localizable.strings" \
-  "swift build did not emit the KeyboardShortcuts resource bundle"
+#
+# The `Contents/Resources/` prefix is the Xcode layout. `swift build` emitted these bundles flat
+# (`<bundle>/en.lproj/...`); Xcode emits a proper macOS bundle, so the path moved when the build
+# switched to xcodebuild (`.mise/tasks/build/swift`).
+require_file "$bundle_dest/KeyboardShortcuts_KeyboardShortcuts.bundle/Contents/Resources/en.lproj/Localizable.strings" \
+  "xcodebuild did not emit the KeyboardShortcuts resource bundle"
 
 # Menu bar icon
 if [ -f "$menu_icon_src/MenuBarIcon.png" ]; then

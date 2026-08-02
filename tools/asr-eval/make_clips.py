@@ -101,7 +101,12 @@ def build_windows(segments: list[dict], source: str) -> list[tuple[list[dict], i
     current: list[dict] = []
     for seg in segs:
         if not current:
-            current = [seg]
+            # A single segment longer than the cap cannot be shortened without cutting
+            # mid-sentence, so it is dropped rather than emitted oversized. Oversized clips
+            # are not merely untidy: Qwen3-ASR's CoreML encoder has a fixed 3000-mel-frame
+            # (30s) input and rejects anything longer outright.
+            if seg["end_ms"] - seg["start_ms"] <= MAX_CLIP_MS:
+                current = [seg]
             continue
         start = current[0]["start_ms"]
         if seg["end_ms"] - start <= MAX_CLIP_MS:

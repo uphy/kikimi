@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-#MISE description="Swift ビルド"
-#MISE depends=["lint", "build:web"]
-#MISE sources=["Kikimi/**/*.swift", "Package.swift"]
+#MISE description="Swift ビルド (xcodebuild)"
+#MISE depends=["lint", "build:web", "generate"]
+#MISE sources=["Kikimi/**/*.swift", "Package.swift", "project.yml"]
 #MISE outputs=[".build/release/Kikimi"]
 set -euo pipefail
 
@@ -9,4 +9,78 @@ set -euo pipefail
 # during the release build would silently mutate the checkout and hide violations that never get
 # committed. Run `mise run lint-fix` explicitly when you want the autocorrections applied.
 
-swift build -c release
+# Why xcodebuild and not `swift build`
+# ------------------------------------
+# SwiftPM on the command line does not compile Metal shaders. mlx-swift (pulled in for the
+# Qwen3-ASR batch decoder) then ships without its `default.metallib`, and the failure is silent:
+# the build succeeds, and the first MLX call traps at runtime with "Failed to load the default
+# metallib". mlx-swift's README states it outright -- "the ultimate build has to be done via
+# Xcode". So the real build path is xcodebuild against the project generated from `project.yml`,
+# and that file is now load-bearing rather than a browsing aid.
+#
+# The products are copied back into `.build/release/` afterwards so `.mise/tasks/build/_default`
+# -- which assembles, versions and signs the .app -- keeps working against the same paths it
+# always has.
+
+# Xcode is required (Command Line Tools has no Metal compiler). Honour an explicit DEVELOPER_DIR,
+# otherwise take the newest /Applications/Xcode*.app rather than `xcode-select -p`, which stays
+# pointed at the Command Line Tools so every other tool keeps its current behaviour -- notably
+# SwiftLint's sourcekit lookup in `.mise/tasks/lint/_default`.
+if [ -z "${DEVELOPER_DIR:-}" ]; then
+  for candidate in /Applications/Xcode*.app; do
+    [ -d "$candidate/Contents/Developer" ] && DEVELOPER_DIR="$candidate/Contents/Developer"
+  done
+fi
+if [ -z "${DEVELOPER_DIR:-}" ] || [ ! -x "$DEVELOPER_DIR/usr/bin/xcodebuild" ]; then
+  echo "error: Xcode not found. Install it (the Metal compiler ships only with Xcode.app)," >&2
+  echo "       then re-run, or set DEVELOPER_DIR to its Contents/Developer." >&2
+  exit 1
+fi
+export DEVELOPER_DIR
+echo "Using $DEVELOPER_DIR"
+
+# The Metal toolchain is a separately downloaded component in Xcode 26. Without it the metallib
+# is omitted exactly as it is under Command Line Tools, so fail loudly here rather than ship a
+# binary that traps on first use.
+if ! xcrun metal --version >/dev/null 2>&1; then
+  echo "error: Metal toolchain missing. Run:" >&2
+  echo "       xcodebuild -runFirstLaunch && xcodebuild -downloadComponent MetalToolchain" >&2
+  exit 1
+fi
+
+derived="$PWD/.build/xcode"
+
+# -skipPackagePluginValidation: mlx-swift ships a `CudaBuild` build-tool plugin, and Xcode asks
+# for interactive trust the first time it sees one -- which a CLI build can never answer, so the
+# build fails with "Validate plug-in ... in package mlx-swift". The plugin is inert on macOS
+# (it only matters for Linux/CUDA builds).
+xcodebuild \
+  -scheme Kikimi \
+  -destination 'platform=macOS' \
+  -configuration Release \
+  -derivedDataPath "$derived" \
+  -skipPackagePluginValidation \
+  -skipMacroValidation \
+  build
+
+products="$derived/Build/Products/Release"
+app="$products/Kikimi.app"
+[ -x "$app/Contents/MacOS/Kikimi" ] || {
+  echo "error: xcodebuild produced no executable at $app/Contents/MacOS/Kikimi" >&2
+  exit 1
+}
+
+mkdir -p .build/release
+cp "$app/Contents/MacOS/Kikimi" .build/release/Kikimi
+
+# SwiftPM resource bundles (KeyboardShortcuts' localized strings; later mlx-swift's
+# default.metallib). Xcode places them inside the .app's Contents/Resources; copy them to the
+# flat location the assembly task expects.
+shopt -s nullglob
+for bundle in "$app/Contents/Resources/"*.bundle; do
+  rm -rf ".build/release/$(basename "$bundle")"
+  cp -R "$bundle" .build/release/
+done
+shopt -u nullglob
+
+echo "Built .build/release/Kikimi via xcodebuild"
