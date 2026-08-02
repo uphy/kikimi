@@ -243,4 +243,98 @@ struct SettingsViewModelTests {
 
         #expect(viewModel.voiceprintNeighbors(of: target.id).isEmpty)
     }
+
+    // MARK: - Per-provider API key drafts (`docs/design/44-llm-model-config.md` §9, generalizing §4.3)
+
+    @Test("loadProviderAPIKeyDraftIfNeeded is one-shot per provider name and reads from the credential store")
+    func loadProviderAPIKeyDraftIfNeededIsOneShotPerProvider() {
+        let credentialStore = InMemoryCredentialStore(seeded: [
+            CredentialAccount.providerAPIKey(name: "azure"): "sk-azure"
+        ])
+        let viewModel = SettingsViewModel(speakerMatchThreshold: { 0.65 }, credentialStore: credentialStore)
+
+        viewModel.loadProviderAPIKeyDraftIfNeeded(providerName: "azure")
+        #expect(viewModel.providerAPIKeyDrafts["azure"] == "sk-azure")
+
+        // A second provider's draft is independent (never bleeds the first provider's value).
+        viewModel.loadProviderAPIKeyDraftIfNeeded(providerName: "openai")
+        #expect(viewModel.providerAPIKeyDrafts["openai"] == "")
+
+        // A store mutation after the first load is not picked up again -- confirms the one-shot guard.
+        try? credentialStore.write("sk-azure-changed", account: CredentialAccount.providerAPIKey(name: "azure"))
+        viewModel.loadProviderAPIKeyDraftIfNeeded(providerName: "azure")
+        #expect(viewModel.providerAPIKeyDrafts["azure"] == "sk-azure")
+    }
+
+    @Test("updateProviderAPIKeyDraft updates the in-memory draft without writing to the credential store")
+    func updateProviderAPIKeyDraftDoesNotWriteImmediately() {
+        let credentialStore = InMemoryCredentialStore()
+        let viewModel = SettingsViewModel(speakerMatchThreshold: { 0.65 }, credentialStore: credentialStore)
+
+        viewModel.updateProviderAPIKeyDraft(providerName: "azure", value: "sk-typed")
+
+        #expect(viewModel.providerAPIKeyDrafts["azure"] == "sk-typed")
+        #expect(credentialStore.read(account: CredentialAccount.providerAPIKey(name: "azure")) == nil)
+    }
+
+    @Test("persistProviderAPIKeyDraftIfChanged writes only when the draft actually changed")
+    func persistProviderAPIKeyDraftIfChangedWritesOnlyOnChange() {
+        let credentialStore = InMemoryCredentialStore()
+        let viewModel = SettingsViewModel(speakerMatchThreshold: { 0.65 }, credentialStore: credentialStore)
+
+        viewModel.loadProviderAPIKeyDraftIfNeeded(providerName: "azure")
+        viewModel.persistProviderAPIKeyDraftIfChanged(providerName: "azure")
+        #expect(credentialStore.read(account: CredentialAccount.providerAPIKey(name: "azure")) == nil, "unchanged empty draft must not write")
+
+        viewModel.updateProviderAPIKeyDraft(providerName: "azure", value: "sk-new")
+        viewModel.persistProviderAPIKeyDraftIfChanged(providerName: "azure")
+        #expect(credentialStore.read(account: CredentialAccount.providerAPIKey(name: "azure")) == "sk-new")
+    }
+
+    @Test("renameProviderAPIKeyCredential moves the stored credential and the in-memory draft to the new name")
+    func renameProviderAPIKeyCredentialMovesCredentialAndDraft() {
+        let credentialStore = InMemoryCredentialStore(seeded: [
+            CredentialAccount.providerAPIKey(name: "old"): "sk-old"
+        ])
+        let viewModel = SettingsViewModel(speakerMatchThreshold: { 0.65 }, credentialStore: credentialStore)
+        viewModel.loadProviderAPIKeyDraftIfNeeded(providerName: "old")
+
+        viewModel.renameProviderAPIKeyCredential(from: "old", to: "new")
+
+        #expect(credentialStore.read(account: CredentialAccount.providerAPIKey(name: "old")) == nil)
+        #expect(credentialStore.read(account: CredentialAccount.providerAPIKey(name: "new")) == "sk-old")
+        #expect(viewModel.providerAPIKeyDrafts["old"] == nil)
+        #expect(viewModel.providerAPIKeyDrafts["new"] == "sk-old")
+    }
+
+    @Test("renameProviderAPIKeyCredential is a harmless no-op when nothing was stored under the old name")
+    func renameProviderAPIKeyCredentialNoOpWhenNothingStored() {
+        let credentialStore = InMemoryCredentialStore()
+        let viewModel = SettingsViewModel(speakerMatchThreshold: { 0.65 }, credentialStore: credentialStore)
+
+        viewModel.renameProviderAPIKeyCredential(from: "claude", to: "claude-renamed")
+
+        #expect(credentialStore.read(account: CredentialAccount.providerAPIKey(name: "claude-renamed")) == nil)
+    }
+
+    @Test("deleteProviderAPIKeyCredential removes the stored credential and the in-memory draft")
+    func deleteProviderAPIKeyCredentialRemovesCredentialAndDraft() {
+        let credentialStore = InMemoryCredentialStore(seeded: [
+            CredentialAccount.providerAPIKey(name: "azure"): "sk-azure"
+        ])
+        let viewModel = SettingsViewModel(speakerMatchThreshold: { 0.65 }, credentialStore: credentialStore)
+        viewModel.loadProviderAPIKeyDraftIfNeeded(providerName: "azure")
+
+        viewModel.deleteProviderAPIKeyCredential(providerName: "azure")
+
+        #expect(credentialStore.read(account: CredentialAccount.providerAPIKey(name: "azure")) == nil)
+        #expect(viewModel.providerAPIKeyDrafts["azure"] == nil)
+
+        // Deleting also clears the one-shot load guard, so re-loading afterwards would re-read
+        // (proving no stale state is left behind that would mask a fresh credential later reused
+        // under the same provider name).
+        try? credentialStore.write("sk-reused", account: CredentialAccount.providerAPIKey(name: "azure"))
+        viewModel.loadProviderAPIKeyDraftIfNeeded(providerName: "azure")
+        #expect(viewModel.providerAPIKeyDrafts["azure"] == "sk-reused")
+    }
 }

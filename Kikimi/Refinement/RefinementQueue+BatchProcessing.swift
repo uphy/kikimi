@@ -25,13 +25,13 @@ extension RefinementQueue {
             system: systemPrompt,
             user: userPrompt,
             schema: RefinementJSONSchema.schemaJSON,
-            model: config.model,
+            resolved: resolvedModel,
             stubKey: "refinement"
         )
 
         switch await callLLM(request) {
         case .success(let result):
-            let effectiveModel = result.respondedModel ?? config.model
+            let effectiveModel = result.respondedModel ?? resolvedModel.model
             let (segments, warnings) = RefinementValidator.validate(batch: batch, response: result.value, now: now(), model: effectiveModel, batchId: batchId)
             logLeakDedupCandidates(batch: batch, contextSegments: contextSegments, validated: segments)
             let finalSegments = await mergeIfPossible(batch: batch, validated: segments, response: result.value)
@@ -137,7 +137,7 @@ extension RefinementQueue {
         try? await Task.sleep(for: retryDelay)
         switch await callLLM(request) {
         case .success(let result):
-            let effectiveModel = result.respondedModel ?? config.model
+            let effectiveModel = result.respondedModel ?? resolvedModel.model
             let (segments, warnings) = RefinementValidator.validate(batch: batch, response: result.value, now: now(), model: effectiveModel, batchId: batchId)
             logLeakDedupCandidates(batch: batch, contextSegments: contextSegments, validated: segments)
             let finalSegments = await mergeIfPossible(batch: batch, validated: segments, response: result.value)
@@ -160,7 +160,7 @@ extension RefinementQueue {
                     refinedText: nil,
                     error: retryError.errorDescription,
                     refinedAt: now(),
-                    model: config.model,
+                    model: resolvedModel.model,
                     batchId: batchId
                 )
             }
@@ -186,12 +186,14 @@ extension RefinementQueue {
 
     /// `.missingAPIKey` (`docs/design/14-llm-provider.md` section 5) joins `cliNotFound`/
     /// `notAuthenticated` as fatal: like those, it is a configuration problem retrying cannot fix.
-    /// `.httpFailed`/`.networkFailed` are treated as transient (same bucket as `processFailed`/
-    /// `timedOut`) since a single bad HTTP call or network blip doesn't imply the endpoint is
-    /// permanently unusable.
+    /// `.unknownProvider` (`docs/design/44-llm-model-config.md` §5.2) joins the same bucket for the
+    /// same reason -- a provider name the registry cannot construct a backend for never becomes
+    /// constructible by retrying. `.httpFailed`/`.networkFailed` are treated as transient (same bucket
+    /// as `processFailed`/`timedOut`) since a single bad HTTP call or network blip doesn't imply the
+    /// endpoint is permanently unusable.
     private static func isFatal(_ error: LLMClientError) -> Bool {
         switch error {
-        case .cliNotFound, .notAuthenticated, .missingAPIKey:
+        case .cliNotFound, .notAuthenticated, .missingAPIKey, .unknownProvider:
             return true
         case .processFailed, .timedOut, .invalidJSON, .missingStructuredOutput, .decodeFailed, .httpFailed, .networkFailed:
             return false

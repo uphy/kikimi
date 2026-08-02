@@ -32,6 +32,9 @@ private actor ScriptedChatLLM: LLMCompleting {
 
     private var outcomes: [Outcome]
     private(set) var callCount = 0
+    /// `docs/design/44-llm-model-config.md` §8's チャット picker: lets a test assert what
+    /// `LLMRequest.model`/`.provider`/`.params` `ChatRunner.ask(modelOverride:)` actually built.
+    private(set) var receivedRequests: [LLMRequest] = []
 
     init(outcomes: [Outcome]) {
         self.outcomes = outcomes
@@ -39,6 +42,7 @@ private actor ScriptedChatLLM: LLMCompleting {
 
     func complete<T: Decodable & Sendable>(_ request: LLMRequest) async throws -> LLMResult<T> {
         callCount += 1
+        receivedRequests.append(request)
         switch outcomes.isEmpty ? .failure : outcomes.removeFirst() {
         case .failure:
             throw ScriptedFailure()
@@ -134,7 +138,7 @@ struct MeetingWorkspaceViewModelChatTests {
             voiceprintStore: voiceprintStore,
             watcherLibrary: watcherLibrary,
             watcherRunnerFactory: { handle in
-                WatcherRunner(sessionHandle: handle, llm: UnusedChatLLM(), library: watcherLibrary, defaultModel: "test-model")
+                WatcherRunner(sessionHandle: handle, llm: UnusedChatLLM(), library: watcherLibrary, resolveModel: { _ in ResolvedModel(provider: ModelResolver.builtinProviderName, model: "test-model") })
             },
             chatRunnerFactory: { handle in
                 ChatRunner(
@@ -171,6 +175,45 @@ struct MeetingWorkspaceViewModelChatTests {
         let persisted = try await handle.readChatTurns()
         #expect(persisted.map(\.role) == [.user, .assistant])
         #expect(persisted[0].id == viewModel.chatTurns[0].id)
+    }
+
+    // MARK: - (a2) manual model override (`docs/design/44-llm-model-config.md` §8)
+
+    @Test("chatModelOverride reaches ChatRunner.ask as the request's model/provider/params")
+    func chatModelOverrideReachesRequest() async throws {
+        let sessionDir = makeTemporaryDirectory(prefix: "MeetingWorkspaceViewModelChatTests-modelOverride")
+        defer { try? FileManager.default.removeItem(at: sessionDir) }
+        let handle = SessionHandle(directoryURL: sessionDir, meta: makeSessionMeta())
+        let llm = ScriptedChatLLM(outcomes: [.answer("回答本文")])
+        let viewModel = makeViewModel(sessionHandle: handle, chatLLM: llm)
+
+        viewModel.chatModelOverride = ResolvedModel(
+            provider: "azure", model: "picker-selected-model", params: LLMCallParams(effort: "high")
+        )
+        viewModel.chatDraft = "決まったことは？"
+        await viewModel.sendChatMessage()
+
+        let request = try #require(await llm.receivedRequests.last)
+        #expect(request.model == "picker-selected-model")
+        #expect(request.provider == "azure")
+        #expect(request.params.effort == "high")
+    }
+
+    @Test("a nil chatModelOverride (the default) leaves the request exactly as before this picker existed")
+    func nilChatModelOverrideLeavesRequestUnchanged() async throws {
+        let sessionDir = makeTemporaryDirectory(prefix: "MeetingWorkspaceViewModelChatTests-modelOverrideNil")
+        defer { try? FileManager.default.removeItem(at: sessionDir) }
+        let handle = SessionHandle(directoryURL: sessionDir, meta: makeSessionMeta())
+        let llm = ScriptedChatLLM(outcomes: [.answer("回答本文")])
+        let viewModel = makeViewModel(sessionHandle: handle, chatLLM: llm)
+
+        #expect(viewModel.chatModelOverride == nil)
+        viewModel.chatDraft = "決まったことは？"
+        await viewModel.sendChatMessage()
+
+        let request = try #require(await llm.receivedRequests.last)
+        #expect(request.model == ModelResolver.builtinModelName)
+        #expect(request.provider == ModelResolver.builtinProviderName)
     }
 
     @Test("a blank draft sends nothing")

@@ -41,7 +41,8 @@ struct SessionHandleLLMUsageTests {
         outputTokens: Int = 320,
         cacheReadInputTokens: Int = 2_100,
         cacheCreationInputTokens: Int = 0,
-        reportedCostUSD: Double? = 0.0042
+        reportedCostUSD: Double? = 0.0042,
+        provider: String? = nil
     ) -> LLMUsageRecord {
         LLMUsageRecord(
             timestamp: Date(timeIntervalSince1970: 1_751_000_100),
@@ -51,7 +52,8 @@ struct SessionHandleLLMUsageTests {
             outputTokens: outputTokens,
             cacheReadInputTokens: cacheReadInputTokens,
             cacheCreationInputTokens: cacheCreationInputTokens,
-            reportedCostUSD: reportedCostUSD
+            reportedCostUSD: reportedCostUSD,
+            provider: provider
         )
     }
 
@@ -111,6 +113,44 @@ struct SessionHandleLLMUsageTests {
 
         let records = try await handle.readLLMUsageRecords()
         #expect(records.first?.reportedCostUSD == nil)
+    }
+
+    // MARK: - provider field (docs/design/44-llm-model-config.md §7)
+
+    @Test("appendLLMUsageRecord followed by readLLMUsageRecords round-trips a non-nil provider")
+    func appendThenReadRoundTripsProvider() async throws {
+        let directory = makeTempSessionDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = SessionHandle(directoryURL: directory, meta: baseMeta())
+
+        let record = makeRecord(provider: "azure")
+        try await handle.appendLLMUsageRecord(record)
+
+        let records = try await handle.readLLMUsageRecords()
+        #expect(records == [record])
+        #expect(records.first?.provider == "azure")
+    }
+
+    @Test("a pre-44-章 line with no provider key decodes with provider == nil, not a decode failure")
+    func readDecodesLegacyLineWithoutProviderAsNil() async throws {
+        let directory = makeTempSessionDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = SessionHandle(directoryURL: directory, meta: baseMeta())
+
+        let legacyLine = """
+        {"timestamp":"2026-07-01T14:00:00Z","purpose":"refinement","model":"claude-haiku-4-5-20251001",\
+        "input_tokens":850,"output_tokens":320,"cache_read_input_tokens":2100,"cache_creation_input_tokens":0,\
+        "reported_cost_usd":0.0042}\n
+        """
+        let fileURL = directory.appendingPathComponent("llm_usage.jsonl")
+        FileManager.default.createFile(atPath: fileURL.path, contents: nil)
+        try legacyLine.data(using: .utf8)!.append(to: fileURL)
+
+        let records = try await handle.readLLMUsageRecords()
+        let record = try #require(records.first)
+        #expect(record.provider == nil)
+        #expect(record.purpose == "refinement")
+        #expect(record.model == "claude-haiku-4-5-20251001")
     }
 
     // MARK: - Corrupt-line tolerance (design section 6: same contract as transcript.jsonl)

@@ -36,7 +36,12 @@ extension DictationController {
         }
 
         markRefining()
-        let model = DictationRefiner.resolveModel(dictationModel: config.model, watchersDefaultModel: watchersDefaultModelProvider())
+        let resolvedModel = DictationRefiner.resolveModel(
+            dictationModel: config.model,
+            watchersDefaultModel: watchersDefaultModelProvider(),
+            config: AppConfig.shared.data.llm,
+            availableProviders: LLMClient.shared.availableProviders
+        )
 
         // `docs/design/42-prompt-overrides.md` §7.2: the frontmost-app -> `dictation/apps/<bundle-id>`
         // match happens here (controller side), not inside `DictationContextResolver` -- exact match
@@ -53,7 +58,7 @@ extension DictationController {
         )
         let refineOutcome = await refiner.refine(
             rawText: rawText,
-            model: model,
+            resolvedModel: resolvedModel,
             timeoutMs: config.refineTimeoutMs,
             resolvedContext: resolvedContext
         )
@@ -65,7 +70,14 @@ extension DictationController {
         }
 
         let llmUsage = refineOutcome.usage.map {
-            LLMUsageRecord.make(usage: $0, respondedModel: refineOutcome.model, requestedModel: model, purpose: "dictation", timestamp: Date())
+            LLMUsageRecord.make(
+                usage: $0,
+                respondedModel: refineOutcome.model,
+                requestedModel: resolvedModel.model,
+                purpose: "dictation",
+                timestamp: Date(),
+                provider: resolvedModel.provider
+            )
         }
         guard trimmedRefined.isEmpty else {
             return DictationRefineHistoryFields(finalText: finalText, outcome: .success, error: nil, llmUsage: llmUsage)

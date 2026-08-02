@@ -120,7 +120,7 @@ struct MeetingWorkspaceViewModelWatchersTests {
                 .appendingPathComponent("voiceprints.json")),
             watcherLibrary: library,
             watcherRunnerFactory: { sessionHandle in
-                WatcherRunner(sessionHandle: sessionHandle, llm: llm, library: library, defaultModel: "test-model")
+                WatcherRunner(sessionHandle: sessionHandle, llm: llm, library: library, resolveModel: { _ in ResolvedModel(provider: ModelResolver.builtinProviderName, model: "test-model") })
             }
         )
     }

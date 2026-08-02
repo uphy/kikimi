@@ -67,7 +67,8 @@ struct UsageRecordingLLM: LLMCompleting {
             respondedModel: respondedModel,
             requestedModel: request.model,
             purpose: request.stubKey ?? "unknown",
-            timestamp: now()
+            timestamp: now(),
+            provider: request.provider
         )
 
         do {

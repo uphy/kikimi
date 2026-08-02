@@ -375,4 +375,13 @@ final class InMemoryCredentialStore: CredentialStoring {
 /// (`docs/design/26-settings-ui.md` §2).
 enum CredentialAccount {
     static let openAIAPIKey = "llm.openai.api_key"
+
+    /// `llm.providers.<name>.api_key` (`docs/design/44-llm-model-config.md` §6): the per-provider
+    /// account every named `openai`-kind provider resolves its API key under. `name` is already
+    /// constrained to `[A-Za-z0-9_-]+` (`LLMConfig.isValidProviderName(_:)`), so unlike
+    /// `CredentialFileLayout.fileName(forAccount:)`'s general sanitization, no two distinct provider
+    /// names can ever collide on this account string.
+    static func providerAPIKey(name: String) -> String {
+        "llm.providers.\(name).api_key"
+    }
 }

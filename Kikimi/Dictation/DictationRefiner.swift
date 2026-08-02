@@ -87,23 +87,31 @@ struct DictationRefiner: Sendable {
     /// - Parameters:
     ///   - rawText: The STT output for this utterance. Returned unchanged (no LLM call at all) if
     ///     empty.
-    ///   - model: Resolved via `DictationRefiner.resolveModel(dictationModel:)`.
-    ///   - timeoutMs: `dictation.refine_timeout_ms`.
+    ///   - resolvedModel: Resolved via `DictationRefiner.resolveModel(dictationModel:
+    ///     watchersDefaultModel:config:availableProviders:)`.
+    ///   - timeoutMs: `dictation.refine_timeout_ms`. The effective wait is extended (never shortened)
+    ///     by `resolvedModel.params.timeoutSeconds` when set (`docs/design/44-llm-model-config.md`
+    ///     §3.3's max rule) -- applied here in milliseconds directly rather than through
+    ///     `LLMRequest.init(resolved:functionDefaultSeconds:)` (that helper only takes whole seconds,
+    ///     which would lose `refine_timeout_ms`'s sub-second precision).
     ///   - resolvedContext: `DictationContextResolver.resolve(bundleID:config:)`'s output, passed
     ///     through unchanged -- `DictationRefiner` never reads `AppConfig`/`FrontmostGuard.Target`
     ///     itself (existing DI seam: it only ever receives already-resolved values).
-    func refine(rawText: String, model: String, timeoutMs: Int, resolvedContext: String?) async -> DictationRefineOutcome {
+    func refine(rawText: String, resolvedModel: ResolvedModel, timeoutMs: Int, resolvedContext: String?) async -> DictationRefineOutcome {
         guard !rawText.isEmpty else {
             return DictationRefineOutcome(text: rawText, usage: nil, model: nil, failure: nil)
         }
 
+        let effectiveTimeoutMs = resolvedModel.params.timeoutSeconds.map { max(timeoutMs, $0 * 1_000) } ?? timeoutMs
         let request = LLMRequest(
             system: Self.buildSystemPrompt(resolvedContext: resolvedContext),
             user: rawText,
             schema: DictationRefinerSchema.json,
-            model: model,
-            timeout: .milliseconds(timeoutMs),
-            stubKey: "dictation"
+            model: resolvedModel.model,
+            timeout: .milliseconds(effectiveTimeoutMs),
+            stubKey: "dictation",
+            provider: resolvedModel.provider,
+            params: resolvedModel.params
         )
 
         do {
@@ -116,7 +124,7 @@ struct DictationRefiner: Sendable {
             return DictationRefineOutcome(
                 text: result.value.refinedText,
                 usage: result.usage,
-                model: result.respondedModel ?? model,
+                model: result.respondedModel ?? resolvedModel.model,
                 failure: nil
             )
         } catch {
@@ -125,12 +133,27 @@ struct DictationRefiner: Sendable {
         }
     }
 
-    /// `dictation.model` falls back to `watchers.default_model` when empty, rather than a
-    /// hardcoded literal (R9, revised after D2 shipped: a silently-used hardcoded model surprised
-    /// the user in practice -- "設定していないのに勝手に使っている"). `watchers.default_model`
-    /// already exists as Kikimi's "no explicit model given" fallback (kikimi.md 12 章), so
-    /// dictation reuses it instead of introducing its own separate hardcoded default.
-    static func resolveModel(dictationModel: String, watchersDefaultModel: String) -> String {
-        dictationModel.isEmpty ? watchersDefaultModel : dictationModel
+    /// `dictation.model` resolution (`docs/design/44-llm-model-config.md` §4/§7, revised after D2
+    /// shipped: a silently-used hardcoded model surprised the user in practice -- "設定していないのに
+    /// 勝手に使っている").
+    ///
+    /// - New-format `config` (`!config.isLegacySentinelDefault`): candidates `[dictationModel]` --
+    ///   an empty/unset `dictation.model` falls straight through `ModelResolver.resolve`'s own
+    ///   fallthrough to `llm.default` (§2.2's table).
+    /// - Legacy `config` (sentinel `defaultProviderName`, §4): candidates
+    ///   `[dictationModel, watchersDefaultModel]`, the pre-44-章 fallback chain kept in place
+    ///   deliberately (§4/§13-3's "旧形式は watchers.default_model に据え置く" -- resolving straight to
+    ///   `llm.default` here would drop a legacy single-openai-provider config's dictation refine back
+    ///   to the claude-cli builtin, a regression for anyone without the CLI installed).
+    static func resolveModel(
+        dictationModel: String,
+        watchersDefaultModel: String,
+        config: LLMConfig,
+        availableProviders: Set<String>
+    ) -> ResolvedModel {
+        let candidates: [String?] = config.isLegacySentinelDefault
+            ? [dictationModel, watchersDefaultModel]
+            : [dictationModel]
+        return ModelResolver.resolve(candidates: candidates, config: config, availableProviders: availableProviders)
     }
 }

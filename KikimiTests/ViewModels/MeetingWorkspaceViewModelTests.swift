@@ -2091,6 +2091,133 @@ struct MeetingWorkspaceViewModelTests {
         #expect(try await handle.readText(.summaryMarkdown) != nil)
     }
 
+    // MARK: Manual model override (`docs/design/44-llm-model-config.md` §8)
+
+    @Test("regenerateSummary(modelOverride:) forwards the override into the LLMRequest .regeneration builds")
+    func regenerateSummaryForwardsModelOverride() async throws {
+        let root = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = makeStore(root: root)
+        let created = try await store.createDraftSession()
+        let handle = try await store.openSession(created.id)
+        try await handle.appendTranscriptSegment(source: .mic, startMs: 0, endMs: 500, text: "hello", confidence: 0.9)
+
+        let llm = FakeSummaryLLM()
+        await llm.setResponse(patchJSONWithTitle, for: "summary_patch")
+        let viewModel = makeViewModel(handle: handle, store: store, capture: FakeAudioCapture(), pipeline: FakeTranscriptPipeline(), llm: llm)
+
+        await viewModel.regenerateSummary(
+            modelOverride: ResolvedModel(provider: "azure", model: "picker-selected-model", params: LLMCallParams(effort: "high"))
+        )
+
+        let request = try #require(await llm.receivedRequests.last)
+        #expect(request.stubKey == "summary_patch")
+        #expect(request.model == "picker-selected-model")
+        #expect(request.provider == "azure")
+        #expect(request.params.effort == "high")
+    }
+
+    @Test("a nil regenerateSummary(modelOverride:) (既定で実行) keeps using SummaryUpdater's own resolvedModel")
+    func regenerateSummaryNilModelOverrideKeepsResolvedModel() async throws {
+        let root = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = makeStore(root: root)
+        let created = try await store.createDraftSession()
+        let handle = try await store.openSession(created.id)
+        try await handle.appendTranscriptSegment(source: .mic, startMs: 0, endMs: 500, text: "hello", confidence: 0.9)
+
+        let llm = FakeSummaryLLM()
+        await llm.setResponse(patchJSONWithTitle, for: "summary_patch")
+        let viewModel = makeViewModel(handle: handle, store: store, capture: FakeAudioCapture(), pipeline: FakeTranscriptPipeline(), llm: llm)
+
+        // §8's "既定" menu item must display exactly what a `nil` override is about to use.
+        #expect(viewModel.summaryDefaultModelLabel == ModelResolver.builtinModelName)
+
+        await viewModel.regenerateSummary(modelOverride: nil)
+
+        let request = try #require(await llm.receivedRequests.last)
+        #expect(request.model == ModelResolver.builtinModelName)
+        #expect(request.provider == ModelResolver.builtinProviderName)
+    }
+
+    @Test("rerunFinalPass(modelOverride:) forwards the override into the LLMRequest .finalPass builds")
+    func rerunFinalPassForwardsModelOverride() async throws {
+        let root = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = makeStore(root: root)
+        let created = try await store.createDraftSession()
+        let handle = try await store.openSession(created.id)
+        try await handle.appendTranscriptSegment(source: .mic, startMs: 0, endMs: 500, text: "hello", confidence: 0.9)
+
+        let llm = FakeSummaryLLM()
+        await llm.setResponse(finalRevisionJSON, for: "summary_final")
+        let viewModel = makeViewModel(handle: handle, store: store, capture: FakeAudioCapture(), pipeline: FakeTranscriptPipeline(), llm: llm)
+
+        await viewModel.rerunFinalPass(
+            modelOverride: ResolvedModel(provider: "azure", model: "picker-selected-model", params: LLMCallParams(effort: "high"))
+        )
+
+        let request = try #require(await llm.receivedRequests.last)
+        #expect(request.stubKey == "summary_final")
+        #expect(request.model == "picker-selected-model")
+        #expect(request.provider == "azure")
+        #expect(request.params.effort == "high")
+    }
+
+    @Test("rerunFinalPass() works for an Ended session with no live SummaryUpdater ever constructed by this ViewModel instance -- the reopened-after-restart case (§8's largest implementation item)")
+    func rerunFinalPassOnReopenedEndedSessionUsesTransientUpdater() async throws {
+        let root = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = makeStore(root: root)
+        let created = try await store.createDraftSession()
+        let handle = try await store.openSession(created.id)
+        try await handle.appendTranscriptSegment(source: .mic, startMs: 0, endMs: 500, text: "hello", confidence: 0.9)
+        // Simulates a session already Ended by a prior process run -- unlike
+        // `endMeetingFromPausedRunsFinalPass()`/`endMeetingFromRecordingRunsFinalPass()` above, this
+        // writes `meta.state` directly rather than driving it through `startRecording()`/
+        // `pauseRecording()`/`endMeeting()`, precisely so this `viewModel` instance never builds a
+        // live `SummaryUpdater` at any point in its lifetime.
+        try await handle.updateMeta { meta in meta.state = .ended }
+
+        let llm = FakeSummaryLLM()
+        await llm.setResponse(finalRevisionJSON, for: "summary_final")
+        let viewModel = makeViewModel(handle: handle, store: store, capture: FakeAudioCapture(), pipeline: FakeTranscriptPipeline(), llm: llm)
+
+        // The "既定" label must resolve even before any transient updater has actually run --
+        // `summaryUpdater` is nil the whole time, so this builds (and discards) one throwaway
+        // instance purely to read `resolvedFinalModel` (`SummaryUpdater.init` does no I/O).
+        #expect(viewModel.summaryFinalPassDefaultModelLabel == ModelResolver.builtinModelName)
+
+        await viewModel.rerunFinalPass()
+
+        #expect(await llm.callCount == 1)
+        let markdown = try #require(try await handle.readText(.summaryMarkdown))
+        #expect(markdown.contains("最終版の概要です"))
+        #expect(viewModel.summaryMarkdown?.contains("最終版の概要です") == true)
+    }
+
+    @Test("rerunFinalPass() failure keeps the existing summary.md untouched (§8's 'failed 警告 + 既存サマリ維持')")
+    func rerunFinalPassFailureKeepsExistingSummary() async throws {
+        let root = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = makeStore(root: root)
+        let created = try await store.createDraftSession()
+        let handle = try await store.openSession(created.id)
+        try await handle.appendTranscriptSegment(source: .mic, startMs: 0, endMs: 500, text: "hello", confidence: 0.9)
+        try await handle.writeText("# 既存のサマリ\n", to: .summaryMarkdown)
+        try await handle.updateMeta { meta in meta.state = .ended }
+
+        // No `summary_final` response configured -- `FakeSummaryLLM` throws `.missingStructuredOutput`,
+        // which `performFinalPass(modelOverride:)` treats as "warn and skip" (§10's failure mode table).
+        let llm = FakeSummaryLLM()
+        let viewModel = makeViewModel(handle: handle, store: store, capture: FakeAudioCapture(), pipeline: FakeTranscriptPipeline(), llm: llm)
+
+        await viewModel.rerunFinalPass()
+
+        #expect(viewModel.summaryMarkdown == "# 既存のサマリ\n")
+        #expect(try await handle.readText(.summaryMarkdown) == "# 既存のサマリ\n")
+    }
+
     // MARK: flushSessionHandle()
 
     @Test("flushSessionHandle() completes without throwing even with no pending writes")

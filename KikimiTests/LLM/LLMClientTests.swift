@@ -176,12 +176,13 @@ struct LLMClientTests {
         #expect(result == .available)
     }
 
-    // MARK: - Backend factory (`docs/design/14-llm-provider.md` section 2/3)
+    // MARK: - Backend factory (`docs/design/44-llm-model-config.md` §5.2/§5.3)
 
-    @Test("makeBackend(from:) builds a ClaudeCLIBackend for the claude-cli provider")
+    @Test("makeBackend(name:config:) builds a ClaudeCLIBackend for a claude-cli provider entry")
     func makeBackendBuildsClaudeCLIBackend() {
         let backend = LLMClient.makeBackend(
-            from: LLMConfig(provider: .claudeCLI, claude: .default, openai: .default),
+            name: "claude",
+            config: .claudeCLI(.default),
             credentialStore: InMemoryCredentialStore()
         )
         #expect(backend is ClaudeCLIBackend)
@@ -190,12 +191,173 @@ struct LLMClientTests {
     /// `credentialStore` must be injected: `OpenAIChatBackend.init` resolves the API key eagerly, so
     /// the production default would read the user's real credential store from a unit test
     /// (`docs/design/35-secure-enclave-credentials.md` §4).
-    @Test("makeBackend(from:) builds an OpenAIChatBackend for the openai provider")
+    @Test("makeBackend(name:config:) builds an OpenAIChatBackend for an openai provider entry")
     func makeBackendBuildsOpenAIChatBackend() {
         let backend = LLMClient.makeBackend(
-            from: LLMConfig(provider: .openai, claude: .default, openai: .default),
+            name: "azure",
+            config: .openai(.default),
             credentialStore: InMemoryCredentialStore()
         )
         #expect(backend is OpenAIChatBackend)
+    }
+
+    // MARK: - Registry dispatch (§5.2/§11: "レジストリ dispatch")
+
+    @Test("init(backends:) dispatches a request to the backend registered under request.provider")
+    func registryDispatchesToNamedProvider() async throws {
+        let claudeRunner = FakeProcessRunner(stdoutToReturn: makeCLIResponseLine(structuredOutput: "{\"title\":\"from-claude\",\"count\":1}"))
+        let azureRunner = FakeProcessRunner(stdoutToReturn: makeCLIResponseLine(structuredOutput: "{\"title\":\"from-azure\",\"count\":2}"))
+        let client = LLMClient(backends: [
+            "claude": ClaudeCLIBackend(runner: claudeRunner),
+            "azure": ClaudeCLIBackend(runner: azureRunner)
+        ])
+
+        var azureRequest = makeRequest()
+        azureRequest.provider = "azure"
+        let result: LLMResult<SamplePayload> = try await client.complete(azureRequest)
+
+        #expect(result.value == SamplePayload(title: "from-azure", count: 2))
+        #expect(await claudeRunner.callCount == 0)
+        #expect(await azureRunner.callCount == 1)
+    }
+
+    @Test("init(backends:) dispatches a request with provider == nil to defaultProviderName")
+    func registryDispatchesNilProviderToDefault() async throws {
+        let defaultRunner = FakeProcessRunner(stdoutToReturn: makeCLIResponseLine())
+        let otherRunner = FakeProcessRunner(stdoutToReturn: makeCLIResponseLine())
+        let client = LLMClient(backends: [
+            "claude": ClaudeCLIBackend(runner: defaultRunner),
+            "azure": ClaudeCLIBackend(runner: otherRunner)
+        ], defaultProviderName: "claude")
+
+        let _: LLMResult<SamplePayload> = try await client.complete(makeRequest())
+
+        #expect(await defaultRunner.callCount == 1)
+        #expect(await otherRunner.callCount == 0)
+    }
+
+    @Test("a request naming a provider absent from the registry throws unknownProvider")
+    func unregisteredProviderThrowsUnknownProvider() async throws {
+        let client = LLMClient(backends: ["claude": ClaudeCLIBackend(runner: FakeProcessRunner())])
+
+        var request = makeRequest()
+        request.provider = "azure"
+
+        await #expect(throws: LLMClientError.unknownProvider(name: "azure")) {
+            let _: LLMResult<SamplePayload> = try await client.complete(request)
+        }
+    }
+
+    @Test("init(backend:) back-compat: a request with provider == nil reaches the single registered backend")
+    func initBackendBackCompatDispatchesNilProviderRequests() async throws {
+        let runner = FakeProcessRunner(stdoutToReturn: makeCLIResponseLine())
+        let client = LLMClient(backend: ClaudeCLIBackend(runner: runner))
+
+        let result: LLMResult<SamplePayload> = try await client.complete(makeRequest())
+
+        #expect(result.value == SamplePayload(title: "hello", count: 3))
+        #expect(await runner.callCount == 1)
+    }
+
+    @Test("stub mode dispatches before the registry: an unknown provider request never reaches backend(for:)")
+    func stubModeBypassesRegistryEvenForAnUnknownProvider() async throws {
+        // §5.2's invariant: "スタブ分岐はレジストリ参照より前段" -- a request naming a provider that
+        // isn't in the registry at all must still resolve from the stub map in stub mode, never
+        // throwing `.unknownProvider`.
+        let tempFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LLMClientTests-stub-registry-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: tempFile) }
+        let stubMap = ["summary_patch": "{\"title\":\"stubbed\",\"count\":42}"]
+        try JSONEncoder().encode(stubMap).write(to: tempFile)
+
+        let client = LLMClient(backends: [:], environment: ["KIKIMI_STUB_LLM": "1", "KIKIMI_STUB_LLM_FILE": tempFile.path])
+
+        var request = makeRequest(stubKey: "summary_patch")
+        request.provider = "totally-unregistered"
+        let result: LLMResult<SamplePayload> = try await client.complete(request)
+
+        #expect(result.value == SamplePayload(title: "stubbed", count: 42))
+    }
+
+    // MARK: - Lazy construction (§5.2/§11: "遅延構築")
+
+    /// Records every `read(account:)` call so a test can assert an unused provider's credential is
+    /// never touched.
+    private final class RecordingCredentialStore: CredentialStoring, @unchecked Sendable {
+        private let lock = NSLock()
+        private var backing: [String: String] = [:]
+        private(set) var readAccounts: [String] = []
+
+        func read(account: String) -> String? {
+            lock.lock()
+            defer { lock.unlock() }
+            readAccounts.append(account)
+            return backing[account]
+        }
+
+        func write(_ value: String, account: String) throws {
+            lock.lock()
+            defer { lock.unlock() }
+            backing[account] = value
+        }
+
+        func delete(account: String) throws {
+            lock.lock()
+            defer { lock.unlock() }
+            backing.removeValue(forKey: account)
+        }
+    }
+
+    @Test("a provider's backend is never constructed -- and its credential never read -- until a request names it")
+    func lazyConstructionSkipsCredentialReadForUnusedProviders() async throws {
+        let credentialStore = RecordingCredentialStore()
+        let config = LLMConfig(
+            provider: .claudeCLI, claude: .default, openai: .default, pricing: [:],
+            providers: [
+                // `/bin/echo` stands in for the CLI executable: it exists and is executable (so path
+                // resolution never spawns a real `which claude` login shell -- deterministic, and
+                // no risk of finding/invoking a real `claude` install), and its stdout ("-p ... " etc.
+                // echoed back verbatim) is never valid JSON, so `complete(_:)` fails fast with
+                // `invalidJSON` -- irrelevant to what this test checks.
+                "claude": .claudeCLI(ClaudeBackendConfig(cliPath: "/bin/echo")),
+                "azure": .openai(OpenAIBackendConfig(baseURL: "https://example.invalid", apiKey: "", apiKeyEnv: "", apiVersion: "", model: "", authHeader: "", reasoningEffort: ""))
+            ],
+            models: [:], defaultAlias: "", defaultProviderName: "claude"
+        )
+        let client = LLMClient(config: config, credentialStore: credentialStore)
+        let request = LLMRequest(
+            system: "system prompt", user: "user prompt", schema: "{\"type\":\"object\"}",
+            model: "claude-haiku-4-5-20251001", timeout: .seconds(5)
+        )
+        // `claude`'s backend build path never touches the credential store at all (no API key
+        // involved), so exercising it alone is enough to prove `azure`'s account was never read.
+        _ = try? await client.complete(request) as LLMResult<SamplePayload>
+
+        #expect(credentialStore.readAccounts.isEmpty, "azure's backend must not be constructed -- and its credential must not be read -- when only claude is ever dispatched to")
+    }
+
+    // MARK: - availableProviders (§5.2/§11)
+
+    @Test("availableProviders is providerConfigs' keys plus the builtin claude, excluding decode-dropped entries")
+    func availableProvidersReflectsProviderConfigsPlusBuiltin() {
+        let config = LLMConfig(
+            provider: .claudeCLI, claude: .default, openai: .default, pricing: [:],
+            providers: ["azure": .openai(.default), "on-prem": .claudeCLI(.default)],
+            models: [:], defaultAlias: "auto", defaultProviderName: nil
+        )
+        let client = LLMClient(config: config, credentialStore: InMemoryCredentialStore())
+
+        #expect(client.availableProviders == ["azure", "on-prem", ModelResolver.builtinProviderName])
+    }
+
+    @Test("availableProviders always includes the builtin claude provider even when llm.providers is empty")
+    func availableProvidersAlwaysIncludesBuiltin() {
+        let config = LLMConfig(
+            provider: .claudeCLI, claude: .default, openai: .default, pricing: [:],
+            providers: [:], models: [:], defaultAlias: "auto", defaultProviderName: nil
+        )
+        let client = LLMClient(config: config, credentialStore: InMemoryCredentialStore())
+
+        #expect(client.availableProviders == [ModelResolver.builtinProviderName])
     }
 }

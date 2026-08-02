@@ -215,6 +215,51 @@ struct ClaudeCLIBackendTests {
         ])
     }
 
+    @Test("buildArguments appends --effort at the end when request.params.effort is set")
+    func buildArgumentsAppendsEffortWhenSet() {
+        var request = LLMRequest(
+            system: "sys prompt",
+            user: "user prompt",
+            schema: "{\"type\":\"object\"}",
+            model: "claude-haiku-4-5-20251001"
+        )
+        request.params = LLMCallParams(effort: "high")
+        let arguments = ClaudeCLIBackend.buildArguments(request: request)
+
+        #expect(arguments == [
+            "-p",
+            "--system-prompt", "sys prompt",
+            "--tools",
+            "--exclude-dynamic-system-prompt-sections",
+            "--setting-sources", "",
+            "--output-format", "json",
+            "--json-schema", "{\"type\":\"object\"}",
+            "--model", "claude-haiku-4-5-20251001",
+            "--effort", "high"
+        ])
+    }
+
+    @Test("buildArguments omits --effort when request.params.effort is nil, matching the pre-44-章 argument list exactly")
+    func buildArgumentsOmitsEffortWhenNil() {
+        let request = LLMRequest(
+            system: "sys prompt",
+            user: "user prompt",
+            schema: "{\"type\":\"object\"}",
+            model: "claude-haiku-4-5-20251001"
+        )
+        #expect(request.params.effort == nil)
+        #expect(ClaudeCLIBackend.buildArguments(request: request) == [
+            "-p",
+            "--system-prompt", "sys prompt",
+            "--tools",
+            "--exclude-dynamic-system-prompt-sections",
+            "--setting-sources", "",
+            "--output-format", "json",
+            "--json-schema", "{\"type\":\"object\"}",
+            "--model", "claude-haiku-4-5-20251001"
+        ])
+    }
+
     @Test("complete(_:) forwards the built arguments and user prompt (on stdin) to the runner")
     func completeForwardsArgumentsAndStdinToRunner() async throws {
         let runner = FakeProcessRunner(stdoutToReturn: makeCLIResponseLine())

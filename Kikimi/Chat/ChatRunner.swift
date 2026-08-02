@@ -28,6 +28,15 @@ struct ChatRunner: Sendable {
     var llm: any LLMCompleting
     var source: TranscriptMarkdownSource
     var config: ChatConfig
+    /// Session-start snapshot of `ModelResolver.resolve(candidates: [config.model], ...)`
+    /// (`docs/design/44-llm-model-config.md` §7). `defaultChatRunnerFactory`
+    /// (`MeetingWorkspaceViewModel+Factories.swift`) passes the real resolved value; `init` derives a
+    /// fallback straight from `config.model` under the builtin provider when omitted (mirrors
+    /// `RefinementQueue.resolvedModel`'s doc comment), so every existing test call site that never
+    /// passes this parameter keeps building the same `LLMRequest.model` it did before this field
+    /// existed. Phase 2's manual chat model picker (§8) will override this per-question -- out of
+    /// scope here.
+    var resolvedModel: ResolvedModel
 
     /// Policy-layer prompt body lookup (`docs/design/42-prompt-overrides.md` §4.1/§4.3): override
     /// file content if `prompts/<id>.md` is active, `PromptSpec.defaultBody` otherwise. `ask(...)`
@@ -43,12 +52,31 @@ struct ChatRunner: Sendable {
 
     private static let logger = Logger(subsystem: "io.github.uphy.Kikimi", category: "ChatRunner")
 
+    init(
+        llm: any LLMCompleting,
+        source: TranscriptMarkdownSource,
+        config: ChatConfig,
+        resolvedModel: ResolvedModel? = nil,
+        promptBodyProvider: @escaping @Sendable (PromptID) -> String = { PromptStore.shared.policyBody(for: .builtin($0)) }
+    ) {
+        self.llm = llm
+        self.source = source
+        self.config = config
+        self.resolvedModel = resolvedModel ?? ResolvedModel(provider: ModelResolver.builtinProviderName, model: config.model)
+        self.promptBodyProvider = promptBodyProvider
+    }
+
     /// - Parameter history: every stored turn, unfiltered. Trimming and normalization happen here so
     ///   callers never have to know about `historyTurns` or the alternation rule.
+    /// - Parameter modelOverride: The チャット tab's small model picker (`docs/design/44-llm-model-config.md`
+    ///   §8), resolved at click/selection time by the caller (`MeetingWorkspaceViewModel`'s session-only
+    ///   `chatModelOverride`, never persisted). `nil` (every pre-existing call site) keeps using
+    ///   `resolvedModel` exactly as before this parameter existed.
     func ask(
         question: String,
         history: [ChatTurn],
-        sessionHandle: SessionHandle
+        sessionHandle: SessionHandle,
+        modelOverride: ResolvedModel? = nil
     ) async throws -> ChatAnswer {
         let input = try await source.load(sessionHandle: sessionHandle)
         let normalizedHistory = ChatHistoryNormalizer.normalize(history, maxTurns: config.historyTurns)
@@ -74,8 +102,11 @@ struct ChatRunner: Sendable {
             user: ChatPromptBuilder.buildUser(promptInput),
             messages: ChatPromptBuilder.buildMessages(promptInput),
             schema: ChatPromptBuilder.answerSchema,
-            model: config.model,
-            timeout: .seconds(config.timeoutSeconds),
+            resolved: modelOverride ?? resolvedModel,
+            // `config.timeoutSeconds` is chat's own "機能側の基底値" (`docs/design/44-llm-model-config.md`
+            // §3.3/§7) -- the extended-only max rule still lets a `resolvedModel` with a longer
+            // `params.timeoutSeconds` (e.g. a `premium` alias) wait longer than 180s, never shorter.
+            functionDefaultSeconds: config.timeoutSeconds,
             // Doubles as `LLMUsageRecord.purpose` via `UsageRecordingLLM`, which is what keeps chat
             // cost on its own row in the header badge instead of pooled into `unknown` (CH11).
             stubKey: "chat"

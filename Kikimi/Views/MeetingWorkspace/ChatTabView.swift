@@ -47,6 +47,15 @@ struct ChatTabView: View {
     /// The window-lifetime web view the history renders into (design 39 MD2).
     @ObservedObject var markdownHost: MarkdownWebViewHost
 
+    /// `docs/design/44-llm-model-config.md` §8's small model picker: `chat.model`'s session-start
+    /// resolved model, shown as the "既定" item's label (`chatRunner.resolvedModel`).
+    var defaultModelLabel: String
+    /// Live config the picker's alias list reads from (`ModelOverrideMenuButton`'s own
+    /// `@ObservedObject` doc comment applies identically here).
+    @ObservedObject var appConfig: AppConfig
+    /// `MeetingWorkspaceViewModel.chatModelOverride` -- session-only, never persisted (§8).
+    @Binding var modelOverride: ResolvedModel?
+
     /// When the in-flight answer was requested, for the page's "…秒" counter. `nil` when idle.
     @State private var respondingSince: Date?
     @State private var isConfirmingClear = false
@@ -140,11 +149,17 @@ struct ChatTabView: View {
             .frame(minHeight: 56, maxHeight: 120)
             .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.3)))
 
-            Button("送信") { onSend() }
-                .keyboardShortcut(.return, modifiers: .command)
-                .disabled(!ChatComposer.canSend(draft: draft, isResponding: isResponding))
-                .help("質問を送信 (⌘⏎)")
-                .accessibilityLabel("質問を送信")
+            HStack {
+                // `docs/design/44-llm-model-config.md` §8: the picker sits beside the send button,
+                // not the text field, so it never competes with the composer's own text baseline.
+                ChatModelPicker(defaultModelLabel: defaultModelLabel, appConfig: appConfig, selection: $modelOverride)
+                Spacer()
+                Button("送信") { onSend() }
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .disabled(!ChatComposer.canSend(draft: draft, isResponding: isResponding))
+                    .help("質問を送信 (⌘⏎)")
+                    .accessibilityLabel("質問を送信")
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)

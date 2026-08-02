@@ -15,9 +15,13 @@ extension SummaryUpdater {
     private static let regenerationChunkSize = 40
 
     /// Not `private`: called from `execute(_:)` in `SummaryUpdater.swift`, across the file split.
-    func performRegeneration() async {
+    /// `modelOverride`: forward-looking hook for a future manual re-run UI
+    /// (`docs/design/44-llm-model-config.md` §7/§8) -- `nil` (every current call site) falls back to
+    /// `resolvedModel`, the same session-start snapshot the incremental/final-title flows use.
+    func performRegeneration(modelOverride: ResolvedModel? = nil) async {
         isRegenerating = true
         defer { isRegenerating = false }
+        let resolved = modelOverride ?? resolvedModel
 
         let allSegments: [SummarySegmentInput]
         do {
@@ -44,7 +48,7 @@ extension SummaryUpdater {
                         system: SummaryPromptBuilder.systemPrompt(policyBody: promptBodyProvider(.summary)),
                         user: userPrompt,
                         schema: SummaryJSONSchema.patchSchemaJSON,
-                        model: config.model,
+                        resolved: resolved,
                         stubKey: "summary_patch"
                     )
                 )

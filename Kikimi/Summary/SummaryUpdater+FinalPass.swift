@@ -31,13 +31,15 @@ extension SummaryUpdater {
 
     /// Session-end final refinement pass: rewrites `overview`/`decisions`/`actionItems` from a
     /// whole-meeting view in a single LLM call (§7.1). Awaitable. `modelOverride` is a hook for a
-    /// future manual re-run UI -- every current call site passes `nil`, which resolves to
-    /// `config.model` (§7.5's scope note).
+    /// future manual re-run UI (`docs/design/44-llm-model-config.md` §7/§8) -- every current call
+    /// site passes `nil`, which resolves to `resolvedFinalModel`
+    /// (`ModelResolver.resolve(candidates: [config.finalModel, config.model], ...)`, session-start
+    /// snapshotted).
     ///
     /// Goes through the same `runSerialized(kind:)` in-flight gate as every other request kind
     /// (§4.1.1), so this never races an incremental update/regeneration/title proposal/
     /// participants merge over `summary.state.json`.
-    func runFinalPass(modelOverride: String? = nil) async {
+    func runFinalPass(modelOverride: ResolvedModel? = nil) async {
         await runSerialized(kind: .finalPass(modelOverride: modelOverride))
     }
 
@@ -45,7 +47,7 @@ extension SummaryUpdater {
 
     /// Not `private`: called from `execute(_:)` in `SummaryUpdater.swift`, across the file split
     /// (mirrors `performFinalTitleProposal()`/`performRegeneration()`/`performParticipantsMerge(_:)`).
-    func performFinalPass(modelOverride: String? = nil) async {
+    func performFinalPass(modelOverride: ResolvedModel? = nil) async {
         // (1) State is read fresh, sanitized, and defaults to `.empty` if it cannot be read at all
         // (missing file or a corrupt/undecodable one) -- a final pass with nothing to revise from
         // should still be able to produce a first-ever overview rather than aborting.
@@ -95,8 +97,8 @@ extension SummaryUpdater {
                     system: Self.finalRevisionSystemPrompt(policyBody: promptBodyProvider(.summaryFinal)),
                     user: userPrompt,
                     schema: SummaryJSONSchema.finalRevisionSchemaJSON,
-                    model: modelOverride ?? config.model,
-                    timeout: Self.finalPassTimeout,
+                    resolved: modelOverride ?? resolvedFinalModel,
+                    functionDefaultSeconds: Int(Self.finalPassTimeout.components.seconds),
                     stubKey: "summary_final"
                 )
             )

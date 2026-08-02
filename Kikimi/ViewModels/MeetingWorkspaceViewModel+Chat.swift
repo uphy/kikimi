@@ -96,9 +96,10 @@ extension MeetingWorkspaceViewModel {
         let runner = chatRunner
         let handle = sessionHandle
         let turns = chatTurns
+        let modelOverride = chatModelOverride
         let answerTurn: ChatTurn
         do {
-            let answer = try await runner.ask(question: question, history: turns, sessionHandle: handle)
+            let answer = try await runner.ask(question: question, history: turns, sessionHandle: handle, modelOverride: modelOverride)
             answerTurn = ChatTurn(
                 id: EntryIdNaming.makeId(for: now()),
                 role: .assistant,

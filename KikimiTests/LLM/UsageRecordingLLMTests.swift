@@ -82,8 +82,8 @@ struct UsageRecordingLLMTests {
         )
     }
 
-    private func makeRequest(model: String = "claude-haiku-4-5-20251001", stubKey: String? = "refinement") -> LLMRequest {
-        LLMRequest(system: "system", user: "user", schema: "{}", model: model, stubKey: stubKey)
+    private func makeRequest(model: String = "claude-haiku-4-5-20251001", stubKey: String? = "refinement", provider: String? = nil) -> LLMRequest {
+        LLMRequest(system: "system", user: "user", schema: "{}", model: model, stubKey: stubKey, provider: provider)
     }
 
     // MARK: - Success path
@@ -159,6 +159,32 @@ struct UsageRecordingLLMTests {
 
         let records = try await handle.readLLMUsageRecords()
         #expect(records.first?.model == "gpt-5.4-nano")
+    }
+
+    @Test("complete(_:) records request.provider on the llm_usage.jsonl line (docs/design/44-llm-model-config.md §7)")
+    func completeRecordsRequestProvider() async throws {
+        let directory = makeTempSessionDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = SessionHandle(directoryURL: directory, meta: baseMeta())
+        let recorder = UsageRecordingLLM(base: FakeCompletingLLM(), sessionHandle: handle)
+
+        let _: LLMResult<DummyValue> = try await recorder.complete(makeRequest(provider: "azure"))
+
+        let records = try await handle.readLLMUsageRecords()
+        #expect(records.first?.provider == "azure")
+    }
+
+    @Test("complete(_:) records a nil provider unchanged when the request never set one")
+    func completeRecordsNilProviderWhenRequestHasNone() async throws {
+        let directory = makeTempSessionDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = SessionHandle(directoryURL: directory, meta: baseMeta())
+        let recorder = UsageRecordingLLM(base: FakeCompletingLLM(), sessionHandle: handle)
+
+        let _: LLMResult<DummyValue> = try await recorder.complete(makeRequest())
+
+        let records = try await handle.readLLMUsageRecords()
+        #expect(records.first?.provider == nil)
     }
 
     @Test("complete(_:) records purpose \"unknown\" when the request carries no stubKey")

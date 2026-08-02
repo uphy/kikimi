@@ -53,7 +53,10 @@ struct DictationRefinerTests {
         let refiner = DictationRefiner(llm: llm)
 
         let outcome = await refiner.refine(
-            rawText: "次のスプリントで対応しますえーと", model: "claude-haiku-4-5-20251001", timeoutMs: 3_000, resolvedContext: nil
+            rawText: "次のスプリントで対応しますえーと",
+            resolvedModel: ResolvedModel(provider: "claude", model: "claude-haiku-4-5-20251001"),
+            timeoutMs: 3_000,
+            resolvedContext: nil
         )
 
         #expect(outcome.text == "次のスプリントで対応します。")
@@ -71,27 +74,63 @@ struct DictationRefinerTests {
         let refiner = DictationRefiner(llm: llm)
 
         let outcome = await refiner.refine(
-            rawText: "raw", model: "claude-haiku-4-5-20251001", timeoutMs: 3_000, resolvedContext: nil
+            rawText: "raw",
+            resolvedModel: ResolvedModel(provider: "claude", model: "claude-haiku-4-5-20251001"),
+            timeoutMs: 3_000,
+            resolvedContext: nil
         )
 
         #expect(outcome.model == "claude-haiku-4-5-20251001-v2")
     }
 
-    @Test("the request carries stubKey \"dictation\", the resolved model, and the timeout as a Duration")
+    @Test("the request carries stubKey \"dictation\", the resolved model/provider, and the timeout as a Duration")
     func requestCarriesExpectedFields() async throws {
         let llm = FakeLLM()
         await llm.setResponse(#"{"refined_text":"ok"}"#)
         let refiner = DictationRefiner(llm: llm)
 
-        _ = await refiner.refine(rawText: "raw", model: "claude-sonnet-4-5", timeoutMs: 1_500, resolvedContext: nil)
+        _ = await refiner.refine(
+            rawText: "raw",
+            resolvedModel: ResolvedModel(provider: "azure", model: "claude-sonnet-4-5"),
+            timeoutMs: 1_500,
+            resolvedContext: nil
+        )
 
         let requests = await llm.receivedRequests
         let request = try #require(requests.first)
         #expect(request.stubKey == "dictation")
         #expect(request.model == "claude-sonnet-4-5")
+        #expect(request.provider == "azure")
         #expect(request.timeout == .milliseconds(1_500))
         #expect(request.user == "raw")
         #expect(request.schema == DictationRefinerSchema.json)
+    }
+
+    @Test("a model definition's timeout_seconds extends (never shortens) refine_timeout_ms, in milliseconds")
+    func requestTimeoutExtendsButNeverShortens() async throws {
+        let llm = FakeLLM()
+        await llm.setResponse(#"{"refined_text":"ok"}"#)
+        let refiner = DictationRefiner(llm: llm)
+
+        // Extends: a 10s model-definition timeout beats a 1.5s refine_timeout_ms.
+        _ = await refiner.refine(
+            rawText: "raw",
+            resolvedModel: ResolvedModel(provider: "claude", model: "premium-model", params: LLMCallParams(timeoutSeconds: 10)),
+            timeoutMs: 1_500,
+            resolvedContext: nil
+        )
+        let extendedRequest = try #require(await llm.receivedRequests.first)
+        #expect(extendedRequest.timeout == .milliseconds(10_000))
+
+        // Never shortens: a 1s model-definition timeout does not undercut a 3s refine_timeout_ms.
+        _ = await refiner.refine(
+            rawText: "raw",
+            resolvedModel: ResolvedModel(provider: "claude", model: "short-timeout-model", params: LLMCallParams(timeoutSeconds: 1)),
+            timeoutMs: 3_000,
+            resolvedContext: nil
+        )
+        let unshortenedRequest = try #require(await llm.receivedRequests.last)
+        #expect(unshortenedRequest.timeout == .milliseconds(3_000))
     }
 
     @Test("resolvedContext is threaded through into the request's system prompt")
@@ -100,7 +139,12 @@ struct DictationRefinerTests {
         await llm.setResponse(#"{"refined_text":"ok"}"#)
         let refiner = DictationRefiner(llm: llm)
 
-        _ = await refiner.refine(rawText: "raw", model: "claude-sonnet-4-5", timeoutMs: 1_500, resolvedContext: "Slack向けルール")
+        _ = await refiner.refine(
+            rawText: "raw",
+            resolvedModel: ResolvedModel(provider: "claude", model: "claude-sonnet-4-5"),
+            timeoutMs: 1_500,
+            resolvedContext: "Slack向けルール"
+        )
 
         let requests = await llm.receivedRequests
         let request = try #require(requests.first)
@@ -115,7 +159,10 @@ struct DictationRefinerTests {
         let refiner = DictationRefiner(llm: llm)
 
         let outcome = await refiner.refine(
-            rawText: "次のスプリントで対応します", model: "claude-haiku-4-5-20251001", timeoutMs: 3_000, resolvedContext: nil
+            rawText: "次のスプリントで対応します",
+            resolvedModel: ResolvedModel(provider: "claude", model: "claude-haiku-4-5-20251001"),
+            timeoutMs: 3_000,
+            resolvedContext: nil
         )
 
         #expect(outcome.text == "次のスプリントで対応します")
@@ -132,7 +179,10 @@ struct DictationRefinerTests {
         let refiner = DictationRefiner(llm: llm)
 
         let outcome = await refiner.refine(
-            rawText: "そのままの文章", model: "claude-haiku-4-5-20251001", timeoutMs: 3_000, resolvedContext: nil
+            rawText: "そのままの文章",
+            resolvedModel: ResolvedModel(provider: "claude", model: "claude-haiku-4-5-20251001"),
+            timeoutMs: 3_000,
+            resolvedContext: nil
         )
 
         #expect(outcome.text == "そのままの文章")
@@ -152,7 +202,9 @@ struct DictationRefinerTests {
         let refiner = DictationRefiner(llm: llm)
 
         let outcome = await refiner.refine(
-            rawText: "このスキルの追加コミットをフィックスアップしてください", model: "claude-haiku-4-5-20251001", timeoutMs: 3_000,
+            rawText: "このスキルの追加コミットをフィックスアップしてください",
+            resolvedModel: ResolvedModel(provider: "claude", model: "claude-haiku-4-5-20251001"),
+            timeoutMs: 3_000,
             resolvedContext: nil
         )
 
@@ -170,7 +222,12 @@ struct DictationRefinerTests {
         let llm = FakeLLM()
         let refiner = DictationRefiner(llm: llm)
 
-        let outcome = await refiner.refine(rawText: "", model: "claude-haiku-4-5-20251001", timeoutMs: 3_000, resolvedContext: nil)
+        let outcome = await refiner.refine(
+            rawText: "",
+            resolvedModel: ResolvedModel(provider: "claude", model: "claude-haiku-4-5-20251001"),
+            timeoutMs: 3_000,
+            resolvedContext: nil
+        )
 
         #expect(outcome.text == "")
         #expect(outcome.usage == nil)
@@ -204,26 +261,78 @@ struct DictationRefinerTests {
         #expect(DictationRefiner.buildSystemPrompt(resolvedContext: "共通ルール") == expected)
     }
 
-    // MARK: - resolveModel (R9)
+    // MARK: - resolveModel (R9, docs/design/44-llm-model-config.md §4/§7)
 
-    @Test("resolveModel falls back to watchers.default_model when dictation.model is empty")
-    func resolveModelFallsBackToWatchersDefault() {
-        #expect(
-            DictationRefiner.resolveModel(dictationModel: "", watchersDefaultModel: "claude-haiku-4-5-20251001")
-                == "claude-haiku-4-5-20251001"
-        )
-        #expect(
-            DictationRefiner.resolveModel(dictationModel: "", watchersDefaultModel: "claude-sonnet-4-5")
-                == "claude-sonnet-4-5"
+    /// A "new-format" `LLMConfig` (`llm.providers`/`llm.models`/`llm.default` genuinely present --
+    /// `isLegacySentinelDefault == false`), mirroring `ModelResolverTests.newFormatConfig(...)`.
+    private func newFormatConfig(defaultAlias: String = "auto") -> LLMConfig {
+        LLMConfig(
+            provider: .claudeCLI, claude: .default, openai: .default, pricing: [:],
+            providers: ["claude": .claudeCLI(.default)],
+            models: ["auto": ModelAliasConfig(provider: "claude", model: "claude-haiku-4-5-20251001")],
+            defaultAlias: defaultAlias, defaultProviderName: nil
         )
     }
 
-    @Test("resolveModel passes a non-empty dictation.model through unchanged, ignoring watchers.default_model")
-    func resolveModelPassesThroughNonEmpty() {
-        #expect(
-            DictationRefiner.resolveModel(dictationModel: "claude-sonnet-4-5", watchersDefaultModel: "claude-haiku-4-5-20251001")
-                == "claude-sonnet-4-5"
+    /// A "legacy" `LLMConfig` (§4's migration sentinel set, `isLegacySentinelDefault == true`) --
+    /// `LLMConfig.default` already has this shape, but this helper spells it out explicitly for
+    /// readability at each call site below.
+    private func legacyConfig() -> LLMConfig {
+        LLMConfig(
+            provider: .claudeCLI, claude: .default, openai: .default, pricing: [:],
+            providers: ["claude": .claudeCLI(.default)],
+            models: [:], defaultAlias: "", defaultProviderName: "claude"
         )
+    }
+
+    @Test("new-format config: an empty dictation.model falls through to llm.default, not watchers.default_model")
+    func newFormatEmptyDictationModelFallsToLLMDefault() {
+        let config = newFormatConfig()
+        let resolved = DictationRefiner.resolveModel(
+            dictationModel: "",
+            watchersDefaultModel: "claude-sonnet-4-5",
+            config: config,
+            availableProviders: ["claude"]
+        )
+        // `llm.default: auto` -> the "auto" alias, not the "claude-sonnet-4-5" watchers default --
+        // proves the new-format candidate list is `[dictationModel]` alone (§4's revised fallback).
+        #expect(resolved == ResolvedModel(provider: "claude", model: "claude-haiku-4-5-20251001"))
+    }
+
+    @Test("new-format config: a non-empty dictation.model resolves as its own candidate, ignoring watchers.default_model")
+    func newFormatNonEmptyDictationModelIgnoresWatchersDefault() {
+        let config = newFormatConfig()
+        let resolved = DictationRefiner.resolveModel(
+            dictationModel: "claude-sonnet-4-5",
+            watchersDefaultModel: "claude-opus-4-1",
+            config: config,
+            availableProviders: ["claude"]
+        )
+        #expect(resolved == ResolvedModel(provider: "claude", model: "claude-sonnet-4-5"))
+    }
+
+    @Test("legacy config (sentinel default): an empty dictation.model still falls back to watchers.default_model, not llm.default (§4/§13-3's regression guard)")
+    func legacyEmptyDictationModelFallsBackToWatchersDefault() {
+        let config = legacyConfig()
+        let resolved = DictationRefiner.resolveModel(
+            dictationModel: "",
+            watchersDefaultModel: "claude-sonnet-4-5",
+            config: config,
+            availableProviders: ["claude"]
+        )
+        #expect(resolved == ResolvedModel(provider: "claude", model: "claude-sonnet-4-5"))
+    }
+
+    @Test("legacy config (sentinel default): a non-empty dictation.model passes through unchanged, ignoring watchers.default_model")
+    func legacyNonEmptyDictationModelPassesThroughUnchanged() {
+        let config = legacyConfig()
+        let resolved = DictationRefiner.resolveModel(
+            dictationModel: "claude-sonnet-4-5",
+            watchersDefaultModel: "claude-haiku-4-5-20251001",
+            config: config,
+            availableProviders: ["claude"]
+        )
+        #expect(resolved == ResolvedModel(provider: "claude", model: "claude-sonnet-4-5"))
     }
 }
 

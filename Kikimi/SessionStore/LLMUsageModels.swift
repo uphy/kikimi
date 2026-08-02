@@ -27,6 +27,14 @@ struct LLMUsageRecord: Codable, Sendable, Equatable {
     /// cost (OpenAI-compatible provider) — the estimated cost is then computed at read time from
     /// `LLMPricing`, never persisted (design section 2's "価格表を後から修正しても過去分に反映").
     var reportedCostUSD: Double?
+    /// Resolved provider name (`llm.providers` key, `docs/design/44-llm-model-config.md` §7's usage-
+    /// recording row) that answered this call. `nil` for records written before this field existed --
+    /// old `llm_usage.jsonl` lines simply decode with `provider == nil` (`decodeIfPresent`'s default
+    /// synthesized behavior for an `Optional` stored property with no matching key), never a decode
+    /// failure. Lets a future per-provider cost breakdown distinguish two providers that happen to
+    /// serve identically-named models, without disturbing `LLMUsageAggregator`'s existing
+    /// model-keyed pricing lookup.
+    var provider: String?
 
     /// Explicit `CodingKeys` are required for this one field: `SessionJSONCoding`'s shared
     /// `.convertToSnakeCase`/`.convertFromSnakeCase` strategies are not exact inverses of each other
@@ -48,6 +56,7 @@ struct LLMUsageRecord: Codable, Sendable, Equatable {
         case cacheReadInputTokens
         case cacheCreationInputTokens
         case reportedCostUSD = "reportedCostUsd"
+        case provider
     }
 
     /// Shared factory for building a record from a completed LLM call (`docs/design/16-llm-usage-
@@ -66,7 +75,8 @@ struct LLMUsageRecord: Codable, Sendable, Equatable {
         respondedModel: String?,
         requestedModel: String,
         purpose: String,
-        timestamp: Date
+        timestamp: Date,
+        provider: String? = nil
     ) -> LLMUsageRecord {
         LLMUsageRecord(
             timestamp: timestamp,
@@ -76,7 +86,8 @@ struct LLMUsageRecord: Codable, Sendable, Equatable {
             outputTokens: usage.outputTokens,
             cacheReadInputTokens: usage.cacheReadInputTokens,
             cacheCreationInputTokens: usage.cacheCreationInputTokens,
-            reportedCostUSD: usage.totalCostUSD > 0 ? usage.totalCostUSD : nil
+            reportedCostUSD: usage.totalCostUSD > 0 ? usage.totalCostUSD : nil,
+            provider: provider
         )
     }
 }
