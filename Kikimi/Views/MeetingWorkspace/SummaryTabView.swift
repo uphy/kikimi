@@ -21,12 +21,25 @@ import SwiftUI
 /// the web view now, and keeping a second renderer alive would mean maintaining both.
 struct SummaryTabView: View {
     let summaryMarkdown: String?
-    let onRegenerate: () async -> Void
+    /// `docs/design/44-llm-model-config.md` §8: `nil` for "既定で実行", otherwise the resolved
+    /// override the manual-override menu built (an alias resolution or the "モデルを指定して実行…"
+    /// sheet's provider+model).
+    let onRegenerate: (ResolvedModel?) async -> Void
+    /// `true` only for an Ended session (`meta.state == .ended`) -- gates the "最終整形を再実行" button,
+    /// which §8 scopes to Ended sessions specifically.
+    let isEnded: Bool
+    /// `docs/design/44-llm-model-config.md` §8's "既定" labels -- session-start-snapshotted resolved
+    /// model names, one per button (`MeetingWorkspaceViewModel.summaryDefaultModelLabel`/
+    /// `summaryFinalPassDefaultModelLabel`).
+    let defaultRegenerateModelLabel: String
+    let defaultFinalPassModelLabel: String
+    /// Live config the manual-override menus read `llm.models`/`llm.default` from
+    /// (`ModelOverrideMenuButton`'s own `@ObservedObject` doc comment).
+    @ObservedObject var appConfig: AppConfig
+    let onRerunFinalPass: (ResolvedModel?) async -> Void
     /// The window-lifetime web view this tab renders into (`docs/design/39-webview-markdown.md`
     /// MD2), handed down from `MeetingWorkspaceWindowController`'s `MarkdownWebViewStore`.
     @ObservedObject var markdownHost: MarkdownWebViewHost
-
-    @State private var isRegenerating = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -51,24 +64,26 @@ struct SummaryTabView: View {
     private var regenerateBar: some View {
         HStack {
             Spacer()
-            Button {
-                guard !isRegenerating else { return }
-                isRegenerating = true
-                Task {
-                    await onRegenerate()
-                    isRegenerating = false
-                }
-            } label: {
-                if isRegenerating {
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.small)
-                        Text("再生成中…")
-                    }
-                } else {
-                    Text("サマリ全文再生成")
-                }
+            // §8: Ended sessions get both actions side by side -- regenerate rebuilds the whole
+            // summary from the transcript, final-pass re-run only rewrites overview/decisions/
+            // action_items from the current state (`docs/design/summary-quality-topics-and-final-pass.md`
+            // §7.1).
+            if isEnded {
+                ModelOverrideMenuButton(
+                    title: "最終整形を再実行",
+                    busyTitle: "再実行中…",
+                    defaultModelLabel: defaultFinalPassModelLabel,
+                    appConfig: appConfig,
+                    action: onRerunFinalPass
+                )
             }
-            .disabled(isRegenerating)
+            ModelOverrideMenuButton(
+                title: "サマリ全文再生成",
+                busyTitle: "再生成中…",
+                defaultModelLabel: defaultRegenerateModelLabel,
+                appConfig: appConfig,
+                action: onRegenerate
+            )
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)

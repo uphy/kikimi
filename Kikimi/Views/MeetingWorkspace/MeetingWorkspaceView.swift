@@ -134,7 +134,10 @@ struct MeetingWorkspaceView: View {
                 onCopy: { id in viewModel.copyChatAnswer(id: id) },
                 onClear: { Task { await viewModel.clearChatHistory() } },
                 onOpenSegment: { segId in viewModel.jumpToTranscriptSegment(segId) },
-                markdownHost: markdownWebViewStore.host(for: .chat)
+                markdownHost: markdownWebViewStore.host(for: .chat),
+                defaultModelLabel: viewModel.chatRunner.resolvedModel.model,
+                appConfig: viewModel.appConfig,
+                modelOverride: $viewModel.chatModelOverride
             )
         }
     }
@@ -253,7 +256,12 @@ struct MeetingWorkspaceView: View {
     private var summaryTabView: some View {
         SummaryTabView(
             summaryMarkdown: viewModel.summaryMarkdown,
-            onRegenerate: { await viewModel.regenerateSummary() },
+            onRegenerate: { modelOverride in await viewModel.regenerateSummary(modelOverride: modelOverride) },
+            isEnded: viewModel.meta.state == .ended,
+            defaultRegenerateModelLabel: viewModel.summaryDefaultModelLabel,
+            defaultFinalPassModelLabel: viewModel.summaryFinalPassDefaultModelLabel,
+            appConfig: viewModel.appConfig,
+            onRerunFinalPass: { modelOverride in await viewModel.rerunFinalPass(modelOverride: modelOverride) },
             markdownHost: markdownWebViewStore.host(for: .summary)
         )
     }

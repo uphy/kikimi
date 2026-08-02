@@ -100,6 +100,22 @@ extension AppConfig {
             set: { newValue in self.update { $0[keyPath: keyPath] = newValue.isEmpty ? nil : newValue } }
         )
     }
+
+    /// Every mutation the new Settings "モデル" タブ's プロバイダ/モデル定義 sections make to
+    /// `llm.providers`/`llm.models`/`llm.default` goes through this instead of plain `update {}`
+    /// (`docs/design/44-llm-model-config.md` §9's "編集すると新形式で保存される"): clearing
+    /// `defaultProviderName` in the very same `update {}` promotes a legacy-migrated config to
+    /// genuine new format immediately, so `LLMConfig.encode(to:)` stops writing the legacy
+    /// `llm.provider`/`llm.claude`/`llm.openai` keys on the very next save -- not just once the user
+    /// happens to also touch a legacy-shaped field. The migrated content itself (`providers`/
+    /// `models`/`default`, already populated by `LLMConfig.init(from:)`'s §4 migration) is left
+    /// exactly as-is; only the "which shape does `encode(to:)` prefer" flag flips.
+    func updateLLM(_ block: (inout LLMConfig) -> Void) {
+        update { config in
+            config.llm.defaultProviderName = nil
+            block(&config.llm)
+        }
+    }
 }
 
 // MARK: - WatchersSettingsTab

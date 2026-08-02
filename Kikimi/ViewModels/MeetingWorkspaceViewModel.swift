@@ -183,6 +183,10 @@ final class MeetingWorkspaceViewModel: ObservableObject {
     /// Bumped when a chat answer is copied, keyed by turn id, to drive that row's checkmark
     /// (`copyFeedbackRowId`'s equivalent for the chat tab).
     @Published var chatCopyFeedbackTurnId: String?
+    /// The チャット tab's small model picker selection (`docs/design/44-llm-model-config.md` §8):
+    /// session-only state, never persisted -- `nil` means "use `chatRunner.resolvedModel`", exactly
+    /// what every question already sent before this picker existed. Bound directly by `ChatTabView`.
+    @Published var chatModelOverride: ResolvedModel?
 
     /// Source-tagged, in-progress (unconfirmed) transcript text (`docs/design/11-streaming-stt.md`
     /// section 3.6). Each stream fully replaces the previous value for its source; empty means

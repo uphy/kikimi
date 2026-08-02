@@ -135,11 +135,58 @@ extension MeetingWorkspaceViewModel {
     /// juggling a second `events` subscription for the transient case, this simply re-reads
     /// `summary.md`/`meta` from disk after the call completes -- `regenerateFromScratch()` has already
     /// persisted both by the time it returns (`SummaryUpdater.performRegeneration()`).
-    func regenerateSummary() async {
+    ///
+    /// - Parameter modelOverride: The regenerate menu's manual override
+    ///   (`docs/design/44-llm-model-config.md` §8), resolved by the caller at click time (`nil` for
+    ///   "既定で実行" -- `SummaryUpdater.performRegeneration(modelOverride:)` then falls back to
+    ///   `resolvedModel`, the session-start snapshot, exactly as before this parameter existed).
+    func regenerateSummary(modelOverride: ResolvedModel? = nil) async {
         let updater = summaryUpdater ?? summaryUpdaterFactory(sessionHandle)
-        await updater.regenerateFromScratch()
+        await updater.regenerateFromScratch(modelOverride: modelOverride)
         summaryMarkdown = (try? await sessionHandle.readText(.summaryMarkdown)) ?? summaryMarkdown
         meta = await sessionHandle.meta
+    }
+
+    /// Ended-only Summary tab's "最終整形を再実行" button (`docs/design/44-llm-model-config.md` §8).
+    /// Same shape as `regenerateSummary(modelOverride:)` above -- reuse the live updater if one somehow
+    /// exists (defensive; never true while genuinely Ended, since `stopSummaryUpdater()` already ran),
+    /// otherwise spin up a transient one from `sessionHandle` alone. That is also what makes this work
+    /// for an Ended session reopened after an app restart, with no live `MeetingWorkspaceViewModel`
+    /// history at all: `summaryUpdaterFactory(sessionHandle)` only ever needs the `SessionHandle`
+    /// this instance was constructed with (`+Factories.swift`'s `defaultSummaryUpdaterFactory`
+    /// reads `AppConfig`/`LLMClient.shared` fresh, not anything cached from a prior recording segment)
+    /// -- §8's "実装量の大半" is precisely that this needed no new construction path at all, only
+    /// reusing the one `endMeeting()`'s Paused → Ended branch already established
+    /// (`+Recording.swift`).
+    ///
+    /// `runFinalPass(modelOverride:)` never throws (§8's "失敗は warn + 既存サマリ維持" is handled
+    /// entirely inside `SummaryUpdater.performFinalPass(modelOverride:)`), so there is nothing here to
+    /// catch -- a failed LLM call simply leaves `summary.md` exactly as it was, which the re-read below
+    /// then reflects unchanged.
+    func rerunFinalPass(modelOverride: ResolvedModel? = nil) async {
+        let updater = summaryUpdater ?? summaryUpdaterFactory(sessionHandle)
+        await updater.runFinalPass(modelOverride: modelOverride)
+        summaryMarkdown = (try? await sessionHandle.readText(.summaryMarkdown)) ?? summaryMarkdown
+        meta = await sessionHandle.meta
+    }
+
+    // MARK: - Manual-override menu display (`docs/design/44-llm-model-config.md` §8)
+
+    /// The manual-override menu's "既定" model name for whichever `SummaryUpdater` a `nil` override
+    /// will actually run against right now -- the live instance's `resolvedModel` while Recording (a
+    /// genuine session-start snapshot, fixed when this recording segment began), or a fresh transient
+    /// instance's otherwise (`regenerateSummary(modelOverride: nil)` is about to build exactly this
+    /// same transient instance itself; `SummaryUpdater.init` does no I/O, so reading a throwaway
+    /// instance's `resolvedModel` here has no side effect beyond the allocation). §8 explicitly wants
+    /// this to reflect "what a `nil` override actually uses", never a fresh `ModelResolver.resolve`
+    /// call independent of the updater that is about to run.
+    var summaryDefaultModelLabel: String {
+        (summaryUpdater ?? summaryUpdaterFactory(sessionHandle)).resolvedModel.model
+    }
+
+    /// Same shape as `summaryDefaultModelLabel` above, for the Ended-only final-pass re-run button.
+    var summaryFinalPassDefaultModelLabel: String {
+        (summaryUpdater ?? summaryUpdaterFactory(sessionHandle)).resolvedFinalModel.model
     }
 
     // MARK: - Title (kikimi.md 8 章 "自動タイトル命名"). Moved here from `MeetingWorkspaceViewModel.swift`

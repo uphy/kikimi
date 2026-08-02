@@ -136,7 +136,7 @@ struct MeetingWorkspaceViewModelCopyTests {
             voiceprintStore: voiceprintStore,
             watcherLibrary: watcherLibrary,
             watcherRunnerFactory: { sessionHandle in
-                WatcherRunner(sessionHandle: sessionHandle, llm: UnusedLLM(), library: watcherLibrary, defaultModel: "test-model")
+                WatcherRunner(sessionHandle: sessionHandle, llm: UnusedLLM(), library: watcherLibrary, resolveModel: { _ in ResolvedModel(provider: ModelResolver.builtinProviderName, model: "test-model") })
             },
             wikiExporter: NoOpWikiExporter(),
             pasteboard: pasteboard

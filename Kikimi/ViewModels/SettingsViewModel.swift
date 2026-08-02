@@ -55,16 +55,21 @@ final class SettingsViewModel: ObservableObject {
     /// (design §6); production defaults to `AppConfig.shared`.
     private let speakerMatchThreshold: () -> Double
 
-    /// `ModelSettingsTab`'s draft of `llm.openai.api_key` (`docs/design/26-settings-ui.md` §4.3).
-    /// Owned here -- not as `@State` on `ModelSettingsTab` itself -- because `SettingsView`'s
+    /// The Settings "モデル" タブ's プロバイダ detail pane's draft of each `openai`-kind provider's
+    /// `CredentialAccount.providerAPIKey(name:)` secret (`docs/design/44-llm-model-config.md` §9,
+    /// generalizing the single-provider `llm.openai.api_key` draft `docs/design/26-settings-ui.md`
+    /// §4.3 introduced). Keyed by the provider's *current* name in `llm.providers`.
+    ///
+    /// Owned here -- not as `@State` on the provider detail view itself -- because `SettingsView`'s
     /// `TabView` tears down and reinstantiates non-selected tabs' view structs on every tab switch
-    /// (observed in kikimi-verify: reading Keychain from `ModelSettingsTab.init`/`@State` fired the
-    /// OS Keychain-access permission prompt on every single tab switch, not once per window). This
+    /// (observed in kikimi-verify: reading Keychain from a view's own `init`/`@State` fired the OS
+    /// Keychain-access permission prompt on every single tab switch, not once per window). This
     /// class instance, by contrast, is created once by `SettingsWindowController` and lives for the
-    /// window's whole lifetime, so `hasLoadedOpenAIAPIKeyDraft` genuinely gates the Keychain read to
-    /// once per window open regardless of how many times the view struct is rebuilt.
-    @Published private(set) var openAIAPIKeyDraft = ""
-    private var hasLoadedOpenAIAPIKeyDraft = false
+    /// window's whole lifetime, so `loadedProviderAPIKeyDraftNames` genuinely gates each provider's
+    /// credential-store read to once per window open regardless of how many times the view struct
+    /// selecting that provider is rebuilt.
+    @Published private(set) var providerAPIKeyDrafts: [String: String] = [:]
+    private var loadedProviderAPIKeyDraftNames: Set<String> = []
     private let credentialStore: CredentialStoring
 
     init(
@@ -78,33 +83,82 @@ final class SettingsViewModel: ObservableObject {
         self.credentialStore = credentialStore
     }
 
-    /// One-shot Keychain read for `openAIAPIKeyDraft`, safe to call from `ModelSettingsTab.task`
-    /// every time that view struct is rebuilt (see `openAIAPIKeyDraft`'s doc comment above).
-    func loadOpenAIAPIKeyDraftIfNeeded() {
-        guard !hasLoadedOpenAIAPIKeyDraft else { return }
-        hasLoadedOpenAIAPIKeyDraft = true
-        openAIAPIKeyDraft = credentialStore.read(account: CredentialAccount.openAIAPIKey) ?? ""
+    /// One-shot credential-store read for `providerAPIKeyDrafts[providerName]`, safe to call from
+    /// the provider detail view's `.task` every time that view struct is rebuilt (see
+    /// `providerAPIKeyDrafts`'s doc comment above).
+    func loadProviderAPIKeyDraftIfNeeded(providerName: String) {
+        guard !loadedProviderAPIKeyDraftNames.contains(providerName) else { return }
+        loadedProviderAPIKeyDraftNames.insert(providerName)
+        providerAPIKeyDrafts[providerName] = credentialStore.read(
+            account: CredentialAccount.providerAPIKey(name: providerName)
+        ) ?? ""
     }
 
-    /// Updates the in-memory draft only (no Keychain write) -- called on every keystroke from the
-    /// `SecureField` binding. Persisting happens separately via
-    /// `persistOpenAIAPIKeyDraftIfChanged()` (design §4.3: not on every keystroke).
-    func updateOpenAIAPIKeyDraft(_ value: String) {
-        openAIAPIKeyDraft = value
+    /// Updates the in-memory draft only (no credential-store write) -- called on every keystroke
+    /// from the `SecureField` binding. Persisting happens separately via
+    /// `persistProviderAPIKeyDraftIfChanged(providerName:)` (design §4.3: not on every keystroke).
+    func updateProviderAPIKeyDraft(providerName: String, value: String) {
+        providerAPIKeyDrafts[providerName] = value
     }
 
-    /// Writes `openAIAPIKeyDraft` to Keychain only when it actually changed from what's currently
-    /// stored, avoiding a Keychain write (and its own permission-prompt risk) on every tab
-    /// switch/window close when the user made no edit (design §4.3).
-    func persistOpenAIAPIKeyDraftIfChanged() {
-        let current = credentialStore.read(account: CredentialAccount.openAIAPIKey) ?? ""
-        guard openAIAPIKeyDraft != current else { return }
+    /// Writes `providerAPIKeyDrafts[providerName]` to the credential store only when it actually
+    /// changed from what's currently stored, avoiding a write (and its own permission-prompt risk
+    /// on the Keychain fallback) on every tab switch/window close when the user made no edit
+    /// (design §4.3).
+    func persistProviderAPIKeyDraftIfChanged(providerName: String) {
+        guard let draft = providerAPIKeyDrafts[providerName] else { return }
+        let current = credentialStore.read(account: CredentialAccount.providerAPIKey(name: providerName)) ?? ""
+        guard draft != current else { return }
         do {
-            try credentialStore.write(openAIAPIKeyDraft, account: CredentialAccount.openAIAPIKey)
+            try credentialStore.write(draft, account: CredentialAccount.providerAPIKey(name: providerName))
         } catch {
             // Best-effort per kikimi.md 8.5章: no UI affordance for this rare failure.
-            Self.logger.error("Failed to persist llm.openai.api_key to Keychain: \(String(describing: error), privacy: .public)")
+            Self.logger.error(
+                "Failed to persist API key for provider \(providerName, privacy: .public): \(String(describing: error), privacy: .public)"
+            )
         }
+    }
+
+    /// The credential half of `docs/design/44-llm-model-config.md` §9's "rename は... credential の
+    /// move を伴う": moves whatever is stored under `oldName`'s account to `newName`'s (a no-op if
+    /// nothing was stored -- e.g. a `claude-cli` provider, which never has an API key at all), then
+    /// carries the in-memory draft over too so the detail pane shows the right value immediately
+    /// under the new name instead of triggering a fresh (empty, until the next load) read.
+    func renameProviderAPIKeyCredential(from oldName: String, to newName: String) {
+        let oldAccount = CredentialAccount.providerAPIKey(name: oldName)
+        let newAccount = CredentialAccount.providerAPIKey(name: newName)
+        if let value = credentialStore.read(account: oldAccount) {
+            do {
+                try credentialStore.write(value, account: newAccount)
+                try credentialStore.delete(account: oldAccount)
+            } catch {
+                Self.logger.error(
+                    "Failed to move API key credential \(oldName, privacy: .public) -> \(newName, privacy: .public): \(String(describing: error), privacy: .public)"
+                )
+            }
+        }
+
+        if let draft = providerAPIKeyDrafts.removeValue(forKey: oldName) {
+            providerAPIKeyDrafts[newName] = draft
+        }
+        loadedProviderAPIKeyDraftNames.remove(oldName)
+        loadedProviderAPIKeyDraftNames.insert(newName)
+    }
+
+    /// Deletes whatever is stored under `providerName`'s account, called when a provider row is
+    /// deleted (§9's provider CRUD) so a removed provider never leaves an orphaned, unreachable
+    /// secret behind. Best-effort per kikimi.md 8.5章, same swallow-and-log pattern as every other
+    /// credential-store write in this type.
+    func deleteProviderAPIKeyCredential(providerName: String) {
+        do {
+            try credentialStore.delete(account: CredentialAccount.providerAPIKey(name: providerName))
+        } catch {
+            Self.logger.error(
+                "Failed to delete API key credential for provider \(providerName, privacy: .public): \(String(describing: error), privacy: .public)"
+            )
+        }
+        providerAPIKeyDrafts.removeValue(forKey: providerName)
+        loadedProviderAPIKeyDraftNames.remove(providerName)
     }
 
     /// Re-reads the full speaker list from `voiceprintStore` and recomputes the map layout and
