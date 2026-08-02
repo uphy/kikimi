@@ -3,7 +3,10 @@ name: Kikimi
 options:
   bundleIdPrefix: io.github.uphy
   deploymentTarget:
-    macOS: "14.2"
+    # Raised from 14.2 for mlx-swift / Qwen3ASR, which require macOS 15 (MLState, the
+    # persistent ANE KV-cache API). This also makes Apple Silicon a hard requirement: MLX
+    # has no x86_64 backend.
+    macOS: "15.0"
   createIntermediateGroups: true
 
 # Must stay in sync with Package.swift. The two are not redundant any more: since the batch
@@ -25,9 +28,12 @@ packages:
   KeyboardShortcuts:
     url: https://github.com/sindresorhus/KeyboardShortcuts
     exactVersion: "1.15.0"
-  SwiftTesting:
-    url: https://github.com/swiftlang/swift-testing
-    from: "0.12.0"
+  # Qwen3-ASR for the second-pass batch decode (docs/design/45-*). Only the Qwen3ASR target is
+  # linked; the package splits one target per model so nothing else comes along. Pulls in
+  # mlx-swift, which is why the build now needs Xcode's Metal compiler.
+  SpeechSwift:
+    url: https://github.com/soniqo/speech-swift.git
+    branch: main
 
 targets:
   Kikimi:
@@ -83,7 +89,7 @@ targets:
     settings:
       base:
         SWIFT_VERSION: "5.9"
-        MACOSX_DEPLOYMENT_TARGET: "14.2"
+        MACOSX_DEPLOYMENT_TARGET: "15.0"
         # Placeholder only — the shipped version comes from the git tag via `APP_VERSION`
         # (`.mise/tasks/build/_default`). Xcode builds are for browsing and debugging.
         MARKETING_VERSION: "0.0.0"
@@ -101,6 +107,8 @@ targets:
         product: Mustache
       - package: KeyboardShortcuts
         product: KeyboardShortcuts
+      - package: SpeechSwift
+        product: Qwen3ASR
   KikimiTests:
     type: bundle.unit-test
     platform: macOS
@@ -110,8 +118,6 @@ targets:
       - target: Kikimi
       - package: Yams
         product: Yams
-      - package: SwiftTesting
-        product: Testing
     settings:
       base:
         SWIFT_VERSION: "5.9"

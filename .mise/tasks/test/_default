@@ -17,4 +17,8 @@ set -euo pipefail
 #   2. Only code that actually dispatches a Metal kernel needs the Xcode build. Tests that merely
 #      link MLX are fine; the ones that call into it are env-gated (`KIKIMI_ASR_EVAL_DIR`,
 #      `KIKIMI_REPRO_WAV`) and are run explicitly via xcodebuild -- see tools/asr-eval/README.md.
+# shellcheck source=../_developer_dir.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../_developer_dir.sh"
+resolve_developer_dir
+
 KIKIMI_TEST_HIDDEN=1 swift test

@@ -22,21 +22,9 @@ set -euo pipefail
 # -- which assembles, versions and signs the .app -- keeps working against the same paths it
 # always has.
 
-# Xcode is required (Command Line Tools has no Metal compiler). Honour an explicit DEVELOPER_DIR,
-# otherwise take the newest /Applications/Xcode*.app rather than `xcode-select -p`, which stays
-# pointed at the Command Line Tools so every other tool keeps its current behaviour -- notably
-# SwiftLint's sourcekit lookup in `.mise/tasks/lint/_default`.
-if [ -z "${DEVELOPER_DIR:-}" ]; then
-  for candidate in /Applications/Xcode*.app; do
-    [ -d "$candidate/Contents/Developer" ] && DEVELOPER_DIR="$candidate/Contents/Developer"
-  done
-fi
-if [ -z "${DEVELOPER_DIR:-}" ] || [ ! -x "$DEVELOPER_DIR/usr/bin/xcodebuild" ]; then
-  echo "error: Xcode not found. Install it (the Metal compiler ships only with Xcode.app)," >&2
-  echo "       then re-run, or set DEVELOPER_DIR to its Contents/Developer." >&2
-  exit 1
-fi
-export DEVELOPER_DIR
+# shellcheck source=../_developer_dir.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../_developer_dir.sh"
+resolve_developer_dir
 echo "Using $DEVELOPER_DIR"
 
 # The Metal toolchain is a separately downloaded component in Xcode 26. Without it the metallib
