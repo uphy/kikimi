@@ -26,10 +26,18 @@ struct BatchModelSection: View {
         )
 
         downloadRow
-            .onAppear { downloadModel.refresh(batchModel: appConfig.data.stt.batchModel) }
-            .onChange(of: appConfig.data.stt.batchModel) { _, newValue in
-                downloadModel.refresh(batchModel: newValue)
-            }
+            .onAppear { refresh() }
+            // Both inputs matter: Parakeet still resolves its variant by language
+            // (`BatchAsrDecoder.resolveModelVersion`), so `ja-JP` and `en-US` are different
+            // downloads even with the model row unchanged.
+            .onChange(of: appConfig.data.stt.batchModel) { _, _ in refresh() }
+            .onChange(of: appConfig.data.stt.language) { _, _ in refresh() }
+    }
+
+    private func refresh() {
+        downloadModel.refresh(
+            batchModel: appConfig.data.stt.batchModel,
+            language: appConfig.data.stt.language)
     }
 
     /// The state of the selected model's weights. Present as its own row rather than only as an
@@ -47,7 +55,11 @@ struct BatchModelSection: View {
                     Button("今すぐダウンロード") { downloadModel.startDownload() }
                 }
             }
-            .help("会議中に取得が始まるのを避けるため、事前にダウンロードしておくことを勧めます")
+            .help(
+                "会議中に取得が始まるのを避けるため、事前にダウンロードしておくことを勧めます。"
+                    + "未取得のまま録音を始めても中断はしませんが、取得が終わるまでは"
+                    + "再認識が効かず従来の精度になります"
+            )
         case .downloading(let fraction, let message):
             LabeledContent("モデル") {
                 VStack(alignment: .leading, spacing: 4) {

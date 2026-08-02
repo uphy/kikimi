@@ -4,14 +4,14 @@ import SwiftUI
 /// Drives the batch-model download row in Settings
 /// (`docs/design/45-qwen3-batch-decode.md` §5.1).
 ///
-/// Bridges `Qwen3ModelDownload`, which is deliberately non-isolated (its progress callback is
+/// Bridges `BatchModelDownload`, which is deliberately non-isolated (Qwen3's progress callback is
 /// invoked off the main actor and inheriting `@MainActor` there crashes the process), to the
 /// `@Published` state SwiftUI observes. Every hop back to the main actor happens here, in one
 /// place, rather than in the view.
 @MainActor
 final class BatchModelDownloadViewModel: ObservableObject {
     enum Phase: Equatable {
-        /// Not checked yet, or the selected model is not a Qwen3 one (`parakeet-ja`).
+        /// Nothing to report -- only reached when the second pass is off entirely.
         case notApplicable
         case missing
         case downloading(fraction: Double, message: String)
@@ -21,9 +21,9 @@ final class BatchModelDownloadViewModel: ObservableObject {
 
     @Published private(set) var phase: Phase = .notApplicable
 
-    /// The variant the row is currently describing, so a config change mid-download is visible
-    /// rather than silently attributing the progress to the newly-selected model.
-    private var variant: Qwen3Variant?
+    /// What the row is currently describing, so a config change mid-download is visible rather
+    /// than silently attributing the progress to the newly-selected model.
+    private var target: BatchModelDownload.Target?
     private var downloadTask: Task<Void, Never>?
 
     var isDownloading: Bool {
@@ -31,31 +31,46 @@ final class BatchModelDownloadViewModel: ObservableObject {
         return false
     }
 
-    /// Re-reads disk state for `batchModel`. Cheap (a stat plus, when present, one directory
-    /// walk), so the view can call it on appear and on every model-selection change.
-    func refresh(batchModel: String) {
-        guard let variant = Qwen3Variant(rawValue: batchModel) else {
-            self.variant = nil
-            // Cancel rather than leave an orphan download running for a model the user just
-            // switched away from -- it would keep writing progress into a row nobody is reading.
+    /// Re-reads disk state for the model `batchModel`/`language` resolve to. Cheap (a stat plus,
+    /// when present, one directory walk), so the view can call it on appear and on every
+    /// model-selection change.
+    ///
+    /// Covers Parakeet as well as Qwen3: it needs its own ~600MB fetch on a fresh machine, and
+    /// hiding that just relocates the mid-meeting surprise instead of removing it.
+    func refresh(batchModel: String, language: String) {
+        // Cancel rather than leave an orphan download running for a model the user just switched
+        // away from -- it would keep writing progress into a row describing something else.
+        if isDownloading, changedTarget(batchModel: batchModel, language: language) {
             downloadTask?.cancel()
             downloadTask = nil
-            phase = .notApplicable
-            return
         }
-        self.variant = variant
+        let target = BatchModelDownload.target(batchModel: batchModel, language: language)
+        self.target = target
+        self.currentKey = key(batchModel: batchModel, language: language)
         guard !isDownloading else { return }
-        phase = Qwen3ModelDownload.isDownloaded(variant: variant)
-            ? .ready(bytes: Qwen3ModelDownload.cachedBytes(variant: variant))
+        phase = BatchModelDownload.isDownloaded(target)
+            ? .ready(bytes: BatchModelDownload.cachedBytes(target))
             : .missing
     }
 
+    /// `BatchModelDownload.Target` wraps FluidAudio's `AsrModelVersion`, which is not `Hashable`,
+    /// so identity is tracked with the config strings that produced it instead.
+    private var currentKey: String?
+
+    private func key(batchModel: String, language: String) -> String {
+        "\(batchModel)|\(language)"
+    }
+
+    private func changedTarget(batchModel: String, language: String) -> Bool {
+        currentKey != key(batchModel: batchModel, language: language)
+    }
+
     func startDownload() {
-        guard let variant, !isDownloading else { return }
+        guard let target, !isDownloading else { return }
         phase = .downloading(fraction: 0, message: "準備中…")
         downloadTask = Task { [weak self] in
             do {
-                try await Qwen3ModelDownload.download(variant: variant) { fraction, message in
+                try await BatchModelDownload.download(target) { fraction, message in
                     // The callback arrives off the main actor; this is the single hop back.
                     Task { @MainActor [weak self] in
                         guard let self, self.isDownloading else { return }
@@ -63,7 +78,7 @@ final class BatchModelDownloadViewModel: ObservableObject {
                     }
                 }
                 guard let self, !Task.isCancelled else { return }
-                self.phase = .ready(bytes: Qwen3ModelDownload.cachedBytes(variant: variant))
+                self.phase = .ready(bytes: BatchModelDownload.cachedBytes(target))
             } catch {
                 guard let self, !Task.isCancelled else { return }
                 self.phase = .failed(error.localizedDescription)
