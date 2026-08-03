@@ -202,6 +202,16 @@ struct DictationConfig: Codable, Equatable, Sendable {
     /// which an opt-in would leave unfixed for exactly the users it affects. `false` restores the
     /// streaming-only confirmation path (and releases the ~600MB resident batch model).
     var twoPassDecode: Bool
+    /// Which model performs that key-up re-decode
+    /// (`docs/design/45-qwen3-batch-decode.md` §6.1): `"qwen3-1.7b"` / `"qwen3-0.6b"` /
+    /// `"parakeet-ja"`. Separate from `stt.batch_model` rather than shared, because the latency
+    /// budgets differ: a meeting absorbs an extra second per confirmed window, while here it is
+    /// the wait between releasing the key and the text appearing.
+    ///
+    /// Defaults to `parakeet-ja` -- the pre-design-45 behaviour -- so an existing setup does not
+    /// silently get slower inserts. Validation matches `SttConfig.batchModel`'s: unknown values
+    /// warn and fall back rather than failing the whole section.
+    var batchModel: String
     /// D2 scope: LLM post-processing toggle. Always effectively `false` in D1 (no `DictationRefiner`
     /// exists yet), kept here so `config.yaml` round-trips the full section from day one.
     var refine: Bool
@@ -228,6 +238,7 @@ struct DictationConfig: Codable, Equatable, Sendable {
         case micDeviceUID = "mic_device_uid"
         case language
         case twoPassDecode = "two_pass_decode"
+        case batchModel = "batch_model"
         case refine
         case model
         case refineTimeoutMs = "refine_timeout_ms"
@@ -249,12 +260,17 @@ struct DictationConfig: Codable, Equatable, Sendable {
         history: .default
     )
 
+    /// Accepted `batch_model` values -- same set as `SttConfig`, resolved by the same code
+    /// (`DictationBatchTranscriber.make`).
+    static let knownBatchModels = Qwen3Variant.allCases.map(\.rawValue) + [SttConfig.parakeetBatchModel]
+
     init(
         enabled: Bool,
         insertMethod: DictationInsertMethod,
         micDeviceUID: String,
         language: String,
         twoPassDecode: Bool = true,
+        batchModel: String = SttConfig.parakeetBatchModel,
         refine: Bool,
         model: String,
         refineTimeoutMs: Int,
@@ -266,6 +282,7 @@ struct DictationConfig: Codable, Equatable, Sendable {
         self.micDeviceUID = micDeviceUID
         self.language = language
         self.twoPassDecode = twoPassDecode
+        self.batchModel = batchModel
         self.refine = refine
         self.model = model
         self.refineTimeoutMs = refineTimeoutMs
@@ -300,6 +317,21 @@ struct DictationConfig: Codable, Equatable, Sendable {
         micDeviceUID = try container.decodeIfPresent(String.self, forKey: .micDeviceUID) ?? Self.default.micDeviceUID
         language = try container.decodeIfPresent(String.self, forKey: .language) ?? Self.default.language
         twoPassDecode = try container.decodeIfPresent(Bool.self, forKey: .twoPassDecode) ?? Self.default.twoPassDecode
+
+        let decodedBatchModel = try container.decodeIfPresent(String.self, forKey: .batchModel)
+            ?? Self.default.batchModel
+        if Self.knownBatchModels.contains(decodedBatchModel) {
+            batchModel = decodedBatchModel
+        } else {
+            Self.logger.warning(
+                """
+                dictation.batch_model=\(decodedBatchModel, privacy: .public) is not one of \
+                \(Self.knownBatchModels, privacy: .public); falling back to \
+                \(Self.default.batchModel, privacy: .public)
+                """
+            )
+            batchModel = Self.default.batchModel
+        }
         refine = try container.decodeIfPresent(Bool.self, forKey: .refine) ?? Self.default.refine
         model = try container.decodeIfPresent(String.self, forKey: .model) ?? Self.default.model
 

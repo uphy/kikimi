@@ -35,21 +35,33 @@ struct DictationBatchTranscriber: DictationBatchTranscribing {
         ASRConstants.minimumAudioDurationSeconds * Double(ASRConstants.sampleRate)
     )
 
-    private let lease: BatchAsrDecoderLease
+    /// The leased decoder and its release, rather than a `BatchAsrDecoderLease` directly: since
+    /// `docs/design/45-qwen3-batch-decode.md` §6.1 dictation can run Qwen3 too, and the two pools
+    /// hand back different lease types. Same shape as
+    /// `TranscriptPipeline.AcquiredBatchDecoder` for the same reason.
+    private let decoder: any SttBatchDecoding
+    private let release: @Sendable () -> Void
 
-    /// Maps the *resolved* dictation language -- `DictationController.resolveSttEngineConfig`'s
-    /// output (e.g. `"ja-JP"`, `"auto"`), never the raw `dictation.language` -- to a batch model
-    /// variant and acquires it from the shared `BatchAsrDecoderPool` (design 33 MT1/MT7; the BCP-47
-    /// resolution rule itself now lives on `BatchAsrDecoder.resolveModelVersion`).
-    static func make(language: String) async throws -> DictationBatchTranscriber {
+    /// Resolves `batchModel` (+ the *resolved* dictation language -- `resolveSttEngineConfig`'s
+    /// output, never the raw `dictation.language`) to a decoder and acquires it from the matching
+    /// shared pool. Mirrors `TranscriptPipeline.defaultBatchDecoderAcquire`, so the meeting and
+    /// dictation share one warm instance whenever they point at the same model (design 33 MT7).
+    static func make(language: String, batchModel: String) async throws -> DictationBatchTranscriber {
+        #if canImport(Qwen3ASR)
+        if let variant = Qwen3Variant(rawValue: batchModel) {
+            let lease = try await Qwen3BatchDecoderPool.shared.acquire(
+                variant: variant, language: language)
+            return DictationBatchTranscriber(decoder: lease.decoder, release: lease.release)
+        }
+        #endif
         let version = BatchAsrDecoder.resolveModelVersion(language: language)
         let lease = try await BatchAsrDecoderPool.shared.acquire(version: version)
-        return DictationBatchTranscriber(lease: lease)
+        return DictationBatchTranscriber(decoder: lease.decoder, release: lease.release)
     }
 
-    /// Decodes one utterance by delegating to the leased `BatchAsrDecoder`.
+    /// Decodes one utterance by delegating to the leased decoder.
     func transcribe(samples: [Float]) async throws -> String {
-        try await lease.decoder.transcribe(samples: samples)
+        try await decoder.transcribe(samples: samples)
     }
 
     /// Releases the pool lease this instance holds (design 33 MT7). Called by
@@ -57,6 +69,6 @@ struct DictationBatchTranscriber: DictationBatchTranscribing {
     /// `deinit`, so the release happens deterministically at the same instant the old code freed
     /// the model directly. Idempotent via `BatchAsrDecoderLease.release()`.
     func releaseModel() {
-        lease.release()
+        release()
     }
 }

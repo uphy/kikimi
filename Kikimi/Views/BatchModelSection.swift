@@ -102,6 +102,7 @@ struct BatchModelSection: View {
             batchModel: appConfig.data.stt.batchModel,
             language: appConfig.data.stt.language,
             twoPassDecode: appConfig.data.stt.twoPassDecode,
+            dictationBatchModel: appConfig.data.dictation.batchModel,
             dictationEnabled: appConfig.data.dictation.enabled,
             dictationTwoPassDecode: appConfig.data.dictation.twoPassDecode)
     }

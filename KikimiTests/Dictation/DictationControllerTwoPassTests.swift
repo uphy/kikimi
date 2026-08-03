@@ -103,7 +103,7 @@ struct DictationControllerTwoPassTests {
     private func makeController(
         config: DictationConfig,
         historyStore: any DictationHistoryStoring,
-        batchTranscriberFactory: @escaping (String) async throws -> any DictationBatchTranscribing = { _ in
+        batchTranscriberFactory: @escaping (String, String) async throws -> any DictationBatchTranscribing = { _, _ in
             throw TwoPassTestStubError()
         }
     ) -> DictationController {
@@ -371,7 +371,7 @@ struct DictationControllerTwoPassTests {
         let controller = makeController(
             config: makeConfig(),
             historyStore: store,
-            batchTranscriberFactory: { language in
+            batchTranscriberFactory: { language, _ in
                 requestedLanguages.withLock { $0.append(language) }
                 return FakeBatchTranscriber(text: "warm")
             }
@@ -392,7 +392,7 @@ struct DictationControllerTwoPassTests {
         let controller = makeController(
             config: makeConfig(twoPassDecode: false),
             historyStore: store,
-            batchTranscriberFactory: { _ in
+            batchTranscriberFactory: { _, _ in
                 factoryCalls.withLock { $0 += 1 }
                 return FakeBatchTranscriber(text: "warm")
             }
@@ -411,7 +411,7 @@ struct DictationControllerTwoPassTests {
         let controller = makeController(
             config: makeConfig(),
             historyStore: store,
-            batchTranscriberFactory: { _ in FakeBatchTranscriber(text: "warm") }
+            batchTranscriberFactory: { _, _ in FakeBatchTranscriber(text: "warm") }
         )
 
         controller.applyBatchDecodeEnablement(twoPassDecode: true)

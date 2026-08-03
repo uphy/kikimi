@@ -121,23 +121,25 @@ enum BatchModelDownload {
 
     /// Why a model must not be deleted right now, or nil when it is safe to remove.
     ///
-    /// Dictation matters here and is easy to miss: it runs its own second pass through
-    /// `BatchAsrDecoderPool` (`DictationBatchTranscriber`), so Parakeet stays in use even when a
-    /// meeting is set to Qwen3. Deleting it would work, and then quietly re-download ~590MB on the
-    /// next key-up.
+    /// Dictation is checked separately from the meeting because it has its own model setting
+    /// (design 45 §6.1) -- and it is the easy one to miss: with meetings on Qwen3 and dictation
+    /// left on Parakeet, Parakeet is still live, and deleting it would work and then quietly
+    /// re-download ~590MB on the next key-up.
     static func usageBlockingDeletion(
         _ target: Target,
         meetingBatchModel: String,
         meetingTwoPassDecode: Bool,
+        dictationBatchModel: String,
         dictationEnabled: Bool,
         dictationTwoPassDecode: Bool,
         language: String
     ) -> String? {
-        let selected = self.target(batchModel: meetingBatchModel, language: language)
-        if meetingTwoPassDecode, isSameKind(target, selected) {
+        if meetingTwoPassDecode,
+           isSameKind(target, self.target(batchModel: meetingBatchModel, language: language)) {
             return "使用中"
         }
-        if dictationEnabled, dictationTwoPassDecode, case .parakeet = target {
+        if dictationEnabled, dictationTwoPassDecode,
+           isSameKind(target, self.target(batchModel: dictationBatchModel, language: language)) {
             return "ディクテーションで使用中"
         }
         return nil

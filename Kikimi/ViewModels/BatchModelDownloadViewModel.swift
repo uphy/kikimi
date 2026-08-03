@@ -109,6 +109,7 @@ final class BatchModelDownloadViewModel: ObservableObject {
         batchModel: String,
         language: String,
         twoPassDecode: Bool,
+        dictationBatchModel: String,
         dictationEnabled: Bool,
         dictationTwoPassDecode: Bool
     ) {
@@ -122,6 +123,7 @@ final class BatchModelDownloadViewModel: ObservableObject {
                     entry.target,
                     meetingBatchModel: batchModel,
                     meetingTwoPassDecode: twoPassDecode,
+                    dictationBatchModel: dictationBatchModel,
                     dictationEnabled: dictationEnabled,
                     dictationTwoPassDecode: dictationTwoPassDecode,
                     language: language),

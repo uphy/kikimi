@@ -1183,6 +1183,51 @@ struct AppConfigTests {
         #expect(appConfig.data.stt.maxSegmentCharacters == SttConfig.default.maxSegmentCharacters)
     }
 
+    // MARK: - DictationConfig.batchModel (`docs/design/45-qwen3-batch-decode.md` §6.1)
+
+    @Test("dictation without batch_model keeps parakeet, so an existing setup does not get slower")
+    func missingDictationBatchModelKeepsParakeet() throws {
+        let dir = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let yaml = """
+        dictation:
+          enabled: true
+        """
+        try yaml.write(to: fileURL(in: dir), atomically: true, encoding: .utf8)
+
+        let appConfig = makeAppConfig(in: dir)
+        #expect(!appConfig.loadFailed)
+        #expect(appConfig.data.dictation.batchModel == SttConfig.parakeetBatchModel)
+    }
+
+    @Test("dictation.batch_model accepts the qwen3 variants and rejects anything else")
+    func dictationBatchModelValidation() throws {
+        for model in DictationConfig.knownBatchModels {
+            let dir = makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let yaml = """
+            dictation:
+              batch_model: \(model)
+            """
+            try yaml.write(to: fileURL(in: dir), atomically: true, encoding: .utf8)
+            #expect(makeAppConfig(in: dir).data.dictation.batchModel == model)
+        }
+
+        let dir = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let yaml = """
+        dictation:
+          batch_model: whisper
+          refine_timeout_ms: 5000
+        """
+        try yaml.write(to: fileURL(in: dir), atomically: true, encoding: .utf8)
+        let appConfig = makeAppConfig(in: dir)
+        // The rest of the section must survive an unrecognized model.
+        #expect(appConfig.data.dictation.batchModel == SttConfig.parakeetBatchModel)
+        #expect(appConfig.data.dictation.refineTimeoutMs == 5_000)
+    }
+
     // MARK: - SttConfig.batchModel (`docs/design/45-qwen3-batch-decode.md` Q4)
 
     @Test("a stt: section without batch_model falls back to qwen3-1.7b")

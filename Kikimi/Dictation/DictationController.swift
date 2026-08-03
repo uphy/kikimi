@@ -139,7 +139,7 @@ final class DictationController: ObservableObject {
     private let transcriberFactory: (SttEngineConfig) async throws -> DictationTranscriber
     /// `docs/design/31-dictation-two-pass-decode.md` §3.1's test seam: builds the warm batch
     /// decoder from the *resolved* language (`resolveSttEngineConfig`'s output, TP1).
-    private let batchTranscriberFactory: (String) async throws -> any DictationBatchTranscribing
+    private let batchTranscriberFactory: (String, String) async throws -> any DictationBatchTranscribing
     /// `docs/design/29-dictation-history.md` §4.4/§5.1: injected the same way every other `.shared`
     /// dependency on this type is (mirrors `refiner` above), rather than through a closure provider
     /// -- unlike `dictationConfigProvider`/etc., this dependency is a single long-lived actor
@@ -177,9 +177,10 @@ final class DictationController: ObservableObject {
             PromptStore.shared.policyBody(for: .builtin(.glossaryHeader))
         },
         transcriberFactory: @escaping (SttEngineConfig) async throws -> DictationTranscriber = DictationTranscriber.make,
-        batchTranscriberFactory: @escaping (String) async throws -> any DictationBatchTranscribing = { language in
-            try await DictationBatchTranscriber.make(language: language)
-        },
+        batchTranscriberFactory: @escaping (String, String) async throws -> any DictationBatchTranscribing =
+            { language, model in
+                try await DictationBatchTranscriber.make(language: language, batchModel: model)
+            },
         refiner: DictationRefiner = DictationRefiner(),
         historyStore: any DictationHistoryStoring = DictationHistoryStore.shared,
         audioInputEnumerator: any AudioInputEnumerating = AudioInputEnumerator(),
@@ -283,10 +284,13 @@ final class DictationController: ObservableObject {
         guard !isBatchWarming, batchTranscriber == nil else { return }
         isBatchWarming = true
         let language = Self.resolveSttEngineConfig(dictation: dictationConfigProvider(), stt: sttConfigProvider()).language
+        // Snapshotted with the language: the warm-up runs asynchronously, and picking the model up
+        // later could acquire a different one than the toggle that started this warm-up asked for.
+        let batchModel = dictationConfigProvider().batchModel
         Task { [weak self] in
             guard let self else { return }
             do {
-                let built = try await self.batchTranscriberFactory(language)
+                let built = try await self.batchTranscriberFactory(language, batchModel)
                 self.isBatchWarming = false
                 // Same re-check as the streaming warm above: the (download-included) load may
                 // outlive the configuration that requested it -- drop the result rather than
