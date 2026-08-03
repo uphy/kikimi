@@ -52,9 +52,30 @@ mise run signing-identity   # 初回のみ。TCC 権限を再ビルドで失わ�
 open Kikimi.xcodeproj
 ```
 
-`swift build` でもビルド可能（`Package.swift` あり）。この開発環境には Xcode.app 本体（GUI IDE）がなく
-Command Line Tools のみのため、**実際のビルド経路は `xcodebuild` ではなく `swift build`（mise タスク経由）**。
-`xcodegen generate` は IDE での閲覧・編集体験のためだけに使う。
+**実際のビルド経路は `xcodebuild`（mise タスク経由）**。`project.yml` から生成した `.xcodeproj` が
+ビルドの入力そのものであり、閲覧用ではない（`docs/design/45-qwen3-batch-decode.md` §4）。
+
+理由は Metal シェーダ。SwiftPM のコマンドラインはこれをコンパイルしないため、`swift build` では
+mlx-swift が `default.metallib` を持たないまま生成され、最初の MLX 呼び出しで
+`Failed to load the default metallib` を出して落ちる。**ビルドは成功するので気づけない**。
+
+したがって **Xcode.app が必要**（Command Line Tools には Metal コンパイラも swift-testing も無い）。
+Xcode 26 では Metal ツールチェーンが別コンポーネントなので、初回だけ次を実行する。
+
+```bash
+xcodebuild -runFirstLaunch
+xcodebuild -downloadComponent MetalToolchain
+```
+
+`xcode-select` はシステム全体を切り替えず、Command Line Tools を指したままにする。mise タスクが
+`.mise/tasks/_developer_dir.sh` で `DEVELOPER_DIR` を自前で解決するので、SwiftLint の sourcekit
+参照など他のツールは従来どおり動く。
+
+`swift build` / `swift test` も引き続き使えるが、こちらは MLX を含まない別の依存グラフ
+（`Package.swift`）である点に注意する。単体テストはこちらで走る（`mise run test`）。Qwen3 を実際に
+叩く評価は `tools/asr-eval/qwen3-probe/` の独立パッケージで行う。
+
+最小 macOS は 15、Apple Silicon 必須（MLX の要件）。
 
 ### mise Tasks
 
@@ -105,6 +126,7 @@ kikimi.md 13 章に準拠。主要コンポーネント:
 | `WindowManager.shared` | フローティングパネルの管理 |
 | `AudioCapture` | AVAudioEngine（マイク）+ CoreAudio Process Tap（システム音声）ラッパー |
 | `SttEngine` | FluidAudio（Nemotron 3.5 ASR Streaming）ラッパー（2 インスタンス） |
+| `Qwen3BatchDecoder` | 確定セグメントの再デコード（Qwen3-ASR / MLX、design 45） |
 | `RefinementQueue` | バッチ整形キュー + Haiku 呼び出し（Phase 2） |
 | `SummaryUpdater` | サマリ更新スケジューラ（Phase 2） |
 | `WatcherRunner` | Watcher の実行と state 管理（Phase 3） |
@@ -115,7 +137,7 @@ kikimi.md 13 章に準拠。主要コンポーネント:
 | ディレクトリ | 役割 |
 |---|---|
 | `Kikimi/AudioCapture/` | マイク・システム音声の取込（AVAudioEngine / ScreenCaptureKit） |
-| `Kikimi/Stt/` | STT エンジン（FluidAudio ラッパー）・接着層（TranscriptPipeline） |
+| `Kikimi/Stt/` | STT エンジン（FluidAudio / MLX ラッパー）・接着層（TranscriptPipeline）・二段目のモデル選択とダウンロード |
 | `Kikimi/Diarization/` | 話者分離（声紋 embedding・リアルタイム帰属判定） |
 | `Kikimi/Refinement/` | Haiku バッチ整形（プロンプト構築・マージ・バリデーション） |
 | `Kikimi/Summary/` | サマリ state 管理・patch 適用・view レンダリング |
@@ -134,6 +156,7 @@ kikimi.md 13 章に準拠。主要コンポーネント:
 | `Kikimi/ViewModels/` | 各ウィンドウの ViewModel |
 | `Kikimi/Views/` | SwiftUI 画面（Session Window / List / Settings） |
 | `KikimiTests/` | 各ディレクトリに対応する XCTest / swift-testing |
+| `tools/asr-eval/` | 二段目バッチデコードのモデル比較（実会議音声で測る。`README.md` に結果） |
 
 ### Config/State Separation
 
