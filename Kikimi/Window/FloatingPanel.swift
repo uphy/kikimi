@@ -15,14 +15,40 @@ import SwiftUI
 enum HiddenTestMode {
     /// True under the env flag, and also whenever the process is a test runner. `mise run test`
     /// and CI export the flag, but a bare `swift test` (easy to reach for during development)
-    /// does not -- the XCTest-framework probe catches that case so window suites never flash real
-    /// panels over the user's work. XCTest is linked into every SwiftPM test runner (including
-    /// swift-testing suites) and never into the app itself, so the probe cannot misfire in
-    /// production. `FloatingPanelTests` is unaffected: it injects `isUnobtrusive` explicitly to
+    /// does not -- the runner probe catches that case so window suites never flash real panels over
+    /// the user's work. `FloatingPanelTests` is unaffected: it injects `isUnobtrusive` explicitly to
     /// cover both branches.
-    static let isActive: Bool =
-        ProcessInfo.processInfo.environment["KIKIMI_TEST_HIDDEN"] == "1"
-            || NSClassFromString("XCTestCase") != nil
+    static let isActive: Bool = {
+        if ProcessInfo.processInfo.environment["KIKIMI_TEST_HIDDEN"] == "1" { return true }
+        // Kept as one of the signals, but no longer the only one -- see `isTestRunner`.
+        if NSClassFromString("XCTestCase") != nil { return true }
+        return isTestRunner(
+            processName: ProcessInfo.processInfo.processName,
+            arguments: ProcessInfo.processInfo.arguments
+        )
+    }()
+
+    /// Whether this process is a SwiftPM/Xcode test runner rather than the app.
+    ///
+    /// The previous probe was `NSClassFromString("XCTestCase") != nil` alone, on the assumption that
+    /// "XCTest is linked into every SwiftPM test runner (including swift-testing suites)". That
+    /// stopped being true once the last `import XCTest` left `KikimiTests/`: a swift-testing-only
+    /// bundle runs under `swiftpm-testing-helper --testing-library swift-testing`, which never loads
+    /// XCTest, so the probe silently returned `false` and a bare `swift test` ordered real, fully
+    /// opaque panels (Session Window, Session List, the ディクテーション overlay, …) onto the user's
+    /// desktop mid-run. Verified 2026-08-03 by polling `CGWindowListCopyWindowInfo` during a run.
+    ///
+    /// So the process itself is identified instead, by two independent signals -- either the runner
+    /// executable's name, or the `.xctest` bundle every runner is pointed at. Neither can occur in
+    /// the shipped app: `Kikimi.app`'s process is `Kikimi` and nothing on its command line ends in
+    /// `.xctest`.
+    ///
+    /// Pure (arguments injected) so both branches are unit-testable regardless of how the suite that
+    /// checks them happens to be run.
+    static func isTestRunner(processName: String, arguments: [String]) -> Bool {
+        if processName == "xctest" || processName == "swiftpm-testing-helper" { return true }
+        return arguments.contains { $0.hasSuffix(".xctest") || $0.contains(".xctest/") }
+    }
 }
 
 // MARK: - FloatingPanel
