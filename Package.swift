@@ -1,4 +1,4 @@
-// swift-tools-version: 5.9
+// swift-tools-version: 6.0
 import PackageDescription
 
 // STT is provided by FluidAudio (Swift SPM package, CoreML/ANE-backed Nemotron 3.5 ASR Streaming
@@ -11,7 +11,6 @@ let package = Package(
     platforms: [.macOS(.v14)],
     dependencies: [
         .package(url: "https://github.com/jpsim/Yams", from: "5.0.0"),
-        .package(url: "https://github.com/swiftlang/swift-testing", from: "0.12.0"),
         .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.15.4"),
         .package(url: "https://github.com/groue/GRMustache.swift", from: "7.0.0"),
         // Global hotkey registration + a SwiftUI shortcut Recorder for the dictation feature
@@ -42,14 +41,22 @@ let package = Package(
                 // not use SPM resource bundles); excluded here so `swift build` does not warn about
                 // unhandled files. See `docs/design/39-webview-markdown.md` §9.
                 "Resources/editor"
-            ]
+            ],
+            // Tools-version 6.0 (needed for the bundled swift-testing, see `KikimiTests` below)
+            // would otherwise default both targets to the Swift 6 language mode. That is a separate
+            // migration -- strict concurrency across every `@MainActor` boundary in the app -- so
+            // the language mode is pinned to what 5.9 already gave us and nothing else changes here.
+            swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
             name: "KikimiTests",
+            // `import Testing` resolves against the toolchain's bundled swift-testing (Swift 6+).
+            // Declaring the standalone `swiftlang/swift-testing` package instead makes every `@Test`
+            // and `@Suite` in the suite emit a deprecation warning -- 180k of them, 97 MB of build
+            // output -- and builds the library from source on top of that.
             dependencies: [
                 "Kikimi",
-                .product(name: "Yams", package: "Yams"),
-                .product(name: "Testing", package: "swift-testing")
+                .product(name: "Yams", package: "Yams")
             ],
             path: "KikimiTests",
             resources: [
@@ -57,7 +64,8 @@ let package = Package(
                 // kikimi-verify skill (KIKIMI_TEST_INPUT). Declared so SPM does not warn
                 // about an unhandled file.
                 .copy("Fixtures/sense-voice-ja-sample.wav")
-            ]
+            ],
+            swiftSettings: [.swiftLanguageMode(.v5)]
         )
     ]
 )

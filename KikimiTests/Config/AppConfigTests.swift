@@ -2327,7 +2327,11 @@ struct AppConfigTests {
         #expect(dictation?.keys.contains("refine_timeout_ms") == true)
 
         let context = dictation?["context"] as? [String: Any]
-        #expect(context?.keys.contains("global") == true)
+        // No `global` key is asserted here: it is left at its `nil` default above, and the
+        // synthesized encoder omits a nil optional entirely. That omission is the documented
+        // contract (`docs/design/42-prompt-overrides.md` §7.2 -- "key absent" must stay
+        // distinguishable from an explicit `global: ""`), and `nilGlobalRoundTripsAsOmittedKey`
+        // below owns it.
         #expect(context?.keys.contains("apps") == true)
         let apps = context?["apps"] as? [[String: Any]]
         #expect(apps?.first?.keys.contains("bundle_id") == true)
