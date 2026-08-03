@@ -56,6 +56,7 @@ mise run pr:wait           # 必須チェックが緑になるまで待つ。バ
 - **マージはユーザーが行う。Claude は絶対にマージしない**。CI が緑になったことを報告して止まる
 - マージ済み worktree の削除は SessionStart hook が `mise run wt:reap` で自動実行する。手で消さない
 - 会話・調査だけなら `main` のままでよい。ファイルを書き換える作業は worktree
+- `main` で `git commit` すると PreToolUse hook が止める。止められたら worktree に移してやり直す
 - **UI 動作確認は同時に 1 worktree だけ**。`~/Applications/Kikimi.app` と `~/.config/kikimi` /
   `~/.local/state/kikimi` は全 worktree で共有される
 

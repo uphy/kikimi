@@ -416,7 +416,7 @@ commit を積んだ）は理由を出して残す。SessionStart hook から毎�
 | hook | 内容 |
 |---|---|
 | PostToolUse (Edit/Write) | 変更した Swift ファイルに SwiftLint |
-| PreToolUse (Bash) | `git commit` の前に `mise run build` が通ることを確認 |
+| PreToolUse (Bash) | `main` での `git commit` を拒否（`KIKIMI_ALLOW_MAIN_COMMIT=1` で解除）。そのうえで `mise run build` が通ることを確認 |
 | SessionStart | マージ済み worktree を片付ける |
 
 ### 2.13 開発方式のまとめ
