@@ -34,6 +34,12 @@
             "command": "\"${CLAUDE_PROJECT_DIR}/.claude/hooks/build-before-commit.sh\"",
             "timeout": 600,
             "statusMessage": "Running mise run build before git commit..."
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR}/.claude/hooks/mise-swift-guard.sh\"",
+            "timeout": 10,
+            "statusMessage": "Checking the swift toolchain entry point..."
           }
         ]
       }

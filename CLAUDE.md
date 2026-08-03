@@ -91,9 +91,15 @@ xcodebuild -downloadComponent MetalToolchain
 `.mise/tasks/_developer_dir.sh` で `DEVELOPER_DIR` を自前で解決するので、SwiftLint の sourcekit
 参照など他のツールは従来どおり動く。
 
-`swift build` / `swift test` も引き続き使えるが、こちらは MLX を含まない別の依存グラフ
-（`Package.swift`）である点に注意する。単体テストはこちらで走る（`mise run test`）。Qwen3 を実際に
-叩く評価は `tools/asr-eval/qwen3-probe/` の独立パッケージで行う。
+`swift build` / `swift test` は MLX を含まない別の依存グラフ（`Package.swift`）である点に注意する。
+単体テストはこちらで走る（`mise run test`）。Qwen3 を実際に叩く評価は
+`tools/asr-eval/qwen3-probe/` の独立パッケージで行う。
+
+**素の `swift build` / `swift test` は叩かない**。`DEVELOPER_DIR` が未解決だと Command Line Tools の
+toolchain を拾い、`swift test` は `no such module 'Testing'` で落ち、`swift build` は
+`default.metallib` を持たない成果物を**exit 0 のまま**吐く。`mise run test` / `mise run build` を使う。
+Claude Code からの直叩きは PreToolUse hook（`.claude/hooks/mise-swift-guard.sh`）が止める。
+リポジトリ外のスクラッチパッケージなど例外は `DEVELOPER_DIR=... swift test` と明示すれば通る。
 
 最小 macOS は 15、Apple Silicon 必須（MLX の要件）。
 
@@ -104,6 +110,7 @@ xcodebuild -downloadComponent MetalToolchain
 - `mise run build:web` — `web/` の Markdown レンダラを `Kikimi/Resources/editor/` に出力（npm + esbuild）
 - `mise run apply` — `~/Applications/Kikimi.app` にインストール（実行中なら再起動）
 - `mise run test` — 単体テスト（vitest → `swift test`）
+- `mise run install-git-hooks` — `core.hooksPath` を `.githooks/` に向ける（`generate` が自動で叩く・冪等）
 - `mise run signing-identity` — ローカル開発用のコード署名 identity を作成（初回のみ・冪等）
 - `mise run reset-permissions` — Kikimi の TCC 許可をリセット（署名方式を変えた直後のみ）
 - `mise run clean` — ビルド成果物を削除
@@ -199,6 +206,13 @@ Chirami と同じ流儀（YAMLStore パターン参照）。
   `mise run verify-smoke` と同じライフサイクルで管理する） — 起動 → 録音開始 → ダミー音源投入（`KIKIMI_TEST_INPUT`）→ 停止 →
   セッションフォルダ確認。整形は `KIKIMI_STUB_LLM=1` でスタブ化
 - **レイヤ 3: 実戦テスト** — Phase 4 でリアル会議 3 本以上
+
+レイヤ 1 は **push 前に git hook（`.githooks/pre-push`）が自動で走らせる**。`.build` が温まっていれば
+11 秒、コールドで最大 2.5 分。落ちたときは失敗行だけを出す。急ぐときは `git push --no-verify`。
+hook は `mise run install-git-hooks`（`mise run generate` が自動で叩く）で有効になる。
+
+CI が落ちたときは**ログを落とす前に run ページの Summary を見る**。`.github/workflows/ci.yml` の
+"Summarize the failure" ステップが、コンパイルエラーと swift-testing の失敗行だけをそこに出している。
 
 ## Logging Rules
 

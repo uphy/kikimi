@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+#MISE description="git hook (.githooks/) を有効化する。冪等・generate から自動で走る"
+# `core.hooksPath` lives in `.git/config`, which is per-clone and not tracked, so a hook committed
+# to the repository does nothing until someone points git at it. `mise run generate` depends on
+# this task so a fresh clone picks it up during the documented setup rather than needing one more
+# step nobody remembers.
+#
+# Worktrees share the main clone's config, so this covers `.claude/worktrees/` too.
+set -euo pipefail
+
+current="$(git config --get core.hooksPath || true)"
+if [ "$current" = ".githooks" ]; then
+  exit 0
+fi
+
+git config core.hooksPath .githooks
+echo "core.hooksPath -> .githooks (pre-push now runs 'mise run test'; bypass with 'git push --no-verify')"
