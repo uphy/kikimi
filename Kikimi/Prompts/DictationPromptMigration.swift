@@ -33,9 +33,15 @@ enum DictationPromptMigration {
     /// Every *previous* shipped `dictation` default body, verbatim. `migrateGlobal` treats a
     /// config.yaml `global` matching any of these (trimmed) as "realized but unmodified" and skips
     /// migration, same as a match against the current default -- see the comment at the comparison
-    /// site. Append the outgoing text here whenever `PromptSpec.dictationDefaultBody` changes.
-    /// `internal` (not `private`) so `PromptMigrationTests` can exercise the legacy path against the
-    /// real constant instead of a copy that could drift.
+    /// site. `internal` (not `private`) so `PromptMigrationTests` can exercise the legacy path against
+    /// the real constant instead of a copy that could drift.
+    ///
+    /// This list is closed: it holds the bodies a shipped version could actually have written into a
+    /// `config.yaml`, i.e. the ones that were `DictationContextConfig.default.global` back when that
+    /// property still had a value. It is `nil` now (`docs/design/42-prompt-overrides.md` §7.2), so
+    /// later edits to `PromptSpec.dictationDefaultBody` -- including the 2026-08 【言い直しの処理】
+    /// rework -- can never appear in a `config.yaml` and do **not** belong here; appending one would
+    /// only add a dead entry.
     static let legacyDefaultBodies: [String] = [
         // The design-25 R17 body (`DictationContextConfig.default.global` in the config.yaml era),
         // superseded when the no-answering / self-correction / register-preservation rules were added.
