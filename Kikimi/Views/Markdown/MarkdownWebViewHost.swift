@@ -53,7 +53,7 @@ final class MarkdownWebViewHost: NSObject, ObservableObject {
     private var isReady = false
     /// Last content pushed, so an unchanged SwiftUI update is not re-rendered, and so a recovered
     /// web content process can be restored to what it was showing.
-    private var lastContent: (markdown: String, docKey: String)?
+    private var lastContent: (markdown: String, docKey: String, followBottom: Bool)?
     /// Chat's equivalents, for the same "don't re-push what the page already has" reason.
     private var lastTurns: [ChatTurnView]?
     private var lastResponding: (responding: Bool, since: Double?)?
@@ -111,10 +111,17 @@ final class MarkdownWebViewHost: NSObject, ObservableObject {
 
     /// design 39 MD8. `docKey` tells the page whether this is an update of what it already shows
     /// (keep the scroll position) or a different document (start at the top).
-    func setContent(markdown: String, docKey: String) {
-        guard lastContent?.markdown != markdown || lastContent?.docKey != docKey else { return }
-        lastContent = (markdown, docKey)
-        call("setContent", payload: ["markdown": markdown, "docKey": docKey])
+    ///
+    /// `followBottom` opts the document into chat-style auto-follow
+    /// (`docs/design/47-summary-split-pane.md` §5): while the reader is already at the bottom, an
+    /// update scrolls to the new bottom instead of restoring the old offset. Only the Summary tab's
+    /// 議事詳細 pane passes `true`, and only while the session is not Ended -- see `SummaryTabView`.
+    func setContent(markdown: String, docKey: String, followBottom: Bool = false) {
+        guard lastContent?.markdown != markdown
+            || lastContent?.docKey != docKey
+            || lastContent?.followBottom != followBottom else { return }
+        lastContent = (markdown, docKey, followBottom)
+        call("setContent", payload: ["markdown": markdown, "docKey": docKey, "followBottom": followBottom])
     }
 
     // MARK: Chat (§3.6)
@@ -164,7 +171,14 @@ final class MarkdownWebViewHost: NSObject, ObservableObject {
     private func handleAppearanceChange() {
         pushTheme()
         guard let lastContent else { return }
-        call("setContent", payload: ["markdown": lastContent.markdown, "docKey": lastContent.docKey])
+        call(
+            "setContent",
+            payload: [
+                "markdown": lastContent.markdown,
+                "docKey": lastContent.docKey,
+                "followBottom": lastContent.followBottom
+            ]
+        )
     }
 
     /// MD11: values are passed as arguments, never interpolated into a script string. Meeting text
@@ -342,7 +356,9 @@ extension MarkdownWebViewHost: WKNavigationDelegate {
             self.lastResponding = nil
             self.lastCopyFeedbackTurnId = nil
             self.load()
-            if let content { self.setContent(markdown: content.markdown, docKey: content.docKey) }
+            if let content {
+                self.setContent(markdown: content.markdown, docKey: content.docKey, followBottom: content.followBottom)
+            }
             if let turns { self.setTurns(turns) }
             if let responding {
                 self.setResponding(responding.responding, since: responding.since.map { Date(timeIntervalSince1970: $0) })

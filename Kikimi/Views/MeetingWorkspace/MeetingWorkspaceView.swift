@@ -264,7 +264,11 @@ struct MeetingWorkspaceView: View {
             defaultFinalPassModelLabel: viewModel.summaryFinalPassDefaultModelLabel,
             appConfig: viewModel.appConfig,
             onRerunFinalPass: { modelOverride in await viewModel.rerunFinalPass(modelOverride: modelOverride) },
-            markdownHost: markdownWebViewStore.host(for: .summary)
+            markdownHost: markdownWebViewStore.host(for: .summary),
+            // Deliberately a closure, not `host(for: .summaryTopics)` -- see
+            // `SummaryTabView.topicsMarkdownHost`. Calling it here would create the second web view
+            // for every session, split or not.
+            topicsMarkdownHost: { markdownWebViewStore.host(for: .summaryTopics) }
         )
     }
 

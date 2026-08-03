@@ -34,8 +34,13 @@ export interface SwiftToJsApi {
    * `docKey` identifies the *document*, not the revision (MD8): the same key means "this is an
    * update of what you are already showing" and the scroll position is kept; a different key means
    * a different document (another Watcher's result) and the view starts at the top.
+   *
+   * `followBottom` opts the document into chat-style auto-follow
+   * (`docs/design/47-summary-split-pane.md` §5): while the reader is already at the bottom, an
+   * update lands them at the new bottom rather than restoring the old offset. Only the Summary
+   * tab's 議事詳細 pane sets it.
    */
-  setContent: (payload: { markdown: string; docKey: string }) => void;
+  setContent: (payload: { markdown: string; docKey: string; followBottom?: boolean }) => void;
   setTurns: (payload: { turns: ChatTurnView[] }) => void;
   updateTurn: (payload: { id: string; text: string }) => void;
   setResponding: (payload: { responding: boolean; since: number | null }) => void;

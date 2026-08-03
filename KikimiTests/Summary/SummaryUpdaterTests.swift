@@ -239,7 +239,7 @@ struct SummaryUpdaterTests {
 
         let event = try #require(await eventsIterator.next())
         #expect(event.summaryMarkdown != nil)
-        #expect(event.summaryMarkdown?.contains("概要です") == true)
+        #expect(event.summaryMarkdown?.joined.contains("概要です") == true)
 
         let state = try #require(try await handle.readJSON(.summaryState, as: SummaryState.self))
         #expect(state.overview == "概要です")
@@ -611,7 +611,7 @@ struct SummaryUpdaterTests {
 
         let event = try #require(await eventsIterator.next())
         #expect(event.metaChanged == false)
-        #expect(event.summaryMarkdown?.contains("最終概要") == true)
+        #expect(event.summaryMarkdown?.joined.contains("最終概要") == true)
 
         let state = try #require(try await handle.readJSON(.summaryState, as: SummaryState.self))
         #expect(state.overview == "最終概要")
@@ -1083,7 +1083,7 @@ struct SummaryUpdaterTests {
 
         let event = try #require(await eventsIterator.next())
         #expect(event.metaChanged == false)
-        #expect(event.summaryMarkdown?.contains("佐藤さん") == true)
+        #expect(event.summaryMarkdown?.joined.contains("佐藤さん") == true)
 
         let state = try #require(try await handle.readJSON(.summaryState, as: SummaryState.self))
         // "田中さん" already present -> not duplicated; "佐藤さん" newly appended, order preserved.

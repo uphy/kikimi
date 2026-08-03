@@ -136,7 +136,12 @@ final class MeetingWorkspaceViewModel: ObservableObject {
     /// Summary tab live display (`docs/design/04-summary-updater.md` section 5.1/7): the latest
     /// rendered `summary.md`, pushed by `SummaryUpdater.events` (`+Summary.swift`). `nil` before the
     /// first update completes. Not `private(set)`: written from `+Summary.swift` (see `meta` above).
-    @Published var summaryMarkdown: String?
+    ///
+    /// Carries the two-pane split (`docs/design/47-summary-split-pane.md`). **Never assign this from
+    /// `readText(.summaryMarkdown)`** -- reading the rendered `summary.md` back can only ever produce
+    /// a `topics == nil` single pane, which is exactly the regression §2.1 catalogues. Every
+    /// disk-sourced assignment goes through `reloadSummaryMarkdownFromDisk()` (`+Summary.swift`).
+    @Published var summaryMarkdown: SummaryMarkdown?
 
     /// The transcript segment currently playing back through `segmentAudioPlayer`, `nil` when idle
     /// (`docs/design/15-segment-playback.md` section 6). Mirrors `SegmentAudioPlayer.playingSegmentId`

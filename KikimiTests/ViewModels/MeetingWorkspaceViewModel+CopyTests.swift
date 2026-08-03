@@ -154,7 +154,7 @@ struct MeetingWorkspaceViewModelCopyTests {
         let viewModel = makeViewModel(sessionHandle: handle, pasteboard: pasteboard)
 
         viewModel.transcriptRows = [makeRow(id: "seg_00001", startMs: 0, speaker: .mic, rawText: "raw", state: .refined("整形済みテキスト"))]
-        viewModel.summaryMarkdown = "会議のサマリ本文"
+        viewModel.summaryMarkdown = SummaryMarkdown(top: "会議のサマリ本文", topics: nil)
 
         await viewModel.copyMarkdown(scope: .full)
         let full = try #require(pasteboard.writtenStrings.last)

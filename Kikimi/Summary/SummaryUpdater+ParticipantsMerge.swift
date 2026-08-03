@@ -72,11 +72,11 @@ extension SummaryUpdater {
         }
 
         let templateString = await sessionHandle.readSummaryTemplate()
-        var renderedMarkdown: String?
+        var renderedMarkdown: SummaryMarkdown?
         if let rendered = SummaryRenderer.render(updatedState, templateString: templateString) {
             renderedMarkdown = rendered
             do {
-                try await sessionHandle.writeText(rendered, to: .summaryMarkdown)
+                try await sessionHandle.writeText(rendered.joined, to: .summaryMarkdown)
             } catch {
                 logger.error("Failed to write summary.md after a participants merge: \(String(describing: error), privacy: .public)")
                 renderedMarkdown = nil

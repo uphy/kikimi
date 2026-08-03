@@ -22,7 +22,9 @@ extension MeetingWorkspaceViewModel {
         let currentMeta = await sessionHandle.meta
         let input = TranscriptMarkdownRenderer.Input(
             meta: currentMeta,
-            summaryMarkdown: summaryMarkdown ?? "",
+            // `joined`, not the top pane: copying must produce the whole summary regardless of how
+            // the Summary tab happens to be split (`docs/design/47-summary-split-pane.md` §6).
+            summaryMarkdown: summaryMarkdown?.joined ?? "",
             lines: liveMarkdownLines()
         )
         let markdown = TranscriptMarkdownRenderer.render(input, scope: scope)

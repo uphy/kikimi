@@ -390,6 +390,7 @@ final class WindowManager: ObservableObject {
         let slot: MarkdownWebViewStore.Slot
         switch target {
         case .summary: slot = .summary
+        case .summaryTopics: slot = .summaryTopics
         case .watchers: slot = .watchers
         case .chat: slot = .chat
         case .diagram: return nil

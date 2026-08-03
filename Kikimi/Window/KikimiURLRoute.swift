@@ -25,7 +25,12 @@ enum KikimiURLRoute: Equatable {
 
     /// Which of the app's web views to talk to.
     enum DebugWebViewTarget: String, Equatable {
+        /// The Summary tab's meeting-state pane -- and the whole summary when the template could not
+        /// be split (`docs/design/47-summary-split-pane.md` §4.3). Existing verification scenarios
+        /// that look for 概要/決定事項/アクションアイテム keep working unchanged; ones looking for 議事詳細
+        /// content need `summaryTopics` below.
         case summary
+        case summaryTopics
         case watchers
         case chat
         /// The zoom overlay (`docs/design/40-diagram-zoom.md`).

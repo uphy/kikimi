@@ -33,8 +33,8 @@ extension MeetingWorkspaceViewModel {
         // `startSummaryUpdaterIfNeeded()` (only called when Recording actually (re)starts) is not
         // enough on its own, since Paused/Ended sessions never call it again. Missing/unreadable is
         // the normal case for a Draft session with no summary yet, so this is a silent no-op then.
-        if summaryMarkdown == nil, let onDisk = try? await sessionHandle.readText(.summaryMarkdown), !onDisk.isEmpty {
-            summaryMarkdown = onDisk
+        if summaryMarkdown == nil {
+            await reloadSummaryMarkdownFromDisk()
         }
     }
 
