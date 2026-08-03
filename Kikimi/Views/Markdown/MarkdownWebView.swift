@@ -74,7 +74,9 @@ final class MarkdownWebViewContainer: NSView {
     private weak var attached: NSView?
 
     func attach(_ webView: NSView) {
-        guard attached !== webView else { return }
+        // `superview !== self` matters as much as the identity check: a container that lost the web
+        // view to a sibling (see `detach`) still remembers it, and must be able to take it back.
+        guard attached !== webView || webView.superview !== self else { return }
         detach()
         webView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(webView)
@@ -87,8 +89,15 @@ final class MarkdownWebViewContainer: NSView {
         attached = webView
     }
 
+    /// Only removes the web view if it is *still ours*. On a pane switch SwiftUI creates the new
+    /// representable and lets it `attach` before dismantling the old one, so by the time this runs
+    /// the web view is usually already a subview of the incoming container — an unconditional
+    /// `removeFromSuperview()` would rip it back out and leave the new pane blank (the "サマリのみ" pane
+    /// rendered white until the user went via 書き起こしのみ and back).
     func detach() {
-        attached?.removeFromSuperview()
+        if attached?.superview === self {
+            attached?.removeFromSuperview()
+        }
         attached = nil
     }
 }
