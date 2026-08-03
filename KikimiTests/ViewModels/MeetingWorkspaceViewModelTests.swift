@@ -1660,7 +1660,7 @@ struct MeetingWorkspaceViewModelTests {
 
         try await waitUntil { await viewModel.summaryMarkdown != nil }
 
-        #expect(viewModel.summaryMarkdown?.contains("概要です") == true)
+        #expect(viewModel.summaryMarkdown?.joined.contains("概要です") == true)
         // The automatic-title once-only reflection (kikimi.md 8 章 §3.1) also lands on `meta` via the
         // `metaChanged` event -- this is the same `SummaryUpdateEvent` push this test is really
         // exercising, so assert it landed too.
@@ -1890,7 +1890,7 @@ struct MeetingWorkspaceViewModelTests {
         )
 
         try await waitUntil { await reopenedViewModel.summaryMarkdown != nil }
-        #expect(reopenedViewModel.summaryMarkdown?.contains("概要です") == true)
+        #expect(reopenedViewModel.summaryMarkdown?.joined.contains("概要です") == true)
         // Never started recording on the reopened instance, so no SummaryUpdater was ever created --
         // this is purely `hydrateFromSessionHandle()`'s disk read, not a live update.
         #expect(reopenedViewModel.summaryUpdater == nil)
@@ -1922,7 +1922,7 @@ struct MeetingWorkspaceViewModelTests {
 
         await viewModel.pauseRecording()
 
-        #expect(viewModel.summaryMarkdown?.contains("概要です") == true)
+        #expect(viewModel.summaryMarkdown?.joined.contains("概要です") == true)
         #expect(await llm.callCount == 1)
     }
 
@@ -2030,12 +2030,12 @@ struct MeetingWorkspaceViewModelTests {
         pipeline.yield(segment)
         // Let the incremental patch land first, so the assertions below can tell its content apart
         // from the final pass's wholesale replacement.
-        try await waitUntil { await viewModel.summaryMarkdown?.contains("初期決定") == true }
+        try await waitUntil { await viewModel.summaryMarkdown?.joined.contains("初期決定") == true }
 
         await viewModel.endMeeting()
 
         #expect(viewModel.recordingButtonState == .ended)
-        let markdown = try #require(viewModel.summaryMarkdown)
+        let markdown = try #require(viewModel.summaryMarkdown).joined
         #expect(markdown.contains("最終版の概要です"))
         #expect(markdown.contains("最終決定"))
         #expect(markdown.contains("最終タスク"))
@@ -2074,7 +2074,7 @@ struct MeetingWorkspaceViewModelTests {
         await viewModel.startRecording()
         let segment = try await handle.appendTranscriptSegment(source: .mic, startMs: 0, endMs: 500, text: "hello", confidence: 0.9)
         pipeline.yield(segment)
-        try await waitUntil { await viewModel.summaryMarkdown?.contains("初期決定") == true }
+        try await waitUntil { await viewModel.summaryMarkdown?.joined.contains("初期決定") == true }
 
         // Recording -> Paused tears down the live updater; `endMeeting()` must spin up a transient
         // one that still runs the final pass (`docs/design/summary-quality-topics-and-final-pass.md`
@@ -2157,8 +2157,12 @@ struct MeetingWorkspaceViewModelTests {
 
         await viewModel.regenerateSummary()
 
-        #expect(viewModel.summaryMarkdown?.contains("概要です") == true)
+        #expect(viewModel.summaryMarkdown?.joined.contains("概要です") == true)
         #expect(try await handle.readText(.summaryMarkdown) != nil)
+        // `docs/design/47-summary-split-pane.md` §2.1: this used to re-read the rendered `summary.md`,
+        // which can only ever produce a single pane -- and on an Ended session, with the updater torn
+        // down and no `events` left to correct it, that collapse would be permanent.
+        #expect(viewModel.summaryMarkdown?.topics != nil)
     }
 
     // MARK: Manual model override (`docs/design/44-llm-model-config.md` §8)
@@ -2263,7 +2267,10 @@ struct MeetingWorkspaceViewModelTests {
         #expect(await llm.callCount == 1)
         let markdown = try #require(try await handle.readText(.summaryMarkdown))
         #expect(markdown.contains("最終版の概要です"))
-        #expect(viewModel.summaryMarkdown?.contains("最終版の概要です") == true)
+        #expect(viewModel.summaryMarkdown?.joined.contains("最終版の概要です") == true)
+        // Same regression guard as `regenerateSummaryAfterEnded()` (design 47 §2.1), on the path
+        // where it matters most: an Ended session has no live updater to push a corrected value.
+        #expect(viewModel.summaryMarkdown?.topics != nil)
     }
 
     @Test("rerunFinalPass() failure keeps the existing summary.md untouched (§8's 'failed 警告 + 既存サマリ維持')")
@@ -2284,7 +2291,10 @@ struct MeetingWorkspaceViewModelTests {
 
         await viewModel.rerunFinalPass()
 
-        #expect(viewModel.summaryMarkdown == "# 既存のサマリ\n")
+        // No `summary.state.json` was ever written here, so `reloadSummaryMarkdownFromDisk()` falls
+        // back to the rendered file as a single pane (`docs/design/47-summary-split-pane.md` §2.3).
+        #expect(viewModel.summaryMarkdown?.joined == "# 既存のサマリ\n")
+        #expect(viewModel.summaryMarkdown?.topics == nil)
         #expect(try await handle.readText(.summaryMarkdown) == "# 既存のサマリ\n")
     }
 

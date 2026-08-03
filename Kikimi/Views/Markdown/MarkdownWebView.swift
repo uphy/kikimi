@@ -17,6 +17,9 @@ struct MarkdownWebView: View {
     /// Identifies the *document* (MD8): `"summary"`, `"watcher:<id>"`. Same key on an update means
     /// the reader keeps their scroll position; a different key starts at the top.
     let docKey: String
+    /// Auto-follow new content while the reader is at the bottom
+    /// (`docs/design/47-summary-split-pane.md` §5). Off for every surface but the 議事詳細 pane.
+    var followBottom: Bool = false
     var onOpenSegment: (String) -> Void = { _ in }
 
     var body: some View {
@@ -27,7 +30,7 @@ struct MarkdownWebView: View {
                 MarkdownWebViewRepresentable(host: host) { host in
                     // Refreshed on every update so the closure never captures a stale view model.
                     host.onOpenSegment = onOpenSegment
-                    host.setContent(markdown: markdown, docKey: docKey)
+                    host.setContent(markdown: markdown, docKey: docKey, followBottom: followBottom)
                 }
             }
         }

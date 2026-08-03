@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { JsToSwiftMessage } from "./bridge";
 import { DocumentView } from "./document";
 
@@ -89,5 +89,97 @@ describe("DocumentView", () => {
     const view = new DocumentView(root);
     view.setContent("# タイトル\n\n本文です。", "summary");
     expect(view.currentText()).toContain("タイトル");
+  });
+});
+
+// docs/design/47-summary-split-pane.md §5.2/§8. The 議事詳細 pane follows its own tail while the
+// reader is at the bottom, and leaves them alone when they are not.
+describe("DocumentView auto-follow", () => {
+  let root: HTMLElement;
+
+  /**
+   * jsdom hard-wires `scrollHeight`/`clientHeight` to 0, which makes `distanceFromBottom()` return
+   * 0 for every position -- every reader would look pinned and every assertion here would pass
+   * without testing anything (§8). `scrollTop` is a plain stored value, so only the two read-only
+   * getters need standing in for a real layout.
+   */
+  function stubLayout(scrollHeight: number, clientHeight: number): void {
+    Object.defineProperty(document.documentElement, "scrollHeight", { value: scrollHeight, configurable: true });
+    Object.defineProperty(document.documentElement, "clientHeight", { value: clientHeight, configurable: true });
+  }
+
+  /** Moves the reader and lets the scroll listener observe it, the way a real scroll would. */
+  function scrollTo(position: number): void {
+    document.documentElement.scrollTop = position;
+    document.dispatchEvent(new Event("scroll"));
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => setTimeout(() => callback(0), 0));
+    document.body.innerHTML = '<div id="root"></div>';
+    root = document.getElementById("root")!;
+    installBridge();
+    stubLayout(1000, 500);
+  });
+
+  afterEach(() => {
+    // `documentElement` is shared across tests in this file; leaving the stubs in place would make
+    // the plain scroll-restore suite above see a fake layout.
+    for (const name of ["scrollHeight", "clientHeight"]) {
+      delete (document.documentElement as unknown as Record<string, unknown>)[name];
+    }
+  });
+
+  it("scrolls to the new bottom when the reader is already at the bottom", async () => {
+    const view = new DocumentView(root);
+    view.setContent("議事詳細", "summary-topics", true);
+    await flushFrame();
+
+    scrollTo(500); // 1000 - 500 - 500 = 0 from the bottom
+    stubLayout(1400, 500); // the update made the document taller
+    view.setContent("議事詳細\n\n追記", "summary-topics", true);
+    await flushFrame();
+
+    expect(document.documentElement.scrollTop).toBe(1400);
+  });
+
+  it("leaves the reader alone when they have scrolled up to re-read", async () => {
+    const view = new DocumentView(root);
+    view.setContent("議事詳細", "summary-topics", true);
+    await flushFrame();
+
+    scrollTo(100); // 1000 - 100 - 500 = 400 from the bottom, well past the threshold
+    stubLayout(1400, 500);
+    view.setContent("議事詳細\n\n追記", "summary-topics", true);
+    await flushFrame();
+
+    expect(document.documentElement.scrollTop).toBe(100);
+  });
+
+  it("restores the previous position, not the bottom, when following is off", async () => {
+    const view = new DocumentView(root);
+    view.setContent("サマリ", "summary-top");
+    await flushFrame();
+
+    scrollTo(500); // at the bottom -- irrelevant without followBottom
+    stubLayout(1400, 500);
+    view.setContent("サマリ\n\n追記", "summary-top");
+    await flushFrame();
+
+    expect(document.documentElement.scrollTop).toBe(500);
+  });
+
+  it("re-pins on a new document, so a scrolled-away position is not inherited", async () => {
+    const view = new DocumentView(root);
+    view.setContent("議事詳細 A", "summary-topics:a", true);
+    await flushFrame();
+
+    scrollTo(100); // scrolled away in the *previous* document
+    stubLayout(1400, 500);
+    view.setContent("議事詳細 B", "summary-topics:b", true);
+    await flushFrame();
+
+    expect(document.documentElement.scrollTop).toBe(1400);
   });
 });

@@ -9,6 +9,34 @@ import Foundation
 /// down when it closes), the `events` subscription that pushes `summaryMarkdown`/`meta` updates to
 /// the UI, and the three user-facing operations the Summary tab / header proposal badge call.
 extension MeetingWorkspaceViewModel {
+    // MARK: - Loading the rendered summary from disk
+
+    /// Re-renders `summaryMarkdown` from the persisted `summary.state.json`, keeping the two-pane
+    /// split (`docs/design/47-summary-split-pane.md` §2.3). **The only place that loads the summary
+    /// from disk.**
+    ///
+    /// Every caller here used to do `readText(.summaryMarkdown)` directly, which after design 47 can
+    /// only ever produce a `topics == nil` single pane -- and for "最終整形を再実行" on an Ended session
+    /// that collapse is permanent, since `stopSummaryUpdater()` already ran and no `events` push will
+    /// ever correct it (§2.1). Going through `summary.state.json` + `summary_template.md` instead
+    /// reproduces exactly what the last render produced, split included.
+    ///
+    /// Renders nothing and leaves the current value alone when neither source is readable, which is
+    /// what the old `?? summaryMarkdown` did: a Draft session with no summary yet stays blank rather
+    /// than flashing empty.
+    func reloadSummaryMarkdownFromDisk() async {
+        if let state = try? await sessionHandle.readJSON(.summaryState, as: SummaryState.self),
+           let rendered = SummaryRenderer.render(state, templateString: await sessionHandle.readSummaryTemplate()) {
+            summaryMarkdown = rendered
+            return
+        }
+        // No/corrupt `summary.state.json` (a session predating design 04, or a partial write): fall
+        // back to the rendered file. Single pane, but the summary still shows.
+        if let onDisk = try? await sessionHandle.readText(.summaryMarkdown), !onDisk.isEmpty {
+            summaryMarkdown = SummaryMarkdown(top: onDisk, topics: nil)
+        }
+    }
+
     // MARK: - Lifecycle (section 4.1: created on Recording start, torn down on Paused/Ended)
 
     /// Called from `runRecordingSegmentStart(previousStateOnFailure:)` once a recording segment has
@@ -29,9 +57,10 @@ extension MeetingWorkspaceViewModel {
         if summaryMarkdown == nil {
             Task { [weak self] in
                 guard let self else { return }
-                if let onDisk = try? await self.sessionHandle.readText(.summaryMarkdown), !onDisk.isEmpty {
-                    self.summaryMarkdown = onDisk
-                }
+                // Re-check inside the Task: an `events` push can land while this hop is in flight,
+                // and a live update must not be overwritten by a re-render of older on-disk state.
+                guard self.summaryMarkdown == nil else { return }
+                await self.reloadSummaryMarkdownFromDisk()
             }
         }
 
@@ -143,7 +172,7 @@ extension MeetingWorkspaceViewModel {
     func regenerateSummary(modelOverride: ResolvedModel? = nil) async {
         let updater = summaryUpdater ?? summaryUpdaterFactory(sessionHandle)
         await updater.regenerateFromScratch(modelOverride: modelOverride)
-        summaryMarkdown = (try? await sessionHandle.readText(.summaryMarkdown)) ?? summaryMarkdown
+        await reloadSummaryMarkdownFromDisk()
         meta = await sessionHandle.meta
     }
 
@@ -166,7 +195,7 @@ extension MeetingWorkspaceViewModel {
     func rerunFinalPass(modelOverride: ResolvedModel? = nil) async {
         let updater = summaryUpdater ?? summaryUpdaterFactory(sessionHandle)
         await updater.runFinalPass(modelOverride: modelOverride)
-        summaryMarkdown = (try? await sessionHandle.readText(.summaryMarkdown)) ?? summaryMarkdown
+        await reloadSummaryMarkdownFromDisk()
         meta = await sessionHandle.meta
     }
 

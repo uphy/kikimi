@@ -3,6 +3,9 @@
 #
 # WHY THIS EXISTS
 # The summary / Watchers / chat tabs and the diagram zoom overlay are WKWebView pages now. Their text
+# NOTE: the Summary tab is two panes (docs/design/47-summary-split-pane.md). `summary` is the
+# meeting-state pane (概要/決定事項/アクションアイテム) and holds the whole summary only when the
+# template could not be split; 議事詳細 content lives in `summaryTopics`.
 # is not reliably reachable through the AX tree, and `ax_click.py` cannot address an element inside a
 # web view at all -- the copy / retry / zoom buttons all live in the page. `evaluateJavaScript` is an
 # in-process API, so this script asks the app to run it via `kikimi://debug/webview` and writes the
@@ -17,7 +20,7 @@
 # mermaid pass in particular), so a single dump can catch a half-drawn page.
 #
 # Usage:
-#   webview.sh dump  <summary|watchers|chat|diagram> [outfile]
+#   webview.sh dump  <summary|summaryTopics|watchers|chat|diagram> [outfile]
 #   webview.sh wait  <target> <substring> [timeout_seconds]   # polls dump until it contains substring
 #   webview.sh click <target> <data-testid>
 #
@@ -34,9 +37,9 @@ action="$1"
 target="$2"
 
 case "$target" in
-  summary | watchers | chat | diagram) ;;
+  summary | summaryTopics | watchers | chat | diagram) ;;
   *)
-    echo "unknown target: $target (expected summary|watchers|chat|diagram)" >&2
+    echo "unknown target: $target (expected summary|summaryTopics|watchers|chat|diagram)" >&2
     exit 2
     ;;
 esac

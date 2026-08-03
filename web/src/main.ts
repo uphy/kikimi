@@ -40,7 +40,8 @@ function boot(): void {
 
   exposeApi({
     setTheme: ({ vars }) => applyTheme(vars),
-    setContent: ({ markdown, docKey }) => ensureDocumentView().setContent(markdown, docKey),
+    setContent: ({ markdown, docKey, followBottom }) =>
+      ensureDocumentView().setContent(markdown, docKey, followBottom ?? false),
     setTurns: ({ turns }) => ensureChatView().setTurns(turns),
     updateTurn: ({ id, text }) => ensureChatView().updateTurn(id, text),
     setResponding: ({ responding, since }) => ensureChatView().setResponding(responding, since),

@@ -20,8 +20,9 @@ enum UpdateReason: Sendable {
 /// live, since the auto-trigger path never goes through the ViewModel directly.
 struct SummaryUpdateEvent: Sendable {
     /// The latest rendered `summary.md`, or `nil` if this event carries no new render (e.g. a
-    /// title-only event, or an update that had nothing to summarize).
-    var summaryMarkdown: String?
+    /// title-only event, or an update that had nothing to summarize). Carries the two-pane split
+    /// (`docs/design/47-summary-split-pane.md` §2.2); `summaryMarkdown.joined` is what went to disk.
+    var summaryMarkdown: SummaryMarkdown?
     /// `true` if `meta.json` was updated (title/titleAutoNamedOnce/titleProposal) as part of this
     /// event, so the ViewModel knows to reload `meta`.
     var metaChanged: Bool
@@ -448,11 +449,11 @@ actor SummaryUpdater {
         }
 
         let templateString = await sessionHandle.readSummaryTemplate()
-        var renderedMarkdown: String?
+        var renderedMarkdown: SummaryMarkdown?
         if let rendered = SummaryRenderer.render(updatedState, templateString: templateString) {
             renderedMarkdown = rendered
             do {
-                try await sessionHandle.writeText(rendered, to: .summaryMarkdown)
+                try await sessionHandle.writeText(rendered.joined, to: .summaryMarkdown)
             } catch {
                 // §9: renderer succeeded but the write itself failed -- previous summary.md is left
                 // in place on disk (we simply didn't overwrite it); still log.

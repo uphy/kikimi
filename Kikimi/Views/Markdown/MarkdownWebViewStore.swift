@@ -12,7 +12,13 @@ import Foundation
 @MainActor
 final class MarkdownWebViewStore {
     enum Slot: String, CaseIterable {
+        /// Summary tab, meeting-state pane. Holds the whole summary when the template could not be
+        /// split (`docs/design/47-summary-split-pane.md` §4.1).
         case summary
+        /// Summary tab, 議事詳細 pane. Only ever created once a split actually succeeds -- see
+        /// `SummaryTabView.topicsMarkdownHost`, which is a closure precisely so that a session with an
+        /// unsplittable template never pays for a second web view.
+        case summaryTopics
         case watchers
         case chat
     }

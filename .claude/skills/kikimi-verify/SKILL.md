@@ -463,7 +463,7 @@ scripts/with_env.sh KIKIMI_DEBUG_BRIDGE=1 -- ~/Applications/Kikimi.app/Contents/
 ```
 
 ```bash
-# 本文のテキストを読む（target は summary|watchers|chat|diagram）
+# 本文のテキストを読む（target は summary|summaryTopics|watchers|chat|diagram）
 scripts/webview.sh dump summary
 scripts/webview.sh dump chat /tmp/chat.txt
 
@@ -474,6 +474,17 @@ scripts/webview.sh wait summary "決定事項" 10
 # ページ内のボタンを data-testid で押す
 scripts/webview.sh click chat "chat-copy-<turn-id>"
 scripts/webview.sh click chat "mermaid-zoom"
+```
+
+**サマリタブは上下 2 ペインで、それぞれ別の WebView**（`docs/design/47-summary-split-pane.md`）。
+`summary` は上ペイン（概要・決定事項・アクションアイテム）、`summaryTopics` は下ペイン（議事詳細）を指す。
+議事詳細の文字列を `wait summary` で待つと**永遠に出てこない**ので `summaryTopics` を使う。
+テンプレートを分割できなかったセッションだけは `summary` が全文を持ち、`summaryTopics` の WebView は
+そもそも生成されない（`no response from Kikimi` になる）。
+
+```bash
+scripts/webview.sh wait summary "決定事項" 10
+scripts/webview.sh wait summaryTopics "議事詳細" 10
 ```
 
 **WebView のページはタブを開かないと存在しない**ので、`tab_click.py` で先にタブを切り替える。

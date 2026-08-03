@@ -20,7 +20,7 @@ import SwiftUI
 /// to live in this file — is gone as of design 39's Phase C: every Markdown surface renders through
 /// the web view now, and keeping a second renderer alive would mean maintaining both.
 struct SummaryTabView: View {
-    let summaryMarkdown: String?
+    let summaryMarkdown: SummaryMarkdown?
     /// `docs/design/44-llm-model-config.md` §8: `nil` for "既定で実行", otherwise the resolved
     /// override the manual-override menu built (an alias resolution or the "モデルを指定して実行…"
     /// sheet's provider+model).
@@ -40,6 +40,15 @@ struct SummaryTabView: View {
     /// The window-lifetime web view this tab renders into (`docs/design/39-webview-markdown.md`
     /// MD2), handed down from `MeetingWorkspaceWindowController`'s `MarkdownWebViewStore`.
     @ObservedObject var markdownHost: MarkdownWebViewHost
+    /// The 議事詳細 pane's web view, resolved **lazily** (`docs/design/47-summary-split-pane.md` §4.1).
+    ///
+    /// A closure rather than a stored `MarkdownWebViewHost` because `MeetingWorkspaceView` builds this
+    /// view's arguments during `body` evaluation, before anyone has looked at whether the template
+    /// splits. `MarkdownWebViewStore.host(for:)` creates *and* starts loading the 312KB bundle on
+    /// first call, so passing it eagerly would cost every session a second `WKWebView` (and its own
+    /// WebContent process) even when the pane never appears. The store returns the same host for
+    /// repeat calls, so evaluating this on every `body` pass still yields exactly one web view.
+    let topicsMarkdownHost: () -> MarkdownWebViewHost
 
     var body: some View {
         VStack(spacing: 0) {
@@ -52,13 +61,41 @@ struct SummaryTabView: View {
                 Divider()
             }
 
-            if let summaryMarkdown, !summaryMarkdown.isEmpty {
-                MarkdownWebView(host: markdownHost, markdown: summaryMarkdown, docKey: "summary")
-            } else {
-                SummaryPlaceholder()
-            }
+            content
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Three shapes, in decreasing order of how much the template gave us to work with: the two-pane
+    /// split, the single pane a template that could not be split falls back to, and the placeholder.
+    @ViewBuilder
+    private var content: some View {
+        if let summaryMarkdown, !summaryMarkdown.joined.isEmpty {
+            if let topics = summaryMarkdown.topics {
+                // 50:50 to start, freely draggable, not remembered across windows -- §4.2 (the same
+                // `NSSplitView` limitation `MeetingTabView`'s `HSplitView` already lives with).
+                VSplitView {
+                    MarkdownWebView(host: markdownHost, markdown: summaryMarkdown.top, docKey: "summary-top")
+                        .frame(minHeight: 120, maxHeight: .infinity)
+                    MarkdownWebView(
+                        host: topicsMarkdownHost(),
+                        markdown: topics,
+                        docKey: "summary-topics",
+                        // §5.1: following an Ended session's log would drop the reader at the end of a
+                        // meeting they are opening to read from the start.
+                        followBottom: !isEnded
+                    )
+                    .frame(minHeight: 120, maxHeight: .infinity)
+                }
+            } else {
+                // A distinct `docKey` from the split layout's top pane on purpose (§4.1): switching
+                // between the two means a document of a completely different length, and reusing the
+                // key would restore a scroll offset that no longer means anything.
+                MarkdownWebView(host: markdownHost, markdown: summaryMarkdown.joined, docKey: "summary")
+            }
+        } else {
+            SummaryPlaceholder()
+        }
     }
 
     private var regenerateBar: some View {
