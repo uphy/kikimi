@@ -360,22 +360,64 @@ Vibe Coding を始める前に、Claude Code が最初に実行する初期化 w
 
 ### 2.11 開発の粒度と PR 戦略
 
-- **1 Phase = 複数 PR**。Phase 内の各機能を feature ブランチで実装
-- Vibe Coding では **人間レビューを PR 単位ではなく Phase 完了時にまとめて**行う想定
-  - 途中の実装レビューは Claude の subagent がやる
-  - ユーザーは Phase 完了時の動作確認結果（スクリーンショット + ログ）を見て Go/No-Go
-- コミットは Claude が書く。Conventional Commits 準拠（`feat:`, `fix:`, `chore:`）
-- PR は squash マージ前提。細かいコミットは Claude が育てて OK
+コード変更は必ず **worktree + PR** で進める。`main` に直接コミットしない。マージするのはユーザーだけで、
+Claude は CI が緑になるところまでを担当する。
 
-### 2.12 Claude Code 側の運用フック
+**分担**
 
-`.claude/settings.json` に以下を設定して、開発サイクルを補強する。
+| 担当 | 範囲 |
+|---|---|
+| Claude | worktree 作成 → 実装 → コミット → push → PR 作成 → 必須チェックが緑になるまで待つ → 報告して停止 |
+| ユーザー | PR を読んでマージする（UI 動作確認もここ） |
+| 自動 | マージ済み worktree の削除（SessionStart hook が `mise run wt:reap` を叩く） |
 
-- **PostToolUse hook**: Swift ファイル編集後に `swift build --package-path .` の quick check を回す
-- **Stop hook**: セッション終了時に `wiki-capture --quick` で学びを Kikimi の raw に落とす
-- **PreCommit hook**: `mise run build` が通ることを確認してから commit を許可
+**手順**
 
-具体設定は `update-config` skill 経由で作る。
+```bash
+mise run wt fix/summary-pane-blank   # .claude/worktrees/fix/summary-pane-blank を作る
+cd .claude/worktrees/fix/summary-pane-blank
+# 実装 → コミット → push → gh pr create
+mise run pr:wait                     # 必須チェックが緑になるまで待つ（マージはしない）
+```
+
+`mise run wt` は origin/main から生やし、gitignore されているローカル資産（`CLAUDE.local.md`、
+`docs/references/chirami-map.md`、`.build`、`web/node_modules`、`Kikimi/Resources/editor`）を
+APFS クローンで持ち込む。`.build` は約 10GB あるが `cp -c` はブロックを共有するので、コピー自体は数十秒、
+ディスクもほぼ増えない。クローンした `.build` 内の `ModuleCache` だけは削除する（clang が絶対パスを
+焼き込むため、残すとビルドが必ず失敗する）。
+
+**並行作業の制約**
+
+- worktree は何本でも並べてよい。ただし **UI 動作確認は 1 本ずつ**。`~/Applications/Kikimi.app`・
+  `~/.config/kikimi`・`~/.local/state/kikimi` は worktree 間で共有されるので、同時に `mise run apply`
+  すると壊れる
+- `main` ruleset の `strict_required_status_checks_policy` は off。古い main の上で緑になった PR も
+  マージできるので、同じファイルを触る PR を並べたときは、マージ後の main で改めて `mise run test` を回す
+- コミットは Conventional Commits 準拠（`feat:`, `fix:`, `chore:`）。マージ方式は merge / squash / rebase の
+  いずれも許可されている
+
+**片付け**
+
+`mise run wt:reap` が worktree を 1 本ずつ見て、**PR が MERGED かつ worktree がクリーンかつ HEAD が
+マージされた commit のまま**のときだけ削除する。それ以外（PR が OPEN、未コミットあり、マージ後に
+commit を積んだ）は理由を出して残す。SessionStart hook から毎セッション自動で走るので、通常は手で
+叩く必要はない。
+
+### 2.12 強制されるチェック
+
+**GitHub 側（`main` ruleset、有効）**
+
+- PR 必須（直接 push 不可）、force push と削除の禁止
+- 必須ステータスチェック 3 本: `SwiftLint` / `Web (typecheck & test)` / `Build & test`
+- 承認レビューは 0 人。ユーザー本人がマージできる
+
+**ローカル側（`.claude/settings.json`）**
+
+| hook | 内容 |
+|---|---|
+| PostToolUse (Edit/Write) | 変更した Swift ファイルに SwiftLint |
+| PreToolUse (Bash) | `main` での `git commit` を拒否（`KIKIMI_ALLOW_MAIN_COMMIT=1` で解除）。そのうえで `mise run build` が通ることを確認 |
+| SessionStart | マージ済み worktree を片付ける |
 
 ### 2.13 開発方式のまとめ
 
