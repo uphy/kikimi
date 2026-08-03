@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+#MISE description="作業用 worktree を .claude/worktrees/<branch> に作る"
+set -euo pipefail
+
+# One worktree per PR (docs/development-process.md 2.11). `.claude/worktrees/` is where Claude
+# Code's own EnterWorktree puts them, and switching a session between worktrees mid-session only
+# works for paths under that directory -- so this task uses the same place rather than a sibling
+# directory outside the repo.
+
+branch="${1:-}"
+if [ -z "$branch" ]; then
+  echo "usage: mise run wt <branch-name>" >&2
+  echo "   e.g. mise run wt fix/summary-pane-blank" >&2
+  exit 2
+fi
+
+# Always operate on the main checkout, even when invoked from inside another worktree: the first
+# entry of `git worktree list` is the main one.
+main_worktree="$(git worktree list --porcelain | awk 'NR == 1 && $1 == "worktree" { print $2 }')"
+if [ -z "$main_worktree" ]; then
+  echo "error: not inside a git repository" >&2
+  exit 1
+fi
+
+path="$main_worktree/.claude/worktrees/$branch"
+
+if [ -d "$path" ]; then
+  echo "already exists: $path"
+  exit 0
+fi
+
+git -C "$main_worktree" fetch --quiet origin main
+
+# Branch off origin/main, not the local one: the local main may be behind, and a PR built on a
+# stale base is the one thing the required status checks cannot catch (the ruleset's
+# strict_required_status_checks_policy is off).
+if git -C "$main_worktree" show-ref --verify --quiet "refs/heads/$branch"; then
+  echo "branch $branch already exists; checking it out into the new worktree"
+  git -C "$main_worktree" worktree add "$path" "$branch"
+else
+  git -C "$main_worktree" worktree add -b "$branch" "$path" origin/main
+fi
+
+# mise refuses to parse a config it has not been told to trust, and trust is keyed by absolute
+# path -- so every fresh worktree starts untrusted and *every* `mise run` in it fails with
+# "Config files ... are not trusted" until this runs.
+mise trust "$path/mise.toml" >/dev/null
+
+# Gitignored but load-bearing: without these the agents in the new worktree lose the reference
+# rules (CLAUDE.local.md) and the map of the sibling Chirami checkout.
+for file in CLAUDE.local.md docs/references/chirami-map.md; do
+  if [ -f "$main_worktree/$file" ]; then
+    mkdir -p "$path/$(dirname "$file")"
+    cp "$main_worktree/$file" "$path/$file"
+  fi
+done
+
+# `cp -c` is an APFS clone: it takes seconds for the ~10GB `.build` tree and shares every block
+# until something writes to it. Without it each worktree pays a from-scratch build of all the
+# dependencies (MLX, FluidAudio, sherpa-onnx) before its first commit can pass the
+# build-before-commit hook.
+for dir in .build web/node_modules Kikimi/Resources/editor; do
+  [ -e "$main_worktree/$dir" ] || continue
+  mkdir -p "$(dirname "$path/$dir")"
+  cp -c -R "$main_worktree/$dir" "$path/$dir"
+done
+
+# Clang bakes the absolute module-cache path into every .pcm and refuses to load one from
+# anywhere else ("was compiled with module cache path ..."), which fails the build outright. It is
+# a pure cache, so dropping the copies costs nothing and is what makes the clone above usable.
+if [ -d "$path/.build" ]; then
+  find "$path/.build" -type d -name ModuleCache -prune -exec rm -rf {} +
+fi
+
+echo
+echo "worktree: $path"
+echo "branch:   $branch (based on origin/main)"
+echo
+echo "next: cd \"$path\" && … && mise run pr:wait"

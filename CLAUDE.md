@@ -40,6 +40,25 @@ Claude Code が「詳細設計 → セルフレビュー → 実装 → 実装�
 （「動作確認して」や `kikimi-ui-verify` workflow の実行指示）のみ実行する**（詳細は `CLAUDE.local.md` 参照）。
 phase-cycle / fix-cycle workflow には UI 検証ステップを含めない。
 
+## 開発フロー: worktree + PR（必ず守る）
+
+**コード変更は `main` に直接コミットしない。worktree を作ってそこで作業し、PR にする。**
+`main` の ruleset が PR と 3 つの必須チェックを強制しているので、直接 push はそもそも通らない。
+詳細は [`docs/development-process.md`](docs/development-process.md) 2.11。
+
+```bash
+mise run wt fix/xxx        # .claude/worktrees/fix/xxx を作る（origin/main 起点、ローカル資産も持ち込む）
+cd .claude/worktrees/fix/xxx
+# 実装 → コミット → push → gh pr create
+mise run pr:wait           # 必須チェックが緑になるまで待つ。バックグラウンド実行推奨
+```
+
+- **マージはユーザーが行う。Claude は絶対にマージしない**。CI が緑になったことを報告して止まる
+- マージ済み worktree の削除は SessionStart hook が `mise run wt:reap` で自動実行する。手で消さない
+- 会話・調査だけなら `main` のままでよい。ファイルを書き換える作業は worktree
+- **UI 動作確認は同時に 1 worktree だけ**。`~/Applications/Kikimi.app` と `~/.config/kikimi` /
+  `~/.local/state/kikimi` は全 worktree で共有される
+
 ## Build
 
 ```bash
@@ -89,6 +108,9 @@ xcodebuild -downloadComponent MetalToolchain
 - `mise run clean` — ビルド成果物を削除
 - `mise run purge` — アプリ・config・state を全削除
 - `mise run lint` / `mise run lint-fix` — SwiftLint（`lint` は `web/` の `tsc --noEmit` も走らせる）
+- `mise run wt <branch>` — 作業用 worktree を `.claude/worktrees/<branch>` に作る
+- `mise run wt:reap` — マージ済み PR の worktree を片付ける（SessionStart hook が自動で叩く）
+- `mise run pr:wait [<pr>]` — PR の必須チェックが緑になるまで待つ
 - `mise run verify-smoke` — `kikimi-verify` のスモークテスト
 
 ### 配布ビルド（`KIKIMI_RELEASE_BUILD=1`）

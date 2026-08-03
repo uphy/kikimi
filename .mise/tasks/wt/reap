@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+#MISE description="マージ済み PR の worktree とブランチを片付ける"
+#
+# Merge detection and cleanup (docs/development-process.md 2.11). Deliberately biased towards
+# leaving things alone: a worktree is removed only when its PR is MERGED *and* the worktree still
+# holds exactly what was merged. Anything else is reported and left on disk.
+#
+# Safe to run at any time, from anywhere in the repo, with or without a network. Always exits 0 so
+# it can be wired to a hook.
+#
+#   --quiet   print only what was actually removed (nothing at all when idle)
+set -uo pipefail
+
+quiet=false
+[ "${1:-}" = "--quiet" ] && quiet=true
+
+say() { $quiet || echo "$@"; }
+
+command -v gh >/dev/null 2>&1 || exit 0
+command -v jq >/dev/null 2>&1 || exit 0
+
+main_worktree="$(git worktree list --porcelain 2>/dev/null | awk 'NR == 1 && $1 == "worktree" { print $2 }')"
+[ -n "$main_worktree" ] || exit 0
+
+# Nothing to reap and nothing to say when no worktree has ever been created.
+worktrees="$(git -C "$main_worktree" worktree list --porcelain | awk '$1 == "worktree" { print $2 }' | tail -n +2)"
+[ -n "$worktrees" ] || exit 0
+
+# One network probe up front: offline (or logged out) means every `gh pr list` below would hang or
+# fail one by one.
+gh auth status >/dev/null 2>&1 || exit 0
+
+removed=0
+
+while IFS= read -r worktree; do
+  [ -n "$worktree" ] || continue
+  name="${worktree#"$main_worktree"/.claude/worktrees/}"
+
+  branch="$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  if [ -z "$branch" ]; then
+    say "skip $name: detached HEAD"
+    continue
+  fi
+
+  pr="$(gh pr list --head "$branch" --state all --limit 1 --json number,state,headRefOid 2>/dev/null || true)"
+  count="$(printf '%s' "$pr" | jq 'length' 2>/dev/null || echo 0)"
+  if [ "${count:-0}" -eq 0 ]; then
+    say "skip $branch: no PR yet"
+    continue
+  fi
+
+  state="$(printf '%s' "$pr" | jq -r '.[0].state')"
+  number="$(printf '%s' "$pr" | jq -r '.[0].number')"
+  head_oid="$(printf '%s' "$pr" | jq -r '.[0].headRefOid')"
+
+  if [ "$state" != "MERGED" ]; then
+    say "skip $branch: PR #$number is $state"
+    continue
+  fi
+
+  # Uncommitted work, or files never added, would be lost with the directory. Ignored files
+  # (`.build`, `node_modules`) do not show up here and are meant to go.
+  if [ -n "$(git -C "$worktree" status --porcelain)" ]; then
+    say "skip $branch: PR #$number is merged but the worktree has uncommitted changes"
+    continue
+  fi
+
+  # The commit that was merged is the only thing safe to throw away. A later commit means work
+  # happened after the merge -- possibly a follow-up PR in the making.
+  local_head="$(git -C "$worktree" rev-parse HEAD)"
+  if [ "$local_head" != "$head_oid" ]; then
+    say "skip $branch: PR #$number is merged but HEAD moved past it ($local_head)"
+    continue
+  fi
+
+  if ! git -C "$main_worktree" worktree remove "$worktree" 2>/dev/null; then
+    say "skip $branch: could not remove $worktree"
+    continue
+  fi
+  # `-D`, not `-d`: a squash-merged branch is not an ancestor of main, so `-d` would refuse even
+  # though GitHub says the work landed. The headRefOid check above is what makes this safe.
+  git -C "$main_worktree" branch -D "$branch" >/dev/null 2>&1 || true
+  echo "reaped $branch (PR #$number merged)"
+  removed=$((removed + 1))
+done <<<"$worktrees"
+
+if [ "$removed" -gt 0 ]; then
+  git -C "$main_worktree" fetch --prune --quiet 2>/dev/null || true
+  git -C "$main_worktree" worktree prune
+fi
+
+exit 0

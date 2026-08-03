@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+#MISE description="PR の必須チェックが緑になるまで待つ"
+set -euo pipefail
+
+# The merge gate is the `main` ruleset's three required checks (SwiftLint / Web (typecheck &
+# test) / Build & test), so `--required` is what matters -- any other check going red is not what
+# blocks the merge. `--fail-fast` stops the watch as soon as one of them fails, instead of waiting
+# out the remaining macOS runners.
+#
+# Exits non-zero when a required check fails, so an agent can branch on it. Merging stays a human
+# decision: this task never merges anything.
+#
+#   mise run pr:wait          # the PR for the current branch
+#   mise run pr:wait 25       # a specific PR
+
+exec gh pr checks "$@" --required --watch --fail-fast
