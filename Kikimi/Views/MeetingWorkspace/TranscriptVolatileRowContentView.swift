@@ -13,6 +13,13 @@ import SwiftUI
 /// same "Transcript" tab (`docs/design/06-ui-panels.md` section 6.3).
 struct TranscriptVolatileRowContentView: View {
     let source: AudioSourceKind
+    /// `MeetingWorkspaceViewModel.micConfirmingText`/`systemConfirmingText` for this source: already
+    /// confirmed by streaming, still waiting for its row to come back from the two-pass re-decode.
+    /// Rendered upright and one step brighter than `text`, immediately before it, so the line reads
+    /// as a single sentence whose tail is still settling -- and, more to the point, so the confirmed
+    /// half never leaves the screen during the re-decode (`MeetingWorkspaceViewModel
+    /// .startVolatileTranscriptSubscription(pipeline:)`).
+    var confirmingText: String = ""
     let text: String
 
     var body: some View {
@@ -22,15 +29,20 @@ struct TranscriptVolatileRowContentView: View {
                 .foregroundStyle(.tertiary)
                 .accessibilityLabel(source.accessibilityLabel)
 
-            Text(text)
+            // One `Text` per style, concatenated rather than laid out in an `HStack`: the two halves
+            // are one sentence and must wrap as one, not as two independently-wrapped blocks.
+            (Text(confirmingText)
+                .font(.body)
+                .foregroundStyle(.secondary)
+                + Text(text)
                 .font(.body.italic())
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(.tertiary))
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(source.accessibilityLabel)、書き起こし中: \(text)")
+        .accessibilityLabel("\(source.accessibilityLabel)、書き起こし中: \(confirmingText)\(text)")
     }
 }
 

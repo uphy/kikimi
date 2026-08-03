@@ -44,6 +44,44 @@ struct CompactTickerTests {
         #expect(text == "整形済みテキスト")
     }
 
+    // MARK: - Confirming text (the two-pass re-decode gap)
+
+    @Test("confirming text keeps the ticker forward instead of falling back to the previous row while the re-decode runs")
+    func confirmingTextBeatsThePreviousRow() {
+        let rows = [row("seg_00001", rawText: "ひとつ前の行", state: .refined("ひとつ前の行"))]
+        let text = CompactTicker.text(
+            rows: rows,
+            micVolatileText: "",
+            systemVolatileText: "",
+            micConfirmingText: "確定したが行が未着。"
+        )
+        #expect(text == "確定したが行が未着。")
+    }
+
+    @Test("confirming and volatile text of the same source are shown as one line, confirming first")
+    func confirmingAndVolatileAreConcatenated() {
+        let text = CompactTicker.text(
+            rows: [],
+            micVolatileText: "続きを話している",
+            systemVolatileText: "",
+            micConfirmingText: "確定した文。"
+        )
+        #expect(text == "確定した文。続きを話している")
+    }
+
+    @Test("a system-only confirming text is used when mic has neither half")
+    func systemConfirmingTextUsedWhenMicIsEmpty() {
+        let rows = [row("seg_00001", rawText: "ひとつ前の行", state: .raw)]
+        let text = CompactTicker.text(
+            rows: rows,
+            micVolatileText: "",
+            systemVolatileText: "",
+            micConfirmingText: "",
+            systemConfirmingText: "システム側の確定文。"
+        )
+        #expect(text == "システム側の確定文。")
+    }
+
     // MARK: - Confirmed-row fallback: refined ?? raw
 
     @Test("the last row's refined text is used when non-empty")

@@ -37,4 +37,47 @@ extension MeetingWorkspaceViewModel {
             summaryMarkdown = onDisk
         }
     }
+
+    /// `onAppear()`'s first step (section 6.3 "初期表示"): fills `transcriptRows` from
+    /// `transcript.jsonl`, then folds `refined.jsonl` over it (`docs/design/03-refinement-batch.md`
+    /// §6 -- `refinedText` present -> `.refined`, present but `nil` -> `.refinedFailed`, no matching
+    /// refined row -> stays `.raw`), so a reopened session shows its already-refined rows rather than
+    /// only newly-arriving ones. Either read failing is logged and skipped, never propagated: a
+    /// window that cannot backfill still has to open.
+    ///
+    /// Lives here rather than inline in `onAppear()` for the usual `file_length` reason, and here
+    /// specifically because it is the same kind of "read what is already on disk into the ViewModel"
+    /// step as `hydrateFromSessionHandle()` above.
+    func backfillTranscriptRows() async {
+        do {
+            let segments = try await sessionHandle.readTranscriptSegments()
+            transcriptRows = segments
+                .map {
+                    TranscriptRowViewModel(
+                        id: $0.id,
+                        startMs: $0.startMs,
+                        endMs: $0.endMs,
+                        speaker: $0.speaker,
+                        rawText: $0.text,
+                        state: .raw
+                    )
+                }
+                .sorted { lhs, rhs in
+                    lhs.startMs != rhs.startMs ? lhs.startMs < rhs.startMs : lhs.id < rhs.id
+                }
+        } catch {
+            logger.error(
+                "Failed to backfill transcript segments for session \(self.sessionId, privacy: .public): \(String(describing: error), privacy: .public)"
+            )
+        }
+
+        do {
+            let refinedSegments = try await sessionHandle.readRefinedSegments()
+            transcriptRows = Self.mergeRefinedState(refinedSegments, into: transcriptRows)
+        } catch {
+            logger.error(
+                "Failed to backfill refined segments for session \(self.sessionId, privacy: .public): \(String(describing: error), privacy: .public)"
+            )
+        }
+    }
 }

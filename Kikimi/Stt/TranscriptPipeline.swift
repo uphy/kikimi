@@ -399,13 +399,17 @@ final class TranscriptPipeline: AudioCaptureDelegate {
         // Section 3.6: forward each engine's `volatileTranscripts` into the single merged,
         // source-tagged stream.
         micVolatileForwardingTask = Task { [micEngine, volatileTranscriptsContinuation] in
-            for await text in micEngine.volatileTranscripts {
-                volatileTranscriptsContinuation.yield(SttVolatileTranscript(source: .mic, text: text))
+            for await update in micEngine.volatileTranscripts {
+                volatileTranscriptsContinuation.yield(
+                    SttVolatileTranscript(source: .mic, text: update.text, confirming: update.confirming)
+                )
             }
         }
         systemVolatileForwardingTask = Task { [systemEngine, volatileTranscriptsContinuation] in
-            for await text in systemEngine.volatileTranscripts {
-                volatileTranscriptsContinuation.yield(SttVolatileTranscript(source: .system, text: text))
+            for await update in systemEngine.volatileTranscripts {
+                volatileTranscriptsContinuation.yield(
+                    SttVolatileTranscript(source: .system, text: update.text, confirming: update.confirming)
+                )
             }
         }
         // Forwarding `failures` (for UI/logging) is left to `06-ui-panels.md`'s own subscription; only

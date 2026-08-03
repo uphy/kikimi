@@ -195,6 +195,17 @@ final class MeetingWorkspaceViewModel: ObservableObject {
     @Published var micVolatileText: String = ""
     @Published var systemVolatileText: String = ""
 
+    /// Source-tagged text that has been confirmed by streaming but whose row has not reached
+    /// `transcriptRows` yet (`SttVolatileTranscript.confirming`). The Transcript タブ renders it
+    /// ahead of the volatile text as one continuous line, so nothing disappears during the two-pass
+    /// re-decode + `transcript.jsonl` append that sits between the two events (~1.15s for a 25s
+    /// window, `docs/design/45-qwen3-batch-decode.md`). Cleared by that source's next `liveSegments`
+    /// value, or by `volatileConfirmingExpiry` if the append failed and no row is ever coming.
+    /// Written from `+VolatileTranscripts.swift`/`+RecordingInternals.swift`, same rationale as
+    /// `micVolatileText` above.
+    @Published var micConfirmingText: String = ""
+    @Published var systemConfirmingText: String = ""
+
     /// `internal` (not `private`) so `MeetingWorkspaceViewModel+Summary.swift` (split out for
     /// `file_length`, same rationale as `+Prep.swift`) can read/write through it directly.
     let sessionHandle: SessionHandle
@@ -283,6 +294,12 @@ final class MeetingWorkspaceViewModel: ObservableObject {
     var elapsedTimerTask: Task<Void, Never>?
     var liveSegmentTask: Task<Void, Never>?
     var volatileTranscriptTask: Task<Void, Never>?
+    /// Per-source safety net for `micConfirmingText`/`systemConfirmingText`: a failed
+    /// `appendTranscriptSegment` is logged and swallowed by `TranscriptPipeline.appendOrLog`, so the
+    /// `liveSegments` value that would normally clear the confirming buffer never arrives. Without
+    /// this the stale line would stay on screen for the rest of the recording. Owned by
+    /// `+VolatileTranscripts.swift`.
+    var volatileConfirmingExpiryTasks: [AudioSourceKind: Task<Void, Never>] = [:]
     var recordingSessionIdCancellable: AnyCancellable?
     /// `.kikimiLLMUsageRecorded` subscription (`docs/design/16-llm-usage-stats.md` section 5),
     /// started by `+LLMUsage.swift`'s `startObservingLLMUsage()`.
@@ -488,39 +505,7 @@ final class MeetingWorkspaceViewModel: ObservableObject {
     /// `WindowManager.shared.$recordingSessionId` so this window's `recordingButtonState` reflects
     /// whether some *other* session is currently recording (section 6.1/10.1).
     func onAppear() async {
-        do {
-            let segments = try await sessionHandle.readTranscriptSegments()
-            transcriptRows = segments
-                .map {
-                    TranscriptRowViewModel(
-                        id: $0.id,
-                        startMs: $0.startMs,
-                        endMs: $0.endMs,
-                        speaker: $0.speaker,
-                        rawText: $0.text,
-                        state: .raw
-                    )
-                }
-                .sorted { lhs, rhs in
-                    lhs.startMs != rhs.startMs ? lhs.startMs < rhs.startMs : lhs.id < rhs.id
-                }
-        } catch {
-            logger.error(
-                "Failed to backfill transcript segments for session \(self.sessionId, privacy: .public): \(String(describing: error), privacy: .public)"
-            )
-        }
-
-        // `docs/design/03-refinement-batch.md` §6: a reopened session must show its already-refined
-        // rows immediately, not just newly-arriving ones -- `refinedText` present -> `.refined`,
-        // present but `nil` -> `.refinedFailed`, no matching refined row -> stays `.raw`.
-        do {
-            let refinedSegments = try await sessionHandle.readRefinedSegments()
-            transcriptRows = Self.mergeRefinedState(refinedSegments, into: transcriptRows)
-        } catch {
-            logger.error(
-                "Failed to backfill refined segments for session \(self.sessionId, privacy: .public): \(String(describing: error), privacy: .public)"
-            )
-        }
+        await backfillTranscriptRows()
 
         // Moved ahead of the backfills below (was after): both read `knownVoiceprintSpeakers`
         // synchronously with no later re-run of their own (design 23 §2.2/3.2's `speakerNames`,

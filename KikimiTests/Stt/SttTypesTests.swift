@@ -164,7 +164,7 @@ struct SttModelDownloadProgressTests {
 
 @Suite("SttVolatileTranscript")
 struct SttVolatileTranscriptTests {
-    @Test("equatable compares source and text")
+    @Test("equatable compares source, text and confirming")
     func equatable() {
         let a = SttVolatileTranscript(source: .mic, text: "こんにち")
         let b = SttVolatileTranscript(source: .mic, text: "こんにち")
@@ -176,7 +176,25 @@ struct SttVolatileTranscriptTests {
         let differentText = SttVolatileTranscript(source: .mic, text: "こんにちは")
         #expect(a != differentText)
 
+        let differentConfirming = SttVolatileTranscript(source: .mic, text: "こんにち", confirming: "はい。")
+        #expect(a != differentConfirming)
+
         let empty = SttVolatileTranscript(source: .mic, text: "")
         #expect(empty.text.isEmpty)
+        // Defaulted so every existing construction site keeps meaning "nothing was confirmed here".
+        #expect(empty.confirming.isEmpty)
+    }
+}
+
+@Suite("SttVolatileUpdate")
+struct SttVolatileUpdateTests {
+    @Test("both halves default to empty and compare independently")
+    func equatable() {
+        #expect(SttVolatileUpdate() == SttVolatileUpdate(text: "", confirming: ""))
+
+        let pending = SttVolatileUpdate(text: "こんにち")
+        #expect(pending.confirming.isEmpty)
+        #expect(pending != SttVolatileUpdate(text: "こんにち", confirming: "はい。"))
+        #expect(SttVolatileUpdate(text: "", confirming: "はい。") != SttVolatileUpdate(text: "はい。", confirming: ""))
     }
 }

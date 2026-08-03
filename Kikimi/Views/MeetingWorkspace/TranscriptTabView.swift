@@ -44,6 +44,13 @@ struct TranscriptTabView: View {
     var micVolatileText: String = ""
     var systemVolatileText: String = ""
 
+    /// Streaming-confirmed text whose row has not arrived yet, per source
+    /// (`MeetingWorkspaceViewModel.micConfirmingText`/`systemConfirmingText`). Rendered as the head
+    /// of the same trailing line as the volatile text above, which is what keeps that line on screen
+    /// across the two-pass re-decode instead of blinking out between confirmation and row arrival.
+    var micConfirmingText: String = ""
+    var systemConfirmingText: String = ""
+
     /// Per-row speaker label (`docs/design/13-speaker-diarization.md` section 6.1), keyed by
     /// `TranscriptRowViewModel.id` -- `MeetingWorkspaceViewModel.speakerLabels` verbatim. Only ever
     /// populated for `system` rows (`mic` uses `selfName` below regardless of this dictionary, design
@@ -178,7 +185,7 @@ struct TranscriptTabView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
-                    if rows.isEmpty && micVolatileText.isEmpty && systemVolatileText.isEmpty {
+                    if rows.isEmpty && !hasTrailingLine {
                         emptyPlaceholder
                     } else {
                         // Rows refinement dropped as meaningless (refined_text == "") are hidden
@@ -247,6 +254,12 @@ struct TranscriptTabView: View {
                 scrollToBottomIfPinned(proxy: proxy)
             }
             .onChange(of: systemVolatileText) { _, _ in
+                scrollToBottomIfPinned(proxy: proxy)
+            }
+            .onChange(of: micConfirmingText) { _, _ in
+                scrollToBottomIfPinned(proxy: proxy)
+            }
+            .onChange(of: systemConfirmingText) { _, _ in
                 scrollToBottomIfPinned(proxy: proxy)
             }
             .onChange(of: scrollTarget) { _, newTarget in
@@ -353,15 +366,31 @@ struct TranscriptTabView: View {
     /// The trailing "in-progress" lines (`docs/design/11-streaming-stt.md` section 3.6): at most one
     /// per source, dim + italic, distinct from the "生=薄グレー/整形済=通常色" palette used for
     /// confirmed rows (kikimi.md 10 章) so it reads unambiguously as "not yet a real row".
+    /// `true` while either source has something to show below the confirmed rows -- pending text,
+    /// text awaiting its row, or both. Drives the empty placeholder and the auto-follow guard, which
+    /// both need "is anything at all on screen" rather than "is any row on screen".
+    private var hasTrailingLine: Bool {
+        !micVolatileText.isEmpty || !systemVolatileText.isEmpty
+            || !micConfirmingText.isEmpty || !systemConfirmingText.isEmpty
+    }
+
     @ViewBuilder
     private var volatileRows: some View {
-        if !micVolatileText.isEmpty {
-            TranscriptVolatileRowContentView(source: .mic, text: micVolatileText)
-                .id("TranscriptTabView.volatile.mic")
+        if !micConfirmingText.isEmpty || !micVolatileText.isEmpty {
+            TranscriptVolatileRowContentView(
+                source: .mic,
+                confirmingText: micConfirmingText,
+                text: micVolatileText
+            )
+            .id("TranscriptTabView.volatile.mic")
         }
-        if !systemVolatileText.isEmpty {
-            TranscriptVolatileRowContentView(source: .system, text: systemVolatileText)
-                .id("TranscriptTabView.volatile.system")
+        if !systemConfirmingText.isEmpty || !systemVolatileText.isEmpty {
+            TranscriptVolatileRowContentView(
+                source: .system,
+                confirmingText: systemConfirmingText,
+                text: systemVolatileText
+            )
+            .id("TranscriptTabView.volatile.system")
         }
     }
 
@@ -384,7 +413,7 @@ struct TranscriptTabView: View {
     }
 
     private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool) {
-        guard !rows.isEmpty || !micVolatileText.isEmpty || !systemVolatileText.isEmpty else { return }
+        guard !rows.isEmpty || hasTrailingLine else { return }
         // Held across the scroll so the anchor's own `onDisappear` can't mistake this scroll's
         // relayout for the user scrolling away (see `isAutoScrolling`).
         isAutoScrolling = true
