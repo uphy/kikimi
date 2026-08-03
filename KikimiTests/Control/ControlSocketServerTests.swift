@@ -136,16 +136,36 @@ struct ControlSocketServerTests {
             .appendingPathComponent("kikimi-ctl-\(UUID().uuidString.prefix(8)).sock")
     }
 
+    /// A plain `DispatchQueue`, not `Task.detached`: the work below parks a thread inside `read()`,
+    /// and a detached task would park one of the cooperative pool's instead. The pool is only as
+    /// wide as there are cores (3 on a CI runner), so several of these at once can starve every
+    /// other async operation in the suite -- including the server's own hop to the main actor.
+    private static let clientQueue = DispatchQueue(
+        label: "io.github.uphy.Kikimi.control-socket-test-client",
+        attributes: .concurrent
+    )
+
     /// Off the main actor on purpose: this blocks on `read`, and the server answers *on* the main
     /// actor. Doing both on the same thread would deadlock.
     private static func request(_ command: String, at url: URL) async throws -> String {
-        try await Task.detached { try blockingRequest(command, at: url) }.value
+        try await withCheckedThrowingContinuation { continuation in
+            clientQueue.async {
+                continuation.resume(with: Result { try blockingRequest(command, at: url) })
+            }
+        }
     }
 
     private static func blockingRequest(_ command: String, at url: URL) throws -> String {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw ClientError.socketFailed(errno) }
         defer { close(fd) }
+
+        // Bounded so a server that never answers fails this test in seconds instead of hanging the
+        // whole run: `swift test` has no per-test timeout, so an unbounded `read` here would take
+        // the entire suite with it.
+        var timeout = timeval(tv_sec: 10, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
 
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
