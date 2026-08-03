@@ -353,7 +353,7 @@ struct SttEngineSegmentConfirmationTests {
         // "a。" confirms via route 1's punctuation split; "b" is the punctuation-less remainder MT13
         // consumes into the same window instead of leaving it pending for the next event.
         #expect(windows[0].pieces.map(\.text) == ["a。", "b"])
-        #expect(await firstVolatile == [""])
+        #expect(await firstVolatile == [SttVolatileUpdate(text: "", confirming: "a。b")])
 
         // A later chunk past the idle timeout, with cumulative text unchanged, must not re-confirm
         // "b" a second time -- MT13 already advanced confirmedCharacterCount past it. No further
@@ -462,8 +462,9 @@ struct SttEngineSegmentConfirmationTests {
         #expect(windows.count == 1)
         #expect(windows[0].pieces.map(\.text) == ["ab、", "cd"])
         // The residual is consumed in the same event that confirmed "ab、", so volatile clears to ""
-        // instead of showing "cd" as still-pending text.
-        #expect(await firstVolatile == [""])
+        // instead of showing "cd" as still-pending text -- and both pieces travel in `confirming` so
+        // the UI can keep them on screen until their rows arrive.
+        #expect(await firstVolatile == [SttVolatileUpdate(text: "", confirming: "ab、cd")])
 
         // A later chunk past the idle timeout, with cumulative text unchanged, must not re-confirm
         // "cd" a second time -- MT13 already advanced confirmedCharacterCount past it. No further
@@ -499,7 +500,7 @@ struct SttEngineSegmentConfirmationTests {
         #expect(await backend.resetCallCount == 1)
     }
 
-    @Test("volatile transcripts carry the pending text as it grows, then clear once confirmed")
+    @Test("volatile transcripts carry the pending text as it grows, then hand it over in `confirming` once confirmed")
     func volatileTranscriptsTrackPendingTextThenClear() async throws {
         let backend = FakeSttStreamingBackend(chunkSampleCount: 4, responses: ["こんに", "こんにちは。"])
         let engine = SttEngine(source: .mic, backendFactory: makeSucceedingFactory(backend: backend))
@@ -511,7 +512,32 @@ struct SttEngineSegmentConfirmationTests {
         await engine.feed(buffer: try makeMonoFloatBuffer(frameCount: 4), elapsedAtBufferStart: 1.0)
 
         let received = await volatile
-        #expect(received == ["こんに", ""])
+        // The confirming event empties `text` *and* names what left it, so the UI never has to erase
+        // the line while the confirmed window is still being re-decoded into a row.
+        #expect(received == [
+            SttVolatileUpdate(text: "こんに", confirming: ""),
+            SttVolatileUpdate(text: "", confirming: "こんにちは。"),
+        ])
+    }
+
+    @Test("route 4 (stop): the force-confirmed remainder is named in `confirming`, not silently dropped")
+    func volatileConfirmingCarriesStopRemainder() async throws {
+        var config = SttEngineConfig()
+        config.segmentIdleTimeout = 999
+        config.maxSegmentCharacters = 999
+        let backend = FakeSttStreamingBackend(chunkSampleCount: 4, responses: ["残り"])
+        await backend.setFinishText("残り")
+        let engine = SttEngine(source: .mic, config: config, backendFactory: makeSucceedingFactory(backend: backend))
+        try await engine.prepare()
+
+        await engine.feed(buffer: try makeMonoFloatBuffer(frameCount: 4), elapsedAtBufferStart: 0.0)
+        await engine.stop()
+
+        var updates: [SttVolatileUpdate] = []
+        for await update in engine.volatileTranscripts {
+            updates.append(update)
+        }
+        #expect(updates.last == SttVolatileUpdate(text: "", confirming: "残り"))
     }
 
     @Test("startMs/endMs stay monotonically non-decreasing across a sequence of confirmed segments")

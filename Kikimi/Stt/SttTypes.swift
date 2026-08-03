@@ -163,6 +163,30 @@ struct SttModelDownloadProgress: Sendable, Equatable {
     var fractionCompleted: Double
 }
 
+// MARK: - SttVolatileUpdate
+
+/// One `SttEngine`'s volatile-transcript event (section 3.6). Carries both halves of what a single
+/// `processChunkResult` call did to that engine's pending text, because the UI needs both to show a
+/// continuous line:
+///
+/// - `text` — what is still pending after this event.
+/// - `confirming` — what this event moved *out* of pending into `confirmedWindows`.
+///
+/// Splitting them exists to close the display gap the two-pass re-decode opens
+/// (`docs/design/33-meeting-two-pass-decode.md` MT5): confirmation clears the pending text
+/// immediately, but the confirmed row only reaches the UI after `TranscriptPipeline` has re-decoded
+/// the window (RTF 0.046, i.e. ~1.15s for a 25s window per `docs/design/45-qwen3-batch-decode.md`)
+/// and appended it to `transcript.jsonl`. With only `text` to go on, the UI had no choice but to
+/// erase the line for that whole interval and then re-draw it — the flicker this field removes.
+struct SttVolatileUpdate: Sendable, Equatable {
+    /// The pending (not-yet-confirmed) segment's current full content. Empty means nothing pending.
+    var text: String = ""
+    /// This event's confirmed pieces, concatenated in confirmation order. Empty when the event
+    /// confirmed nothing (the common case: text merely grew). Whitespace-only pieces that
+    /// `confirmSegment` dropped are not represented here — they never become rows either.
+    var confirming: String = ""
+}
+
 // MARK: - SttVolatileTranscript
 
 /// One source's in-progress (unconfirmed) transcript text, replacing the previous
@@ -170,8 +194,13 @@ struct SttModelDownloadProgress: Sendable, Equatable {
 /// pipeline had no true partial/live preview). Streaming has real incremental text, so this now
 /// carries it directly (section 3.2/3.6): each value is the *current full content* of the pending
 /// (not-yet-confirmed) segment for `source`, replacing whatever was shown before. An empty `text`
-/// means "clear" (the previous content was just confirmed into a `SttFinalizedSegment`).
+/// means "nothing pending" — but *not* "erase the line": see `confirming`.
 struct SttVolatileTranscript: Sendable, Equatable {
     var source: AudioSourceKind
     var text: String
+    /// `SttVolatileUpdate.confirming` for this source — text that just left `text` and is now in
+    /// flight toward `liveSegments`. The UI appends it to a per-source "confirming" buffer and
+    /// keeps rendering it until that source's next `liveSegments` value arrives, so the line stays
+    /// on screen across the two-pass re-decode instead of blinking out. See `SttVolatileUpdate`.
+    var confirming: String = ""
 }

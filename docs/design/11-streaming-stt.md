@@ -205,6 +205,26 @@ streaming RNN-T の per-token confidence は SDK から取得できない前提�
 - セグメント確定時に該当ソースの volatile 行をクリアし、確定行として通常描画に切り替える
 - `MeetingWorkspaceViewModel` は `volatileTranscripts` を購読する（既存の `liveSegments` 購読と並列）
 
+**確定行が届くまでのつなぎ（2026-08-03 追記）**
+
+上の「確定時にクリアして確定行に切り替える」をそのまま実装すると、行が数百 ms〜数秒のあいだ画面から
+消える。確定（`SttEngine` が pending をクリアする瞬間）と確定行の到着（`liveSegments`）のあいだに、
+two-pass の再デコードと `transcript.jsonl` への append が挟まるため（`33-meeting-two-pass-decode.md`
+MT5、25 秒窓で約 1.15 秒 = `45-qwen3-batch-decode.md` の RTF 0.046）。消えて、別の文言で戻ってくるので
+表示が揺れる。
+
+このギャップを埋めるため、volatile イベントは pending テキストと**そのイベントで確定に回ったテキスト**の
+両方を運ぶ（`SttVolatileUpdate` / `SttVolatileTranscript.confirming`）。
+
+- `MeetingWorkspaceViewModel` は confirming をソースごとに溜める（`micConfirmingText` /
+  `systemConfirmingText`）。再デコード中に次の窓が確定することがあるので、置換ではなく追記する
+- Transcript タブは `confirming + volatile` を 1 行として描く。confirming 側は立体 + `.secondary`、
+  volatile 側は従来どおりイタリック + `.tertiary`
+- そのソースの `liveSegments` が届いた時点で confirming を捨てる。行の挿入と同じ更新で行うので、
+  二重表示にはならない
+- append 失敗時は `liveSegments` に何も流れない（`TranscriptPipeline.appendOrLog` は握り潰す）ため、
+  30 秒のタイムアウトで捨てる。通常経路では到達しない保険
+
 ### 3.7 モデル準備
 
 `SttModelStore`（カタログ・tar.bz2 ダウンロード・single-flight）は削除し、FluidAudio の自動ダウンロード

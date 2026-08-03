@@ -1453,6 +1453,70 @@ struct MeetingWorkspaceViewModelTests {
         await viewModel.endMeeting()
     }
 
+    @Test("confirmed-but-not-yet-appended text is held in mic/systemConfirmingText until that source's row arrives")
+    func confirmingTextBridgesTheRedecodeGap() async throws {
+        let root = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = makeStore(root: root)
+        let created = try await store.createDraftSession()
+        let handle = try await store.openSession(created.id)
+
+        let capture = FakeAudioCapture()
+        let pipeline = FakeTranscriptPipeline()
+        let viewModel = makeViewModel(handle: handle, store: store, capture: capture, pipeline: pipeline)
+
+        await viewModel.startRecording()
+
+        pipeline.yieldVolatile(SttVolatileTranscript(source: .mic, text: "こんにちは"))
+        try await waitUntil { await viewModel.micVolatileText == "こんにちは" }
+
+        // Confirmation empties the pending text, but the row is still being re-decoded -- the text
+        // has to stay on screen, now as confirming text rather than volatile text.
+        pipeline.yieldVolatile(SttVolatileTranscript(source: .mic, text: "", confirming: "こんにちは。"))
+        try await waitUntil { await viewModel.micConfirmingText == "こんにちは。" }
+        #expect(viewModel.micVolatileText.isEmpty)
+        // Source-tagged: a mic confirmation leaves system's own buffer alone.
+        #expect(viewModel.systemConfirmingText.isEmpty)
+
+        // A second window can confirm while the first is still in flight; both must be shown.
+        pipeline.yieldVolatile(SttVolatileTranscript(source: .mic, text: "", confirming: "よろしく。"))
+        try await waitUntil { await viewModel.micConfirmingText == "こんにちは。よろしく。" }
+
+        // The row's arrival is what releases the buffer -- that text is now a real row.
+        pipeline.yield(Self.segment(id: "seg_00001", startMs: 0))
+        try await waitUntil { await viewModel.micConfirmingText.isEmpty }
+        #expect(viewModel.transcriptRows.map(\.id) == ["seg_00001"])
+
+        await viewModel.endMeeting()
+    }
+
+    @Test("a system row arriving never clears mic's confirming buffer (and vice versa)")
+    func confirmingTextIsClearedPerSource() async throws {
+        let root = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = makeStore(root: root)
+        let created = try await store.createDraftSession()
+        let handle = try await store.openSession(created.id)
+
+        let capture = FakeAudioCapture()
+        let pipeline = FakeTranscriptPipeline()
+        let viewModel = makeViewModel(handle: handle, store: store, capture: capture, pipeline: pipeline)
+
+        await viewModel.startRecording()
+
+        pipeline.yieldVolatile(SttVolatileTranscript(source: .mic, text: "", confirming: "マイクの発話。"))
+        pipeline.yieldVolatile(SttVolatileTranscript(source: .system, text: "", confirming: "システムの発話。"))
+        try await waitUntil { await viewModel.micConfirmingText == "マイクの発話。" }
+        try await waitUntil { await viewModel.systemConfirmingText == "システムの発話。" }
+
+        pipeline.yield(Self.systemSegment(id: "seg_00001", startMs: 0))
+        try await waitUntil { await viewModel.systemConfirmingText.isEmpty }
+        // Mic's own segment hasn't finished re-decoding yet, so its text must still be on screen.
+        #expect(viewModel.micConfirmingText == "マイクの発話。")
+
+        await viewModel.endMeeting()
+    }
+
     @Test("pauseRecording() clears micVolatileText/systemVolatileText even if the pipeline never sent a clear value")
     func pauseRecordingClearsVolatileText() async throws {
         let root = makeTemporaryDirectory()
@@ -1469,11 +1533,17 @@ struct MeetingWorkspaceViewModelTests {
 
         pipeline.yieldVolatile(SttVolatileTranscript(source: .mic, text: "まだ確定していない発話"))
         try await waitUntil { await viewModel.micVolatileText == "まだ確定していない発話" }
+        // Held text is in the same position: there is no pipeline left to deliver the row that would
+        // normally release it, so pausing has to drop it too.
+        pipeline.yieldVolatile(SttVolatileTranscript(source: .system, text: "", confirming: "確定したが行が未着"))
+        try await waitUntil { await viewModel.systemConfirmingText == "確定したが行が未着" }
 
         await viewModel.pauseRecording()
 
         #expect(viewModel.micVolatileText.isEmpty)
         #expect(viewModel.systemVolatileText.isEmpty)
+        #expect(viewModel.micConfirmingText.isEmpty)
+        #expect(viewModel.systemConfirmingText.isEmpty)
     }
 
     // MARK: onAppear() transcript backfill (section 6.3)

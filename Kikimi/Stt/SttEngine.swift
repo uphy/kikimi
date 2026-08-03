@@ -84,8 +84,8 @@ actor SttEngine {
 
     private let confirmedWindowsStream: AsyncStream<SttConfirmedWindow>
     private let confirmedWindowsContinuation: AsyncStream<SttConfirmedWindow>.Continuation
-    private let volatileTranscriptsStream: AsyncStream<String>
-    private let volatileTranscriptsContinuation: AsyncStream<String>.Continuation
+    private let volatileTranscriptsStream: AsyncStream<SttVolatileUpdate>
+    private let volatileTranscriptsContinuation: AsyncStream<SttVolatileUpdate>.Continuation
     private let failuresStream: AsyncStream<SttEngineError>
     private let failuresContinuation: AsyncStream<SttEngineError>.Continuation
 
@@ -125,10 +125,10 @@ actor SttEngine {
         confirmedWindowsStream
     }
 
-    /// The current content of the pending (unconfirmed) segment, replacing whatever was previously
-    /// yielded each time it changes. An empty string means "clear" (section 3.2/3.6). Replaces the
-    /// previous batch-era `previewCleared: AsyncStream<Void>`, which never carried text.
-    nonisolated var volatileTranscripts: AsyncStream<String> {
+    /// The current content of the pending (unconfirmed) segment plus whatever the same event just
+    /// confirmed out of it (section 3.2/3.6, see `SttVolatileUpdate`). Replaces the previous
+    /// batch-era `previewCleared: AsyncStream<Void>`, which never carried text.
+    nonisolated var volatileTranscripts: AsyncStream<SttVolatileUpdate> {
         volatileTranscriptsStream
     }
 
@@ -375,7 +375,12 @@ actor SttEngine {
         if pendingText.isEmpty {
             pendingSegmentStartElapsed = nil
         }
-        volatileTranscriptsContinuation.yield(pendingText)
+        // `confirming` carries this event's confirmed text alongside the (now shorter, often empty)
+        // pending text, so the UI can keep the line on screen while the confirmed window is still
+        // being re-decoded and appended -- see `SttVolatileUpdate`.
+        volatileTranscriptsContinuation.yield(
+            SttVolatileUpdate(text: pendingText, confirming: confirmedPieces.map(\.text).joined())
+        )
 
         finishConfirmationEvent(pieces: confirmedPieces, cutThroughElapsed: pendingSegmentEndElapsed)
 
@@ -487,7 +492,9 @@ actor SttEngine {
         let remaining = Self.computePendingText(cumulativeText: cumulativeText, confirmedCharacterCount: confirmedCharacterCount)
         if !remaining.isEmpty {
             let segment = confirmSegment(text: remaining, startElapsedFallback: lastFeedElapsed)
-            volatileTranscriptsContinuation.yield("")
+            volatileTranscriptsContinuation.yield(
+                SttVolatileUpdate(text: "", confirming: segment?.text ?? "")
+            )
             if let segment {
                 finishConfirmationEvent(pieces: [segment], cutThroughElapsed: lastFeedElapsed)
             }

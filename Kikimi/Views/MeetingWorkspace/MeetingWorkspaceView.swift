@@ -213,6 +213,8 @@ struct MeetingWorkspaceView: View {
             rows: viewModel.transcriptRows,
             micVolatileText: viewModel.micVolatileText,
             systemVolatileText: viewModel.systemVolatileText,
+            micConfirmingText: viewModel.micConfirmingText,
+            systemConfirmingText: viewModel.systemConfirmingText,
             speakerLabels: viewModel.speakerLabels,
             knownSpeakers: viewModel.knownVoiceprintSpeakers,
             selfName: viewModel.appConfig.data.diarization.selfName,

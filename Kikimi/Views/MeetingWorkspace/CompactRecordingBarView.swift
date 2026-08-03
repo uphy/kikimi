@@ -8,13 +8,19 @@ import SwiftUI
 /// `TranscriptRowList` (`Kikimi/ViewModels/TranscriptRowList.swift`) already uses for its own pure
 /// core.
 enum CompactTicker {
-    /// Priority order (§5.3): the in-progress (unconfirmed) volatile text of whichever stream
-    /// currently has one (`micVolatileText` checked first, `systemVolatileText` second -- a
-    /// deterministic tie-break for the rare case both are simultaneously non-empty, since this pure
-    /// function has no timestamp to resolve "which one updated most recently" from), then the last
-    /// confirmed transcript row (`refined ?? raw`, skipping rows refinement dropped as meaningless or
-    /// folded into an earlier row's merge -- `docs/design/03-refinement-batch.md` §15.2.6), then
-    /// `nil` (nothing to show yet; the caller renders a placeholder).
+    /// Priority order (§5.3): the trailing line of whichever stream currently has one -- its
+    /// confirming text (already confirmed, row not back from the two-pass re-decode yet) followed by
+    /// its in-progress volatile text, mic checked first and system second (a deterministic tie-break
+    /// for the rare case both are simultaneously non-empty, since this pure function has no timestamp
+    /// to resolve "which one updated most recently" from) -- then the last confirmed transcript row
+    /// (`refined ?? raw`, skipping rows refinement dropped as meaningless or folded into an earlier
+    /// row's merge -- `docs/design/03-refinement-batch.md` §15.2.6), then `nil` (nothing to show yet;
+    /// the caller renders a placeholder).
+    ///
+    /// Including the confirming text is what stops the ticker from jumping *backwards* to the
+    /// previous row for the ~1.15s (25s window, `docs/design/45-qwen3-batch-decode.md`) between a
+    /// segment confirming and its row arriving -- the compact-bar counterpart of the Transcript タブ's
+    /// own trailing line (`TranscriptVolatileRowContentView`).
     ///
     /// - Parameters:
     ///   - rows: `TranscriptRowViewModel`s in `MeetingWorkspaceViewModel.transcriptRows`' own order
@@ -23,16 +29,23 @@ enum CompactTicker {
     ///   - micVolatileText: `MeetingWorkspaceViewModel.micVolatileText`. Empty means "nothing
     ///     pending" (never started, or just confirmed into `rows`).
     ///   - systemVolatileText: `MeetingWorkspaceViewModel.systemVolatileText`, same convention.
+    ///   - micConfirmingText: `MeetingWorkspaceViewModel.micConfirmingText`. Empty means "no
+    ///     confirmed text is currently in flight toward a row" for that source.
+    ///   - systemConfirmingText: `MeetingWorkspaceViewModel.systemConfirmingText`, same convention.
     static func text(
         rows: [TranscriptRowViewModel],
         micVolatileText: String,
-        systemVolatileText: String
+        systemVolatileText: String,
+        micConfirmingText: String = "",
+        systemConfirmingText: String = ""
     ) -> String? {
-        if !micVolatileText.isEmpty {
-            return micVolatileText
+        let mic = micConfirmingText + micVolatileText
+        if !mic.isEmpty {
+            return mic
         }
-        if !systemVolatileText.isEmpty {
-            return systemVolatileText
+        let system = systemConfirmingText + systemVolatileText
+        if !system.isEmpty {
+            return system
         }
 
         for row in rows.reversed() {
@@ -194,7 +207,9 @@ struct CompactRecordingBarView: View {
         CompactTicker.text(
             rows: viewModel.transcriptRows,
             micVolatileText: viewModel.micVolatileText,
-            systemVolatileText: viewModel.systemVolatileText
+            systemVolatileText: viewModel.systemVolatileText,
+            micConfirmingText: viewModel.micConfirmingText,
+            systemConfirmingText: viewModel.systemConfirmingText
         )
     }
 

@@ -283,6 +283,11 @@ extension MeetingWorkspaceViewModel {
                     state: .raw
                 )
                 self.transcriptRows = TranscriptRowList.inserted(row, into: self.transcriptRows)
+                // The row this source's confirming buffer was standing in for is now on screen, so
+                // drop the buffer in the same update -- rendering both would double the text. Must
+                // stay ahead of the `await`s below: they suspend, and a suspension between the
+                // insert and the clear is exactly the one-frame duplicate this ordering avoids.
+                self.clearConfirmingText(for: segment.speaker)
                 // Section 7.1 (`docs/design/04-summary-updater.md`): only newly-confirmed live
                 // segments count; onAppear()'s backfill never reaches this loop, so it can't
                 // double-count.
