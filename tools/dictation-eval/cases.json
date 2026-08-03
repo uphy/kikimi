@@ -1,0 +1,106 @@
+{
+  "comment": [
+    "Golden set for the dictation refiner's 言い直し (self-correction) handling.",
+    "Every `raw` is a real utterance taken from ~/.local/state/kikimi/dictation/history/,",
+    "with work-internal proper nouns replaced by dummies. `expect` assertions are written as",
+    "substring constraints rather than one expected output string: for a real stumble the ideal",
+    "rewrite is often debatable, but whether the abandoned fragment survived is not.",
+    "",
+    "Assertion kinds:",
+    "  must_not_contain -- substring must be absent from refined_text",
+    "  must_contain     -- substring must be present",
+    "  max_count        -- substring may occur at most N times"
+  ],
+  "cases": [
+    {
+      "id": "restart-from-top",
+      "shape": "頭から言い直す",
+      "source": "history 2026-08-03T02-51-52",
+      "raw": "最近、用語定義がうまくllmによって反映されていないように見えます以下のセッションでは、今のディクテン、以下のディクテーションでは。ダミー用語という文字列を期待しましたが、それが認識されていません。",
+      "must_not_contain": ["今のディクテ"],
+      "must_contain": ["以下のディクテーションでは"],
+      "max_count": {}
+    },
+    {
+      "id": "duplicated-subject",
+      "shape": "主語だけ先に言ってしまう",
+      "source": "history 2026-08-03T02-47-11",
+      "raw": "その後、これらのタスクは検索ツールは全て社内専用で作ったので。これらのタスクは不要になりましたしたがってそのようなコメントを添えてクローズしてください。",
+      "must_not_contain": [],
+      "must_contain": ["不要"],
+      "max_count": { "これらのタスク": 1 }
+    },
+    {
+      "id": "stalled-restart",
+      "shape": "言いかけて何度も仕切り直す",
+      "source": "history 2026-08-03T04-21-24",
+      "raw": "この役割分担については、ここから先、課題、ここから先、共有すべき。決定してこれを共有すべきこととしてこの議事録に追加でメモしておいてください。",
+      "must_not_contain": [],
+      "must_contain": ["議事録"],
+      "max_count": { "ここから先": 1, "共有すべき": 1 }
+    },
+    {
+      "id": "mid-utterance-abort",
+      "shape": "文の途中で切って言い直す",
+      "source": "history 2026-08-03T04-38-11",
+      "raw": "この案件について新しいプロジェクトを作成してタスクとして。直近のサンプルデータ検証を追加してください。え検証作業や本番開発という大きな。単位で大丈夫なのでタスクを追加してスケジュール上それが分かるようにしてください。",
+      "must_not_contain": ["タスクとして。", "大きな。単位"],
+      "must_contain": ["サンプルデータ検証"],
+      "max_count": {}
+    },
+    {
+      "id": "trailing-particle-restart",
+      "shape": "語尾を言いかけて言い直す",
+      "source": "history 2026-08-03T02-46-45",
+      "raw": "社内検索のプロジェクトのタスクについてはすべてアサインを私に変更していくからしてください。",
+      "must_not_contain": ["変更していくから"],
+      "must_contain": ["アサイン"],
+      "max_count": {}
+    },
+    {
+      "id": "marker-based-regression",
+      "shape": "目印あり（従来から通っていた型・退行検知用）",
+      "source": "prompt example shape",
+      "raw": "来週の水曜、いや木曜の打ち合わせの資料をまとめておいてください。",
+      "must_not_contain": ["水曜"],
+      "must_contain": ["木曜"],
+      "max_count": {}
+    },
+    {
+      "id": "keep-intentional-repetition",
+      "shape": "意図的な繰り返し（過剰削除の検知用）",
+      "source": "over-deletion guard",
+      "raw": "同じ資料を何度も何度も確認しましたが、やはり数値が合いません。",
+      "must_not_contain": [],
+      "must_contain": ["何度も何度も"],
+      "max_count": {}
+    },
+    {
+      "id": "keep-enumeration",
+      "shape": "並列の列挙（過剰削除の検知用）",
+      "source": "over-deletion guard",
+      "raw": "バッチとストリーミングとリアルタイムの3つの方式を比較してください。",
+      "must_not_contain": [],
+      "must_contain": ["バッチ", "ストリーミング", "リアルタイム"],
+      "max_count": {}
+    },
+    {
+      "id": "no-restatement-passthrough",
+      "shape": "言い直しなし（不要な書き換えの検知用）",
+      "source": "history 2026-08-03T00-07-28",
+      "raw": "モデルのダウンロード状態と削除は一般タブ側のダウンロード済みモデルに集約しています。",
+      "must_not_contain": [],
+      "must_contain": ["ダウンロード状態", "一般タブ", "集約"],
+      "max_count": {}
+    },
+    {
+      "id": "do-not-answer",
+      "shape": "質問文（応答してしまう退行の検知用）",
+      "source": "design 42 rule",
+      "raw": "この方式についてどう思いますか、意見を聞かせてください。",
+      "must_not_contain": ["私は", "思います。私"],
+      "must_contain": ["どう思いますか"],
+      "max_count": {}
+    }
+  ]
+}

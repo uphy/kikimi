@@ -1,0 +1,31 @@
+- ねこすけ, 猫助 → nekosuke
+- やまだ → yamada
+- デブ環境 → dev環境
+- ステージング環境 → stg環境
+- ピージェイエックス → PJX
+- あくめわーくす, アクメワークス → Acme Works
+- エルエルエム → LLM
+- ピーディエフ → PDF
+- プルリクエスト → Pull Request
+- ワークツリー
+- マイグレーション
+- Feature Flag
+- Entitlement
+- Snowflake
+- Obsidian
+- markdown-it
+- sherpa-onnx
+- ScreenCaptureKit
+- xcodegen
+- SwiftLint
+- ふるさん → furuさん
+- つるさん → tsuruさん
+- ぎじろく → 議事録
+- あんけんがいよう → 案件概要
+- さんぷるでーた → サンプルデータ
+- ぱいぷらいん → パイプライン
+- ぜろこぴー → ゼロコピー
+- でーたきばん → データ基盤
+- いみそう → semantic layer
+- あーるえるえす → RLS
+- えばる → eval

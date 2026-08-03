@@ -9,6 +9,10 @@ excluded:
   # Evaluation probe (tools/asr-eval/README.md). Its own source is linted via the path below;
   # what is excluded here is the DerivedData tree, which holds checked-out dependency sources.
   - tools/asr-eval/qwen3-probe/.dd
+  # Agent worktrees (`isolation: "worktree"`). Each is a full checkout with its own `.build`, so
+  # linting them re-lints the whole repo per worktree plus every vendored dependency source -- the
+  # top-level `.build` entry above only covers the repo root's own build directory.
+  - .claude/worktrees
 
 # Rule customization
 line_length:

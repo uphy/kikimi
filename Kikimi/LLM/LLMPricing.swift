@@ -66,25 +66,32 @@ enum LLMPricing {
     /// OpenAI/Azure models spell out `cache_read` with the provider's published cached-input price
     /// and set `cache_write` equal to `input`: unlike Anthropic, OpenAI/Azure charge no
     /// cache-creation premium (cache writes bill at the normal input rate), and `OpenAIChatBackend`
-    /// never reports `cacheCreationInputTokens` anyway. Prices verified 2026-07 against OpenAI's
-    /// official model pages; Azure Global Standard bills the same per-token rate. Prefix match is
-    /// longest-wins, so dated ids (`gpt-4.1-mini-2025-04-14`) and the specific-over-generic pairs
-    /// (`gpt-4o-mini` over `gpt-4o`, `gpt-5-mini` over `gpt-5`, `gpt-5.4` over `gpt-5`) all resolve
-    /// correctly. Azure deployment-name ids that don't start with a real model id still need a
-    /// `llm.pricing` override.
+    /// never reports `cacheCreationInputTokens` anyway. Prices verified 2026-07 (2026-08 for the
+    /// `gpt-5.6` series) against OpenAI's official model pages; Azure Global Standard bills the same
+    /// per-token rate. Prefix match is longest-wins, so dated ids (`gpt-4.1-mini-2025-04-14`) and the
+    /// specific-over-generic pairs (`gpt-4o-mini` over `gpt-4o`, `gpt-5-mini` over `gpt-5`,
+    /// `gpt-5.6-luna` over `gpt-5.6` over `gpt-5`) all resolve correctly. Azure deployment-name ids
+    /// that don't start with a real model id still need a `llm.pricing` override.
+    ///
+    /// Moonshot (Kimi) models follow the OpenAI convention for the same reason -- they are only ever
+    /// reachable through an `openai`-kind provider (a LiteLLM proxy), where cache creation is neither
+    /// billed separately nor reported.
     static let builtIn: [String: LLMModelPricing] = [
         // Anthropic (kikimi.md 12 章)
         "claude-haiku-4-5": LLMModelPricing(inputUSDPerMTok: 1.00, outputUSDPerMTok: 5.00),
         "claude-sonnet-4-5": LLMModelPricing(inputUSDPerMTok: 3.00, outputUSDPerMTok: 15.00),
         "claude-sonnet-4-6": LLMModelPricing(inputUSDPerMTok: 3.00, outputUSDPerMTok: 15.00),
-        "claude-sonnet-5": LLMModelPricing(inputUSDPerMTok: 3.00, outputUSDPerMTok: 15.00),
+        // Introductory pricing, in effect through 2026-08-31. From 2026-09-01 Sonnet 5 reverts to the
+        // 3.00 / 15.00 of Sonnet 4.5/4.6 -- update this entry (or add a `llm.pricing` override) then.
+        "claude-sonnet-5": LLMModelPricing(inputUSDPerMTok: 2.00, outputUSDPerMTok: 10.00),
         "claude-opus-4-5": LLMModelPricing(inputUSDPerMTok: 5.00, outputUSDPerMTok: 25.00),
         "claude-opus-4-6": LLMModelPricing(inputUSDPerMTok: 5.00, outputUSDPerMTok: 25.00),
         "claude-opus-4-7": LLMModelPricing(inputUSDPerMTok: 5.00, outputUSDPerMTok: 25.00),
         "claude-opus-4-8": LLMModelPricing(inputUSDPerMTok: 5.00, outputUSDPerMTok: 25.00),
+        "claude-opus-5": LLMModelPricing(inputUSDPerMTok: 5.00, outputUSDPerMTok: 25.00),
         "claude-fable-5": LLMModelPricing(inputUSDPerMTok: 10.00, outputUSDPerMTok: 50.00),
 
-        // OpenAI / Azure OpenAI (verified 2026-07; cache_write == input, no cache-creation premium)
+        // OpenAI / Azure OpenAI (verified 2026-07/2026-08; cache_write == input, no cache-creation premium)
         "gpt-4.1-mini": LLMModelPricing(inputUSDPerMTok: 0.40, outputUSDPerMTok: 1.60, cacheReadUSDPerMTok: 0.10, cacheWriteUSDPerMTok: 0.40),
         "gpt-4.1-nano": LLMModelPricing(inputUSDPerMTok: 0.10, outputUSDPerMTok: 0.40, cacheReadUSDPerMTok: 0.025, cacheWriteUSDPerMTok: 0.10),
         "gpt-4.1": LLMModelPricing(inputUSDPerMTok: 2.00, outputUSDPerMTok: 8.00, cacheReadUSDPerMTok: 0.50, cacheWriteUSDPerMTok: 2.00),
@@ -93,13 +100,26 @@ enum LLMPricing {
         "o4-mini": LLMModelPricing(inputUSDPerMTok: 1.10, outputUSDPerMTok: 4.40, cacheReadUSDPerMTok: 0.275, cacheWriteUSDPerMTok: 1.10),
         "o3-mini": LLMModelPricing(inputUSDPerMTok: 1.10, outputUSDPerMTok: 4.40, cacheReadUSDPerMTok: 0.55, cacheWriteUSDPerMTok: 1.10),
         "o3": LLMModelPricing(inputUSDPerMTok: 2.00, outputUSDPerMTok: 8.00, cacheReadUSDPerMTok: 0.50, cacheWriteUSDPerMTok: 2.00),
+        "gpt-5.6-luna": LLMModelPricing(inputUSDPerMTok: 0.20, outputUSDPerMTok: 1.20, cacheReadUSDPerMTok: 0.02, cacheWriteUSDPerMTok: 0.20),
+        "gpt-5.6-sol": LLMModelPricing(inputUSDPerMTok: 5.00, outputUSDPerMTok: 30.00, cacheReadUSDPerMTok: 0.50, cacheWriteUSDPerMTok: 5.00),
+        "gpt-5.6-terra": LLMModelPricing(inputUSDPerMTok: 2.00, outputUSDPerMTok: 12.00, cacheReadUSDPerMTok: 0.20, cacheWriteUSDPerMTok: 2.00),
+        // Family fallback for any other `gpt-5.6-*` id: same rate as the top-tier `sol` variant, so an
+        // unrecognized variant is over-estimated rather than silently dropped as unpriced.
+        "gpt-5.6": LLMModelPricing(inputUSDPerMTok: 5.00, outputUSDPerMTok: 30.00, cacheReadUSDPerMTok: 0.50, cacheWriteUSDPerMTok: 5.00),
         "gpt-5.5": LLMModelPricing(inputUSDPerMTok: 5.00, outputUSDPerMTok: 30.00, cacheReadUSDPerMTok: 0.50, cacheWriteUSDPerMTok: 5.00),
         "gpt-5.4-mini": LLMModelPricing(inputUSDPerMTok: 0.75, outputUSDPerMTok: 4.50, cacheReadUSDPerMTok: 0.075, cacheWriteUSDPerMTok: 0.75),
         "gpt-5.4-nano": LLMModelPricing(inputUSDPerMTok: 0.20, outputUSDPerMTok: 1.25, cacheReadUSDPerMTok: 0.02, cacheWriteUSDPerMTok: 0.20),
         "gpt-5.4": LLMModelPricing(inputUSDPerMTok: 2.50, outputUSDPerMTok: 15.00, cacheReadUSDPerMTok: 0.25, cacheWriteUSDPerMTok: 2.50),
         "gpt-5-mini": LLMModelPricing(inputUSDPerMTok: 0.25, outputUSDPerMTok: 2.00, cacheReadUSDPerMTok: 0.025, cacheWriteUSDPerMTok: 0.25),
         "gpt-5-nano": LLMModelPricing(inputUSDPerMTok: 0.05, outputUSDPerMTok: 0.40, cacheReadUSDPerMTok: 0.005, cacheWriteUSDPerMTok: 0.05),
-        "gpt-5": LLMModelPricing(inputUSDPerMTok: 1.25, outputUSDPerMTok: 10.00, cacheReadUSDPerMTok: 0.125, cacheWriteUSDPerMTok: 1.25)
+        "gpt-5": LLMModelPricing(inputUSDPerMTok: 1.25, outputUSDPerMTok: 10.00, cacheReadUSDPerMTok: 0.125, cacheWriteUSDPerMTok: 1.25),
+
+        // Moonshot / Kimi (api.moonshot.ai USD rates, verified 2026-08). `cache_read` is Moonshot's
+        // published cache-hit input price; automatic context caching has no creation charge, so
+        // `cache_write` mirrors `input` like the OpenAI entries above. `kimi-k2.6` also prices the
+        // `-preview` id by prefix.
+        "kimi-k2.5": LLMModelPricing(inputUSDPerMTok: 0.60, outputUSDPerMTok: 3.00, cacheReadUSDPerMTok: 0.10, cacheWriteUSDPerMTok: 0.60),
+        "kimi-k2.6": LLMModelPricing(inputUSDPerMTok: 0.95, outputUSDPerMTok: 4.00, cacheReadUSDPerMTok: 0.16, cacheWriteUSDPerMTok: 0.95)
     ]
 
     /// Prefix-match, longest-match-wins resolution: `configPricing` first, `builtIn` second. `nil`

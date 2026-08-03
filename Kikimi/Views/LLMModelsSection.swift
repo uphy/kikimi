@@ -159,9 +159,12 @@ struct LLMModelsSection: View {
                     modelNameField(for: selection)
                     Picker("Effort", selection: effortBinding(selection)) {
                         Text("なし").tag("")
+                        Text("none").tag("none")
+                        Text("minimal").tag("minimal")
                         Text("low").tag("low")
                         Text("medium").tag("medium")
                         Text("high").tag("high")
+                        Text("xhigh").tag("xhigh")
                     }
                     SettingsIntField(
                         label: "Timeout", unit: "秒", value: timeoutBinding(selection), range: 0...1_800, step: 30

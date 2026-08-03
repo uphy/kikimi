@@ -26,6 +26,12 @@ Kikimi.xcodeproj/
 __pycache__/
 *.pyc
 
+# LLVM coverage profile dropped in the repo root by `swift test`
+*.profraw
+
+# Agent worktrees (`isolation: "worktree"`) -- real git worktrees, never part of this checkout
+.claude/worktrees/
+
 # Built by `mise run build:web` from web/ (docs/design/39-webview-markdown.md §9)
 Kikimi/Resources/editor/
 web/node_modules/
