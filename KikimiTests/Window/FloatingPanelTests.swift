@@ -93,3 +93,53 @@ struct FloatingPanelTests {
         #expect(second.level == .floating)
     }
 }
+
+// MARK: - HiddenTestMode
+
+/// Regression coverage for the probe in `HiddenTestMode` (`Kikimi/Window/FloatingPanel.swift`), the
+/// single thing standing between a test run and real panels appearing over the user's work.
+@Suite("HiddenTestMode")
+struct HiddenTestModeTests {
+    /// The one that actually matters, and the one whose absence let the bug through: whatever runner
+    /// executes this suite must be recognized as a test process. Asserted against the *live*
+    /// `ProcessInfo`, not injected values, so it keeps holding for runners that do not exist yet --
+    /// and it fails under a bare `swift test` if the probe ever goes back to depending on a framework
+    /// (XCTest) that a swift-testing-only bundle never loads.
+    @Test("the process running this suite is recognized as a test runner")
+    func thisProcessIsRecognized() {
+        #expect(HiddenTestMode.isTestRunner(
+            processName: ProcessInfo.processInfo.processName,
+            arguments: ProcessInfo.processInfo.arguments
+        ))
+    }
+
+    @Test("the swift-testing helper is recognized by process name")
+    func recognizesSwiftPMTestingHelper() {
+        #expect(HiddenTestMode.isTestRunner(processName: "swiftpm-testing-helper", arguments: []))
+    }
+
+    @Test("the XCTest runner is recognized by process name")
+    func recognizesXCTestRunner() {
+        #expect(HiddenTestMode.isTestRunner(processName: "xctest", arguments: []))
+    }
+
+    @Test("an .xctest bundle on the command line is recognized, whatever the runner is called")
+    func recognizesXCTestBundleArgument() {
+        #expect(HiddenTestMode.isTestRunner(
+            processName: "some-future-runner",
+            arguments: ["/usr/bin/some-future-runner", "--test-bundle-path", "/tmp/KikimiPackageTests.xctest"]
+        ))
+        #expect(HiddenTestMode.isTestRunner(
+            processName: "some-future-runner",
+            arguments: ["/tmp/KikimiPackageTests.xctest/Contents/MacOS/KikimiPackageTests"]
+        ))
+    }
+
+    @Test("the shipped app is not mistaken for a test runner")
+    func doesNotMisfireOnTheApp() {
+        #expect(!HiddenTestMode.isTestRunner(
+            processName: "Kikimi",
+            arguments: ["/Users/someone/Applications/Kikimi.app/Contents/MacOS/Kikimi"]
+        ))
+    }
+}
