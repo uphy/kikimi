@@ -63,6 +63,11 @@ struct RenameSpeakerPopoverView: View {
 /// more than one, i.e. a mixed row, so the fields can be told apart), a known-speaker picker (design
 /// section 4.4 bullet 2, "既存話者を選択"), a free-text draft field (bullet 1, "新しい名前を入力"), and
 /// apply/clear.
+///
+/// The draft field is a `SpeakerNameSuggestField`
+/// (`docs/design/48-speaker-rename-autocomplete.md`), so typing a few characters narrows the known
+/// speakers inline and ↑↓/Enter picks one -- the picker `Menu` below stays for the unfiltered,
+/// voice-similarity-ordered full list (design 48 section 2.3).
 private struct SlotRenameFieldView: View {
     let target: RenameableSlot
     let knownSpeakers: [VoiceprintSpeaker]
@@ -86,25 +91,23 @@ private struct SlotRenameFieldView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                if showsTitle {
-                    Text(target.title)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 72, alignment: .leading)
-                        .lineLimit(1)
-                        .help(target.title)
+            SpeakerNameSuggestField(
+                draft: $draft,
+                placeholder: "名前を入力",
+                title: showsTitle ? target.title : nil,
+                knownSpeakers: knownSpeakers,
+                slotEmbedding: target.embedding,
+                identifierPrefix: "rename-slot-\(target.slot)",
+                onSubmit: { submission in onSubmitSlot(target.slot, submission) },
+                trailing: {
+                    Button("適用", action: applyNewName)
+                        .disabled(trimmedDraft == nil)
+                    Button("解除") {
+                        onSubmitSlot(target.slot, nil)
+                    }
+                    .disabled(target.currentName == nil)
                 }
-                TextField("名前を入力", text: $draft)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit(applyNewName)
-                Button("適用", action: applyNewName)
-                    .disabled(trimmedDraft == nil)
-                Button("解除") {
-                    onSubmitSlot(target.slot, nil)
-                }
-                .disabled(target.currentName == nil)
-            }
+            )
             if !knownSpeakers.isEmpty {
                 knownSpeakerPicker
             }
@@ -141,7 +144,9 @@ private struct SlotRenameFieldView: View {
 /// (`docs/design/20-voiceprint-misassignment-mitigation.md` section 5.2): picking a speaker submits
 /// `.existingSpeaker` directly (bypassing normalization, same as the slot-wide picker), while the
 /// free-text field always submits `.newName` and lets the ViewModel normalize it
-/// (`MeetingWorkspaceViewModel.overrideSegmentSpeaker(segmentId:submission:)`).
+/// (`MeetingWorkspaceViewModel.overrideSegmentSpeaker(segmentId:submission:)`). Its inline suggestion
+/// list (`SpeakerNameSuggestField`, `docs/design/48-speaker-rename-autocomplete.md`) spans both: a
+/// suggested speaker submits `.existingSpeaker`, the trailing "新しい名前で登録" row submits `.newName`.
 private struct SegmentOverrideFieldView: View {
     let isSegmentOverride: Bool
     let knownSpeakers: [VoiceprintSpeaker]
@@ -177,17 +182,23 @@ private struct SegmentOverrideFieldView: View {
             Text("この発言だけ")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            HStack(spacing: 6) {
-                TextField("名前を入力", text: $draft)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit(apply)
-                Button("適用", action: apply)
-                    .disabled(trimmedDraft == nil)
-                Button("解除") {
-                    onSubmit(nil)
+            SpeakerNameSuggestField(
+                draft: $draft,
+                placeholder: "名前を入力",
+                title: nil,
+                knownSpeakers: knownSpeakers,
+                slotEmbedding: primarySlotEmbedding,
+                identifierPrefix: "rename-segment",
+                onSubmit: { submission in onSubmit(submission) },
+                trailing: {
+                    Button("適用", action: apply)
+                        .disabled(trimmedDraft == nil)
+                    Button("解除") {
+                        onSubmit(nil)
+                    }
+                    .disabled(!isSegmentOverride)
                 }
-                .disabled(!isSegmentOverride)
-            }
+            )
             if !knownSpeakers.isEmpty {
                 knownSpeakerPicker
             }
