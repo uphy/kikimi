@@ -81,6 +81,7 @@ extension MeetingWorkspaceViewModel {
         engineConfig.segmentIdleTimeout = sttConfig.segmentIdleTimeout
         engineConfig.maxSegmentCharacters = sttConfig.maxSegmentCharacters
         engineConfig.twoPassDecode = sttConfig.twoPassDecode
+        engineConfig.batchModel = sttConfig.batchModel
         return TranscriptPipeline(sessionHandle: sessionHandle, startMsOffset: startMsOffset, config: engineConfig)
     }
 

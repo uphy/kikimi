@@ -1183,6 +1183,107 @@ struct AppConfigTests {
         #expect(appConfig.data.stt.maxSegmentCharacters == SttConfig.default.maxSegmentCharacters)
     }
 
+    // MARK: - DictationConfig.batchModel (`docs/design/45-qwen3-batch-decode.md` §6.1)
+
+    @Test("dictation without batch_model keeps parakeet, so an existing setup does not get slower")
+    func missingDictationBatchModelKeepsParakeet() throws {
+        let dir = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let yaml = """
+        dictation:
+          enabled: true
+        """
+        try yaml.write(to: fileURL(in: dir), atomically: true, encoding: .utf8)
+
+        let appConfig = makeAppConfig(in: dir)
+        #expect(!appConfig.loadFailed)
+        #expect(appConfig.data.dictation.batchModel == SttConfig.parakeetBatchModel)
+    }
+
+    @Test("dictation.batch_model accepts the qwen3 variants and rejects anything else")
+    func dictationBatchModelValidation() throws {
+        for model in DictationConfig.knownBatchModels {
+            let dir = makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let yaml = """
+            dictation:
+              batch_model: \(model)
+            """
+            try yaml.write(to: fileURL(in: dir), atomically: true, encoding: .utf8)
+            #expect(makeAppConfig(in: dir).data.dictation.batchModel == model)
+        }
+
+        let dir = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let yaml = """
+        dictation:
+          batch_model: whisper
+          refine_timeout_ms: 5000
+        """
+        try yaml.write(to: fileURL(in: dir), atomically: true, encoding: .utf8)
+        let appConfig = makeAppConfig(in: dir)
+        // The rest of the section must survive an unrecognized model.
+        #expect(appConfig.data.dictation.batchModel == SttConfig.parakeetBatchModel)
+        #expect(appConfig.data.dictation.refineTimeoutMs == 5_000)
+    }
+
+    // MARK: - SttConfig.batchModel (`docs/design/45-qwen3-batch-decode.md` Q4)
+
+    @Test("a stt: section without batch_model falls back to qwen3-1.7b")
+    func missingBatchModelFallsBackToDefault() throws {
+        let dir = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let yaml = """
+        stt:
+          chunk_ms: 1120
+        """
+        try yaml.write(to: fileURL(in: dir), atomically: true, encoding: .utf8)
+
+        let appConfig = makeAppConfig(in: dir)
+        #expect(!appConfig.loadFailed)
+        #expect(appConfig.data.stt.batchModel == Qwen3Variant.large.rawValue)
+    }
+
+    @Test("every known batch_model value decodes verbatim, including the parakeet escape hatch")
+    func knownBatchModelsDecodeVerbatim() throws {
+        for model in Qwen3Variant.allCases.map(\.rawValue) + [SttConfig.parakeetBatchModel] {
+            let dir = makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: dir) }
+
+            let yaml = """
+            stt:
+              batch_model: \(model)
+            """
+            try yaml.write(to: fileURL(in: dir), atomically: true, encoding: .utf8)
+
+            let appConfig = makeAppConfig(in: dir)
+            #expect(!appConfig.loadFailed)
+            #expect(appConfig.data.stt.batchModel == model)
+        }
+    }
+
+    @Test("an unknown batch_model falls back to the default rather than failing the whole decode")
+    func unknownBatchModelFallsBackToDefault() throws {
+        let dir = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let yaml = """
+        stt:
+          batch_model: whisper-large-v3
+          chunk_ms: 1120
+        """
+        try yaml.write(to: fileURL(in: dir), atomically: true, encoding: .utf8)
+
+        let appConfig = makeAppConfig(in: dir)
+        // The rest of the section must survive: an unrecognized model is a typo, not a reason to
+        // discard the user's other stt settings.
+        #expect(!appConfig.loadFailed)
+        #expect(appConfig.data.stt.batchModel == Qwen3Variant.large.rawValue)
+        #expect(appConfig.data.stt.chunkMs == 1_120)
+    }
+
     // MARK: - SttConfig.twoPassDecode (`docs/design/33-meeting-two-pass-decode.md` §4/MT10)
 
     @Test("a stt: section without two_pass_decode falls back to true (backward compatible, MT10)")

@@ -17,6 +17,7 @@ import SwiftUI
 /// tab (`GlossarySettingsTab`, `docs/design/28-glossary.md` §4).
 struct GeneralSettingsTab: View {
     @ObservedObject private var appConfig = AppConfig.shared
+    @StateObject private var downloadModel = BatchModelDownloadViewModel()
 
     var body: some View {
         Form {
@@ -46,8 +47,11 @@ struct GeneralSettingsTab: View {
                     Toggle("高精度再認識（二段デコード）", isOn: appConfig.binding(\.stt.twoPassDecode))
                         .help(
                             "セグメント確定時に該当区間を高精度モデルで再認識します（進行中の表示は従来どおり）。"
-                                + "初回はモデルのダウンロードが入ります。オフにすると次の録音から無効になります"
+                                + "オフにすると次の録音から無効になります"
                         )
+                    if appConfig.data.stt.twoPassDecode {
+                        BatchModelSection(downloadModel: downloadModel)
+                    }
                 }
             }
             Section("話者分離") {

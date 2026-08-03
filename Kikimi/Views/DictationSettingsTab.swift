@@ -54,7 +54,23 @@ struct DictationSettingsTab: View {
                 // block, independent of `refine`). Applies at runtime via `DictationController`'s
                 // `(enabled, twoPassDecode)` config subscription -- no restart needed.
                 Toggle("発話全体を高精度モデルで再認識する", isOn: twoPassDecodeBinding)
-                    .help("発話終了後に発話全体を高精度モデルで再認識して確定します（ライブ表示は従来どおり）。初回はモデルのダウンロードが入ります。オフにするとモデルのメモリを解放します")
+                    .help("発話終了後に発話全体を高精度モデルで再認識して確定します（ライブ表示は従来どおり）。オフにするとモデルのメモリを解放します")
+
+                if appConfig.data.dictation.twoPassDecode {
+                    // Its own picker rather than following `stt.batch_model`: the latency budgets
+                    // differ. A meeting absorbs an extra second per confirmed window; here it is
+                    // the wait between releasing the key and the text appearing.
+                    Picker("再認識モデル", selection: batchModelBinding) {
+                        Text("Parakeet 日本語（高速・既定）").tag(SttConfig.parakeetBatchModel)
+                        Text("Qwen3-ASR 0.6B").tag(Qwen3Variant.small.rawValue)
+                        Text("Qwen3-ASR 1.7B（高精度）").tag(Qwen3Variant.large.rawValue)
+                    }
+                    .help(
+                        "Qwen3 は語の取りこぼしが少なく英語の固有名詞も原語で出しますが、"
+                            + "キーを離してから挿入されるまでが 10 秒の発話で 0.1〜0.5 秒ほど延びます。"
+                            + "モデルのダウンロードは一般タブから行えます"
+                    )
+                }
 
                 if !dictationController.isAccessibilityTrusted {
                     accessibilityHint
@@ -195,6 +211,13 @@ struct DictationSettingsTab: View {
         Binding(
             get: { appConfig.data.dictation.twoPassDecode },
             set: { newValue in appConfig.update { $0.dictation.twoPassDecode = newValue } }
+        )
+    }
+
+    private var batchModelBinding: Binding<String> {
+        Binding(
+            get: { appConfig.data.dictation.batchModel },
+            set: { newValue in appConfig.update { $0.dictation.batchModel = newValue } }
         )
     }
 

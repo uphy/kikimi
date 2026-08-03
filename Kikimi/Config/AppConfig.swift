@@ -38,6 +38,16 @@ struct SttConfig: Codable, Equatable, Sendable {
     /// the user cannot notice, so an opt-in default would leave it unfixed. `false` restores the
     /// pre-design-33 streaming-only confirmation path unchanged (MT9/MT10).
     var twoPassDecode: Bool
+    /// Which model performs that batch re-decode (`docs/design/45-qwen3-batch-decode.md` Q4).
+    /// `"qwen3-1.7b"` (default) / `"qwen3-0.6b"` run Qwen3-ASR on MLX; `"parakeet-ja"` keeps the
+    /// pre-design-45 FluidAudio path. Parakeet is retained as an escape hatch, not as a legacy
+    /// leftover: it is the only option that works without the Xcode/Metal build, and it is one
+    /// config line away if Qwen3 misbehaves on some recording.
+    ///
+    /// Stored as a raw `String` rather than `Qwen3Variant?` because the set spans two different
+    /// engines; `TranscriptPipeline.resolveBatchModel` maps it, warning and falling back to the
+    /// default on an unknown value (the same style as `engine`/`chunk_ms` above).
+    var batchModel: String
 
     enum CodingKeys: String, CodingKey {
         case engine
@@ -46,7 +56,12 @@ struct SttConfig: Codable, Equatable, Sendable {
         case segmentIdleTimeout = "segment_idle_timeout"
         case maxSegmentCharacters = "max_segment_characters"
         case twoPassDecode = "two_pass_decode"
+        case batchModel = "batch_model"
     }
+
+    /// Accepted `batch_model` values. `parakeet-ja` resolves to the BCP-47 rule in
+    /// `BatchAsrDecoder.resolveModelVersion`, so it still picks `.tdtJa` vs `.v3` by language.
+    static let parakeetBatchModel = "parakeet-ja"
 
     /// The exact defaults documented in design section 3.9's `config.yaml` sample. `segmentIdleTimeout`/
     /// `maxSegmentCharacters` intentionally match `SttEngineConfig`'s own struct-literal defaults
@@ -57,7 +72,8 @@ struct SttConfig: Codable, Equatable, Sendable {
         chunkMs: 2_240,
         segmentIdleTimeout: 2.0,
         maxSegmentCharacters: 120,
-        twoPassDecode: true
+        twoPassDecode: true,
+        batchModel: Qwen3Variant.large.rawValue
     )
 
     init(
@@ -66,7 +82,8 @@ struct SttConfig: Codable, Equatable, Sendable {
         chunkMs: Int,
         segmentIdleTimeout: TimeInterval,
         maxSegmentCharacters: Int,
-        twoPassDecode: Bool = true
+        twoPassDecode: Bool = true,
+        batchModel: String = Qwen3Variant.large.rawValue
     ) {
         self.engine = engine
         self.language = language
@@ -74,6 +91,7 @@ struct SttConfig: Codable, Equatable, Sendable {
         self.segmentIdleTimeout = segmentIdleTimeout
         self.maxSegmentCharacters = maxSegmentCharacters
         self.twoPassDecode = twoPassDecode
+        self.batchModel = batchModel
     }
 
     private static let logger = Logger(subsystem: "io.github.uphy.Kikimi", category: "SttConfig")
@@ -153,6 +171,22 @@ struct SttConfig: Codable, Equatable, Sendable {
         }
 
         twoPassDecode = try container.decodeIfPresent(Bool.self, forKey: .twoPassDecode) ?? Self.default.twoPassDecode
+
+        let decodedBatchModel = try container.decodeIfPresent(String.self, forKey: .batchModel)
+            ?? Self.default.batchModel
+        let knownBatchModels = Qwen3Variant.allCases.map(\.rawValue) + [Self.parakeetBatchModel]
+        if knownBatchModels.contains(decodedBatchModel) {
+            batchModel = decodedBatchModel
+        } else {
+            Self.logger.warning(
+                """
+                stt.batch_model=\(decodedBatchModel, privacy: .public) is not one of \
+                \(knownBatchModels, privacy: .public); falling back to \
+                \(Self.default.batchModel, privacy: .public)
+                """
+            )
+            batchModel = Self.default.batchModel
+        }
     }
 }
 

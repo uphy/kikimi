@@ -6,4 +6,19 @@ set -euo pipefail
 # `KIKIMI_TEST_HIDDEN=1`: the window suites order real `NSPanel`s in, which without this flashes
 # panels over whatever the user is doing (`FloatingPanel.isUnobtrusive`). This machine is also used
 # for real work, so a test run has to stay invisible -- the same reason `kikimi-verify` sets it.
+
+# Still `swift test`, even though the app itself is now built with xcodebuild
+# (`.mise/tasks/build/swift`). Two reasons:
+#
+#   1. `xcodebuild test` runs the suite inside the Kikimi.app test host, and the window server
+#      treats an NSPanel differently there -- 4 of the `MeetingWorkspaceWindowController` tests
+#      that assert exact frames fail under it and pass here. That is an environment difference,
+#      not a regression, and gating more tests on it would cost real coverage.
+#   2. Only code that actually dispatches a Metal kernel needs the Xcode build. Tests that merely
+#      link MLX are fine; the ones that call into it are env-gated (`KIKIMI_ASR_EVAL_DIR`,
+#      `KIKIMI_REPRO_WAV`) and are run explicitly via xcodebuild -- see tools/asr-eval/README.md.
+# shellcheck source=../_developer_dir.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../_developer_dir.sh"
+resolve_developer_dir
+
 KIKIMI_TEST_HIDDEN=1 swift test

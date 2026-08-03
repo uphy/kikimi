@@ -63,11 +63,13 @@ final class TranscriptPipeline: AudioCaptureDelegate {
     /// The resolved STT language (`SttEngineConfig.language`), used to pick the batch decoder's
     /// `AsrModelVersion` (MT1) once `prepare()` decides to acquire one.
     private let language: String
+    /// `stt.batch_model` snapshot (design 45 Q4), forwarded to `batchDecoderAcquire`.
+    private let batchModel: String
     /// Forwarded verbatim to `SttWindowRedecode.resplit(...)` (section 3.4/MT3).
     private let maxSegmentCharacters: Int
     /// Injectable acquire function for the shared two-pass batch decoder (MT7/MT8's default pool
     /// path; tests substitute a fake that never touches FluidAudio, section 3.1's seam).
-    private let batchDecoderAcquire: @Sendable (String) async throws -> AcquiredBatchDecoder
+    private let batchDecoderAcquire: @Sendable (String, String) async throws -> AcquiredBatchDecoder
     /// Set once `prepare()`'s acquire `Task` (below) resolves successfully; read by both forwarding
     /// `Task`s at redecode time (MT5). `OSAllocatedUnfairLock`-protected like `onDegradeStorage`
     /// below -- written from the acquire `Task`, read from two other `Task`s, no closure-box needed
@@ -263,12 +265,13 @@ final class TranscriptPipeline: AudioCaptureDelegate {
         startMsOffset: Int = 0,
         config: SttEngineConfig = SttEngineConfig(),
         backendFactory: @escaping SttEngine.BackendFactory = FluidAudioSttBackendFactory.makeBackend,
-        batchDecoderAcquire: @escaping @Sendable (String) async throws -> AcquiredBatchDecoder = TranscriptPipeline.defaultBatchDecoderAcquire
+        batchDecoderAcquire: @escaping @Sendable (String, String) async throws -> AcquiredBatchDecoder = TranscriptPipeline.defaultBatchDecoderAcquire
     ) {
         self.sessionHandle = sessionHandle
         self.startMsOffset = startMsOffset
         self.twoPassDecode = config.twoPassDecode
         self.language = config.language
+        self.batchModel = config.batchModel
         self.maxSegmentCharacters = config.maxSegmentCharacters
         self.batchDecoderAcquire = batchDecoderAcquire
         self.micEngine = SttEngine(source: .mic, config: config, backendFactory: backendFactory)
@@ -313,26 +316,13 @@ final class TranscriptPipeline: AudioCaptureDelegate {
     /// text (`redecodeOrFallback`'s `decoder == nil` guard); `stopAndDrain()` cancels and awaits this
     /// same `Task` to release the lease exactly once if one was ever obtained (MT8).
     private func startBatchDecoderAcquire() {
-        let acquire = batchDecoderAcquire
-        let language = language
-        let task = Task<AcquiredBatchDecoder, Error> { [weak self, logger] in
-            do {
-                let acquired = try await acquire(language)
-                self?.batchDecoderStorage.withLock { $0 = acquired }
-                return acquired
-            } catch is CancellationError {
-                // Expected when the recording stops before the model finished loading (MT8) -- not a
-                // failure worth an `.error` log, just this recording's session falling back to
-                // streaming text for whatever windows were still pending.
-                logger.debug("two-pass batch decoder acquire cancelled before completing; falling back to streaming text for this recording")
-                throw CancellationError()
-            } catch {
-                logger.error(
-                    "two-pass batch decoder acquire failed; falling back to streaming text for this recording: \(String(describing: error), privacy: .public)"
-                )
-                throw error
-            }
-        }
+        let task = Self.makeBatchDecoderAcquireTask(
+            acquire: batchDecoderAcquire,
+            language: language,
+            batchModel: batchModel,
+            storage: batchDecoderStorage,
+            logger: logger
+        )
         batchDecoderAcquireTaskStorage.withLock { $0 = task }
     }
 

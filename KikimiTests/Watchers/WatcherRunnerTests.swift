@@ -18,6 +18,13 @@ private actor FakeWatcherLLM: LLMCompleting {
     /// elapsed time under `swift test`'s full-suite parallel load.
     private(set) var maxConcurrentCalls = 0
     private var activeCalls = 0
+    /// When set, a call blocks inside `resolveData` until this many calls are in flight, then all
+    /// of them are released together. Turns "did they overlap?" from a race against wall-clock
+    /// delays into a fact: with real parallelism every caller arrives and the group is freed;
+    /// without it the test hangs until its time limit rather than reporting a plausible-looking
+    /// `maxConcurrentCalls == 1`.
+    private var rendezvousTarget: Int?
+    private var rendezvousWaiters: [CheckedContinuation<Void, Never>] = []
     var responses: [String: String] = [:]
     var errors: [String: LLMClientError] = [:]
     var delays: [String: Duration] = [:]
@@ -33,6 +40,12 @@ private actor FakeWatcherLLM: LLMCompleting {
 
     func setDelay(_ delay: Duration, for key: String) {
         delays[key] = delay
+    }
+
+    /// See `rendezvousTarget`. Callers must ensure exactly `count` calls will be made, or the
+    /// pending ones never resume.
+    func setRendezvous(_ count: Int) {
+        rendezvousTarget = count
     }
 
     func callCount(for key: String) -> Int {
@@ -57,6 +70,15 @@ private actor FakeWatcherLLM: LLMCompleting {
         activeCalls += 1
         maxConcurrentCalls = max(maxConcurrentCalls, activeCalls)
         defer { activeCalls -= 1 }
+
+        if let target = rendezvousTarget {
+            if activeCalls >= target {
+                for waiter in rendezvousWaiters { waiter.resume() }
+                rendezvousWaiters.removeAll()
+            } else {
+                await withCheckedContinuation { rendezvousWaiters.append($0) }
+            }
+        }
 
         if let delay = delays[key] {
             try? await Task.sleep(for: delay)
@@ -384,7 +406,12 @@ struct WatcherRunnerTests {
 
     // MARK: - Parallel independence (§9.2)
 
-    @Test("two different Watchers triggered together run independently in parallel")
+    @Test(
+        "two different Watchers triggered together run independently in parallel",
+        // Only reached when the two calls do *not* overlap: the rendezvous below never completes,
+        // and the run has to be cut short rather than hanging the suite.
+        .timeLimit(.minutes(1))
+    )
     func differentWatchersRunInParallel() async throws {
         let directory = makeTempSessionDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -396,8 +423,10 @@ struct WatcherRunnerTests {
         let llm = FakeWatcherLLM()
         await llm.setResponse("{\"source_seg_id\":\"seg_00001\"}", for: "watcher_watcher-a")
         await llm.setResponse("{\"source_seg_id\":\"seg_00002\"}", for: "watcher_watcher-b")
-        await llm.setDelay(.milliseconds(200), for: "watcher_watcher-a")
-        await llm.setDelay(.milliseconds(200), for: "watcher_watcher-b")
+        // Rendezvous instead of sleeps: under CI load a task can take longer to start than any
+        // delay we would pick, so two genuinely-parallel calls can still fail to overlap in
+        // wall-clock terms. This blocks each call until both have arrived.
+        await llm.setRendezvous(2)
         let runner = WatcherRunner(sessionHandle: handle, llm: llm, library: makeLibrary(), resolveModel: { _ in ResolvedModel(provider: ModelResolver.builtinProviderName, model: "claude-haiku-4-5-20251001") })
 
         await runner.run(trigger: .onSummaryUpdate)

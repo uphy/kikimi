@@ -45,6 +45,17 @@ struct SttEngineConfig: Sendable, Equatable {
     /// pre-design-33 streaming-only confirmation behavior byte for byte (MT9). Snapshotted at
     /// recording start like every other field here; not a runtime toggle (MT10).
     var twoPassDecode: Bool = true
+
+    /// Which model performs that batch re-decode (`docs/design/45-qwen3-batch-decode.md` Q4):
+    /// `"qwen3-1.7b"` / `"qwen3-0.6b"` / `"parakeet-ja"`. Carried here rather than read from
+    /// `AppConfig` at decode time for the same reason as every other field on this struct -- it is
+    /// snapshotted at recording start, so switching models mid-recording is not possible and the
+    /// pipeline cannot observe a torn config (design 33 MT10).
+    ///
+    /// Validation happened at config decode (`SttConfig.init(from:)`); an unrecognized value
+    /// reaching here still resolves to a working decoder via
+    /// `TranscriptPipeline.resolveBatchModel`.
+    var batchModel: String = SttConfig.default.batchModel
 }
 
 // MARK: - SttEngineState

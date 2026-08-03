@@ -6,6 +6,9 @@ excluded:
   - Kikimi.xcodeproj
   - KikimiTests
   - _spike
+  # Evaluation probe (tools/asr-eval/README.md). Its own source is linted via the path below;
+  # what is excluded here is the DerivedData tree, which holds checked-out dependency sources.
+  - tools/asr-eval/qwen3-probe/.dd
 
 # Rule customization
 line_length:
