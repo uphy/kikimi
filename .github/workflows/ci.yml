@@ -94,10 +94,44 @@ jobs:
           swift --version
 
       - name: Build
-        run: swift build --build-tests
+        run: |
+          set -o pipefail
+          swift build --build-tests 2>&1 | tee /tmp/kikimi-build.log
 
       - name: Test
         # Matches `mise run test`: the window suites order real panels in, and the flag keeps them
         # invisible and inert (`FloatingPanel.isUnobtrusive`). Harmless on a headless runner, and it
         # keeps CI exercising the same configuration a developer runs.
-        run: KIKIMI_TEST_HIDDEN=1 swift test --skip-build
+        run: |
+          set -o pipefail
+          KIKIMI_TEST_HIDDEN=1 swift test --skip-build 2>&1 | tee /tmp/kikimi-test.log
+
+      # Even at this job's reduced log volume, a failed run is thousands of lines and the one line
+      # naming the broken test sits somewhere in the middle -- finding it meant downloading the
+      # archive and grepping. This lifts those lines onto the run page itself, so a red check can be
+      # diagnosed without opening the log at all.
+      #
+      # `✘` also prefixes *skipped* tests, hence the `skipped:` exclusion: a suite with env-gated
+      # tests (`KIKIMI_ASR_EVAL_DIR` and friends) would otherwise drown the real failure.
+      - name: Summarize the failure
+        if: failure()
+        run: |
+          summary="$(
+            grep -hE '^(error|fatal error): |:[0-9]+(:[0-9]+)?: (error|fatal error): ' \
+              /tmp/kikimi-build.log 2>/dev/null | head -30
+            grep -hE 'recorded an issue at |✘ (Test|Suite) .* failed after ' \
+              /tmp/kikimi-test.log 2>/dev/null | grep -v ' skipped: ' | head -50
+          )" || true
+          # A failure mode neither pattern knows about -- a runner that ran out of disk, a
+          # `swift test` that dies before the reporter prints anything -- must still leave something
+          # readable here rather than an empty box that sends you back to the raw log.
+          if [ -z "$summary" ]; then
+            summary="$(tail -n 40 /tmp/kikimi-test.log /tmp/kikimi-build.log 2>/dev/null)" || true
+          fi
+          {
+            echo '## What failed'
+            echo
+            echo '```'
+            echo "$summary"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
