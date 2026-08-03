@@ -41,9 +41,15 @@ if ! printf '%s' "$command_str" | grep -Eq '(^|[;&|[:space:]])git[[:space:]]+com
   exit 0
 fi
 
+# Work where the commit is actually being made, not where this script happens to
+# live. Hooks are always invoked as "${CLAUDE_PROJECT_DIR}/.claude/hooks/..." --
+# i.e. from the main checkout -- so deriving the repo root from BASH_SOURCE made
+# every worktree commit look like a commit on `main`, and pointed `mise run build`
+# at the wrong tree. The payload's `cwd` is the Bash tool's working directory.
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
-cd "$repo_root" || exit 0
+hook_cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)"
+cd "${hook_cwd:-$repo_root}" 2>/dev/null || cd "$repo_root" || exit 0
 
 # Refuse to commit on `main`. A detached HEAD or a failed lookup yields an empty
 # branch name and is left alone -- this hook guards the common case, it is not a
