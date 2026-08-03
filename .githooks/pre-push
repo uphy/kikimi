@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Run the unit suite before a push reaches CI.
+#
+# Motivation: an `AppConfig` expectation that had been false-passing under the old standalone
+# swift-testing surfaced only once CI ran the toolchain-bundled library, and finding it cost far
+# more than the 11 seconds `swift test` needs on an already-built tree. Anything the suite can
+# catch should cost a local test run, not a CI round trip plus a log archive.
+#
+# Cost: ~11s when `.build` is warm, up to ~2.5 min when it is not (the compile, not the tests).
+# Escape hatch: `git push --no-verify`.
+#
+# Installed by `mise run install-git-hooks`, which points `core.hooksPath` at this directory.
+set -uo pipefail
+
+# Deleting a remote branch (`git push origin :branch`) pushes no commits; nothing to test.
+all_deletes=1
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+  [ -z "${local_sha:-}" ] && continue
+  # An all-zero local sha is a delete.
+  case "$local_sha" in
+    *[!0]*) all_deletes=0 ;;
+  esac
+done
+[ "$all_deletes" -eq 1 ] && exit 0
+
+if ! command -v mise >/dev/null 2>&1; then
+  echo "pre-push: mise not found; skipping the test run." >&2
+  exit 0
+fi
+
+# `mise run test` resolves DEVELOPER_DIR to an Xcode.app itself (`.mise/tasks/_developer_dir.sh`).
+# Without Xcode there is no swift-testing at all, so there is nothing to gate on -- say so rather
+# than failing a push for a missing toolchain.
+if ! ls -d /Applications/Xcode*.app >/dev/null 2>&1 && [ -z "${DEVELOPER_DIR:-}" ]; then
+  echo "pre-push: no Xcode found; skipping the test run." >&2
+  exit 0
+fi
+
+echo "pre-push: running 'mise run test'..." >&2
+
+if ! output="$(mise run test 2>&1)"; then
+  # Same shape as the CI job's failure summary (`.github/workflows/ci.yml`): the lines that name
+  # what broke, not the whole run. `✘` also prefixes skipped tests, hence the exclusion.
+  summary="$(
+    printf '%s\n' "$output" \
+      | grep -hE '^(error|fatal error): |:[0-9]+(:[0-9]+)?: (error|fatal error): |recorded an issue at |✘ (Test|Suite) .* failed after ' \
+      | grep -v ' skipped: ' | head -50
+  )"
+  [ -z "$summary" ] && summary="$(printf '%s\n' "$output" | tail -n 40)"
+  printf '%s\n' "$summary" >&2
+  echo "" >&2
+  echo "pre-push: 'mise run test' failed. Fix it, or push with --no-verify." >&2
+  exit 1
+fi
+
+exit 0

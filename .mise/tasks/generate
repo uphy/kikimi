@@ -6,6 +6,10 @@
 # move to xcodebuild it shows up as "cannot find X in scope" for a file that plainly exists.
 #MISE sources=["project.yml", "Kikimi/**/*.swift", "KikimiTests/**/*.swift"]
 #MISE outputs=["Kikimi.xcodeproj/project.pbxproj"]
+# Not related to xcodegen: this is just the one task everybody runs on a fresh clone, so it is
+# where `core.hooksPath` gets pointed at `.githooks/`. The dependency has no sources/outputs of its
+# own, so it still runs when this task itself is cache-skipped.
+#MISE depends=["install-git-hooks"]
 set -euo pipefail
 
 xcodegen generate
