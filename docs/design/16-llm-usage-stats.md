@@ -102,15 +102,22 @@ cost = (input × in + output × out + cache_read × cr + cache_creation × cw) /
 
 - **内蔵価格表**（USD / 1M tokens、モデル id の前方一致・最長一致）
   - Anthropic 系は cache read = 0.1×input、cache write = 1.25×input（5 分 TTL）
-    - `claude-haiku-4-5`: 1.00 / 5.00、`claude-sonnet-4-5` / `-4-6` / `claude-sonnet-5`: 3.00 / 15.00、
-      `claude-opus-4-5`〜`-4-8`: 5.00 / 25.00、`claude-fable-5`: 10.00 / 50.00
+    - `claude-haiku-4-5`: 1.00 / 5.00、`claude-sonnet-4-5` / `-4-6`: 3.00 / 15.00、
+      `claude-opus-4-5`〜`-4-8` / `claude-opus-5`: 5.00 / 25.00、`claude-fable-5`: 10.00 / 50.00
+    - `claude-sonnet-5`: 2.00 / 10.00。**2026-08-31 までの導入価格**で、2026-09-01 から 3.00 / 15.00 に戻る。
+      その時点で内蔵表を更新する（暫定的には `llm.pricing` で上書きできる）
   - OpenAI / Azure OpenAI 系は cache read = 公表の cached-input 価格、**cache write = input（キャッシュ生成の割増なし）**。
-    2026-07 に OpenAI 公式で確認（Azure Global Standard は同一トークン単価）。input / cached / output:
+    2026-07（`gpt-5.6` 系は 2026-08）に OpenAI 公式で確認（Azure Global Standard は同一トークン単価）。input / cached / output:
     - `gpt-4.1`: 2.00 / 0.50 / 8.00、`gpt-4.1-mini`: 0.40 / 0.10 / 1.60、`gpt-4.1-nano`: 0.10 / 0.025 / 0.40
     - `gpt-4o`: 2.50 / 1.25 / 10.00、`gpt-4o-mini`: 0.15 / 0.075 / 0.60
     - `o3`: 2.00 / 0.50 / 8.00、`o4-mini`: 1.10 / 0.275 / 4.40、`o3-mini`: 1.10 / 0.55 / 4.40
     - `gpt-5`: 1.25 / 0.125 / 10.00、`gpt-5-mini`: 0.25 / 0.025 / 2.00、`gpt-5-nano`: 0.05 / 0.005 / 0.40
     - `gpt-5.4`: 2.50 / 0.25 / 15.00、`gpt-5.4-mini`: 0.75 / 0.075 / 4.50、`gpt-5.4-nano`: 0.20 / 0.02 / 1.25、`gpt-5.5`: 5.00 / 0.50 / 30.00
+    - `gpt-5.6-luna`: 0.20 / 0.02 / 1.20、`gpt-5.6-terra`: 2.00 / 0.20 / 12.00、`gpt-5.6-sol`: 5.00 / 0.50 / 30.00。
+      未知の `gpt-5.6-*` 用に family fallback `gpt-5.6` を `sol` と同額で置く（値付け不能で集計から落とすより過大見積もりを選ぶ）
+  - Moonshot / Kimi 系（api.moonshot.ai の USD 価格、2026-08 確認）も cache write = input。自動 context caching に
+    生成課金が無く、LiteLLM 経由の `openai` プロバイダは cache creation を報告しない。input / cached / output:
+    - `kimi-k2.5`: 0.60 / 0.10 / 3.00、`kimi-k2.6`: 0.95 / 0.16 / 4.00（`kimi-k2.6-preview` も前方一致で解決）
   - Azure の legacy-deployments 運用でモデル id がデプロイ名（例 `gpt-4o-xxx`）になっても、実モデル id で始まれば上表で解決される。実モデル id で始まらないデプロイ名は従来どおり `llm.pricing` 上書きが必要
 - **config 上書き**: `llm.pricing`（内蔵より優先。Azure OpenAI のデプロイ名運用向け）
 

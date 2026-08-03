@@ -116,6 +116,60 @@ struct LLMPricingTests {
         #expect(LLMPricing.resolve(model: "gpt-4o-my-deployment", configPricing: [:]) == LLMPricing.builtIn["gpt-4o"])
     }
 
+    @Test("the gpt-5.6 variants win over the gpt-5.6 family fallback, which wins over gpt-5")
+    func resolveGPT56Variants() {
+        #expect(LLMPricing.resolve(model: "gpt-5.6-luna", configPricing: [:]) == LLMPricing.builtIn["gpt-5.6-luna"])
+        #expect(LLMPricing.resolve(model: "gpt-5.6-sol", configPricing: [:]) == LLMPricing.builtIn["gpt-5.6-sol"])
+        #expect(LLMPricing.resolve(model: "gpt-5.6-terra", configPricing: [:]) == LLMPricing.builtIn["gpt-5.6-terra"])
+        // An unrecognized variant still prices, via the family fallback rather than the gpt-5 entry.
+        #expect(LLMPricing.resolve(model: "gpt-5.6-vega", configPricing: [:]) == LLMPricing.builtIn["gpt-5.6"])
+    }
+
+    // MARK: - resolve(model:configPricing:) -- models reached through the LiteLLM proxy
+
+    @Test("the model ids served by the LiteLLM proxy all resolve to a built-in price")
+    func resolveLiteLLMProxyModelIds() {
+        // The ids the proxy exposes verbatim -- none may fall through to `nil` (design section 4's
+        // "価格表に無いモデル" case would drop them from the cost totals entirely).
+        let ids = [
+            "claude-opus-5", "claude-fable-5", "claude-sonnet-5", "claude-opus-4-8",
+            "claude-haiku-4-5-20251001", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra",
+            "kimi-k2.5", "kimi-k2.6-preview"
+        ]
+        for id in ids {
+            #expect(LLMPricing.resolve(model: id, configPricing: [:]) != nil, "\(id) has no built-in price")
+        }
+    }
+
+    @Test("claude-opus-5 and claude-sonnet-5 price at their current published rates")
+    func resolveCurrentAnthropicRates() throws {
+        let opus5 = try #require(LLMPricing.resolve(model: "claude-opus-5", configPricing: [:]))
+        #expect(opus5.inputUSDPerMTok == 5.00)
+        #expect(opus5.outputUSDPerMTok == 25.00)
+        #expect(opus5.cacheReadUSDPerMTok == 0.50)
+        #expect(opus5.cacheWriteUSDPerMTok == 6.25)
+
+        // Introductory pricing through 2026-08-31; see the built-in table's comment.
+        let sonnet5 = try #require(LLMPricing.resolve(model: "claude-sonnet-5", configPricing: [:]))
+        #expect(sonnet5.inputUSDPerMTok == 2.00)
+        #expect(sonnet5.outputUSDPerMTok == 10.00)
+    }
+
+    @Test("kimi-k2.6 prices the -preview id by prefix and is distinct from kimi-k2.5")
+    func resolveKimiVariants() throws {
+        let k25 = try #require(LLMPricing.resolve(model: "kimi-k2.5", configPricing: [:]))
+        #expect(k25.inputUSDPerMTok == 0.60)
+        #expect(k25.outputUSDPerMTok == 3.00)
+        #expect(k25.cacheReadUSDPerMTok == 0.10)
+        #expect(k25.cacheWriteUSDPerMTok == k25.inputUSDPerMTok)
+
+        let k26 = try #require(LLMPricing.resolve(model: "kimi-k2.6-preview", configPricing: [:]))
+        #expect(k26 == LLMPricing.builtIn["kimi-k2.6"])
+        #expect(k26.inputUSDPerMTok == 0.95)
+        #expect(k26.outputUSDPerMTok == 4.00)
+        #expect(k26.cacheReadUSDPerMTok == 0.16)
+    }
+
     @Test("built-in OpenAI prices set cache_write equal to input (no cache-creation premium)")
     func openAICacheWriteEqualsInput() throws {
         let mini = try #require(LLMPricing.builtIn["gpt-4.1-mini"])
