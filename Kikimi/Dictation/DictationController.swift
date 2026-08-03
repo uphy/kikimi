@@ -383,6 +383,18 @@ final class DictationController: ObservableObject {
         state = newState
     }
 
+    /// Stops accepting new utterances because the app is quitting for an update
+    /// (`docs/design/46-control-socket.md` §5). The control socket has already confirmed the state
+    /// is idle, but `applicationShouldTerminate` then flushes asynchronously (up to 5 seconds,
+    /// 06-ui-panels.md §9) with the hotkey still live -- `.disabled` makes
+    /// `DictationHotkeyDownDecision.decide` return `.ignore` for anything pressed in that window.
+    ///
+    /// One-way on purpose: nothing restores the previous state, because the only caller is already
+    /// on its way to `NSApp.terminate`.
+    func suspendForTermination() {
+        state = .disabled
+    }
+
     /// `state = .refining` seam for `refineForHistory` in `DictationController+Refine.swift`:
     /// the `state` setter stays `private(set)`, so the split-out file transitions through this
     /// instead (see `refiner` for the file-split rationale).

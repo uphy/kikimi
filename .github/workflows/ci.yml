@@ -102,8 +102,20 @@ jobs:
         # Matches `mise run test`: the window suites order real panels in, and the flag keeps them
         # invisible and inert (`FloatingPanel.isUnobtrusive`). Harmless on a headless runner, and it
         # keeps CI exercising the same configuration a developer runs.
+        #
+        # The whole suite takes ~40s on a runner. The cap exists because a deadlocked test has no
+        # other backstop: without it the job sits in `swift test` until GitHub's 6-hour job limit,
+        # holding the PR's required check hostage and reporting nothing (observed on PR #30).
+        timeout-minutes: 15
         run: |
           set -o pipefail
+          # `sample` needs the process alive, so the snapshot is taken from a watchdog rather than
+          # after the timeout above kills the step. `Summarize the failure` prints what it caught.
+          (
+            sleep 600
+            pid="$(pgrep -f 'KikimiPackageTests.xctest' | head -1)"
+            [ -n "$pid" ] && sample "$pid" 4 -file /tmp/kikimi-hang.sample >/dev/null 2>&1
+          ) &
           KIKIMI_TEST_HIDDEN=1 swift test --skip-build 2>&1 | tee /tmp/kikimi-test.log
 
       # Even at this job's reduced log volume, a failed run is thousands of lines and the one line
@@ -135,3 +147,31 @@ jobs:
             echo "$summary"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+          # A hang prints no failure at all: every line above is about a test that reported. What
+          # names the culprit is the test that announced itself and never came back.
+          hung="$(awk -F'"' '
+            /^◇ Test / { started[$2] = 1 }
+            /Test "/ && /(passed|failed|skipped)/ { delete started[$2] }
+            END { for (name in started) print name }
+          ' /tmp/kikimi-test.log 2>/dev/null | head -20)" || true
+          if [ -n "$hung" ]; then
+            {
+              echo
+              echo '## Started but never finished'
+              echo
+              echo '```'
+              echo "$hung"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f /tmp/kikimi-hang.sample ]; then
+            {
+              echo
+              echo '## Sample of the hung process'
+              echo
+              echo '```'
+              head -120 /tmp/kikimi-hang.sample
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

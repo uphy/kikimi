@@ -85,7 +85,9 @@ final class WindowManager: ObservableObject {
     /// One controller per currently open Session Window window, keyed by `sessionId`. A given
     /// session never has two windows open simultaneously (section 5.2: "同一セッションに対して二重に
     /// ウィンドウが開くことはない").
-    private var workspaceControllers: [String: MeetingWorkspaceWindowController] = [:]
+    /// `private(set)`, not `private`, for the same reason `profileMenuItems` above is not private:
+    /// `WindowManager+Control.swift` (split out for `file_length`) reads it. Writes stay here.
+    private(set) var workspaceControllers: [String: MeetingWorkspaceWindowController] = [:]
     /// Single cached instance, lazily created on first use (section 7).
     private var sessionListController: SessionListWindowController?
     /// Single cached instance, lazily created on first use (section 8).
