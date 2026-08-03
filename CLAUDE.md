@@ -108,7 +108,9 @@ Claude Code からの直叩きは PreToolUse hook（`.claude/hooks/mise-swift-gu
 - `mise run generate` — xcodegen でプロジェクトファイルを生成
 - `mise run build` — Release ビルド（`build:web` → `build:swift` → `build/Kikimi.app` バンドル化 → 署名）
 - `mise run build:web` — `web/` の Markdown レンダラを `Kikimi/Resources/editor/` に出力（npm + esbuild）
-- `mise run apply` — `~/Applications/Kikimi.app` にインストール（実行中なら再起動）
+- `mise run apply` — ビルドして `~/Applications/Kikimi.app` にインストール（実行中なら再起動）。
+  再起動してよいかは制御ソケットでアプリ自身に尋ねる。録音中・ディクテーション中は何もせず
+  exit 10 で抜ける（`docs/design/46-control-socket.md`）
 - `mise run test` — 単体テスト（vitest → `swift test`）
 - `mise run install-git-hooks` — `core.hooksPath` を `.githooks/` に向ける（`generate` が自動で叩く・冪等）
 - `mise run signing-identity` — ローカル開発用のコード署名 identity を作成（初回のみ・冪等）
@@ -178,6 +180,7 @@ kikimi.md 13 章に準拠。主要コンポーネント:
 | `Kikimi/SessionStore/` | セッションのファイル I/O（JSONL・meta・各種 state） |
 | `Kikimi/Profiles/` | 会議プロファイル（`profile.yaml` の読み書き・id 検証） |
 | `Kikimi/Config/` | `AppConfig` / `AppState` / YAML 読み書き |
+| `Kikimi/Control/` | 制御ソケット（`mise run apply` の「今終了していいか」に答える。design 46） |
 | `Kikimi/WikiExport/` | セッション終了時の Wiki 向け Markdown export |
 | `Kikimi/Playback/` | セグメント単位の音声再生 |
 | `Kikimi/Window/` | NSPanel 管理・メニューバー・URL scheme ルーティング |
