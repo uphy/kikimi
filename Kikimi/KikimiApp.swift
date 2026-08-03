@@ -182,6 +182,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             await WindowManager.shared.launch()
         }
         DictationController.shared.launch()
+        // `mise run apply`'s "may I quit?" endpoint (`docs/design/46-control-socket.md`). Started
+        // last: it reports on the two above, and a failure to bind is logged and ignored.
+        ControlSocketServer.shared.start()
     }
 
     // MARK: kikimi:// URL scheme (docs/design/09-raycast-integration.md)
@@ -296,11 +299,55 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Set by `terminateForUpdate()` for the control socket's accepted-`quit` path, which has
+    /// already flushed and already confirmed nothing is recording.
+    private static var isTerminatingForUpdate = false
+
+    /// Quits for `mise run apply` (`docs/design/46-control-socket.md` §5): flush first, *then*
+    /// terminate, so `applicationShouldTerminate` below can answer `.terminateNow`.
+    ///
+    /// The reason it cannot simply call `NSApp.terminate` and reuse the `terminateLater` path:
+    /// `-[NSApplication terminate:]` waits for `replyToApplicationShouldTerminate:` by running a
+    /// nested event loop, and that loop does not drain the queue MainActor tasks are scheduled on.
+    /// The task that would call `reply` therefore never runs and the app hangs -- confirmed with
+    /// `sample` on 2026-08-03, where the main thread sat in `_shouldTerminate` ->
+    /// `nextEventMatchingMask` forever. A menu-driven quit escapes this because AppKit calls
+    /// `terminate:` from the event loop rather than from inside a Swift concurrency task.
+    static func terminateForUpdate() {
+        Task { @MainActor in
+            await flushBeforeTermination()
+            isTerminatingForUpdate = true
+            NSApp.terminate(nil)
+        }
+    }
+
+    /// `WindowManager.prepareForTermination()` awaits `stopRecording()` (if a session is recording)
+    /// and then flushes every open window's `SessionHandle`. Raced against a 5-second timeout so a
+    /// hang in flush()/stopRecording() can never leave the app unable to quit (06-ui-panels.md
+    /// section 9, failure mode #15): data may not be fully finalized in that case, but that is
+    /// preferable to an unkillable app.
+    @MainActor
+    private static func flushBeforeTermination() async {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await WindowManager.shared.prepareForTermination() }
+            group.addTask { try? await Task.sleep(for: .seconds(5)) }
+            await group.next()
+            group.cancelAll()
+        }
+    }
+
     /// Implements the `terminateLater` pattern (06-ui-panels.md section 9) so that Recording ->
     /// stop and the final `SessionHandle.flush()` of every open window can be awaited before the
     /// process actually exits. `applicationWillTerminate` is intentionally not used: it is a
     /// synchronous callback and cannot await the async cleanup this sequence depends on.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // The control socket already did all of this -- flushed, and refused the request outright
+        // if anything was recording -- so there is nothing left to await (and nothing to confirm).
+        if Self.isTerminatingForUpdate {
+            ControlSocketServer.shared.stop()
+            return .terminateNow
+        }
+
         // Only prompt for confirmation while a recording is in progress. `NSAlert.runModal()` is
         // itself a synchronous API, so it is safe to call here before any `Task` is spawned.
         if WindowManager.shared.recordingSessionId != nil {
@@ -314,18 +361,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        // Past the confirmation: this process is going away, so stop answering "may I quit?" and
+        // take the socket file with it (`docs/design/46-control-socket.md` §7 #2).
+        ControlSocketServer.shared.stop()
+
         Task { @MainActor in
-            // `WindowManager.prepareForTermination()` awaits `stopRecording()` (if a session is
-            // recording) and then flushes every open window's `SessionHandle`. Race it against a
-            // 5-second timeout so a hang in flush()/stopRecording() can never leave the app unable
-            // to quit (06-ui-panels.md section 9, failure mode #15): data may not be fully
-            // finalized in that case, but that is preferable to an unkillable app.
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask { await WindowManager.shared.prepareForTermination() }
-                group.addTask { try? await Task.sleep(for: .seconds(5)) }
-                await group.next()
-                group.cancelAll()
-            }
+            await Self.flushBeforeTermination()
             NSApp.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
