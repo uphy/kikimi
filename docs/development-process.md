@@ -117,7 +117,8 @@ kikimi/
 
 ### 2.5 開発フェーズ内サイクル
 
-各機能について、以下の **1 サイクル = 1 Dynamic Workflow** として実行する。
+各機能について、以下の **1 サイクル = 1 Dynamic Workflow = 1 PR** として実行する。
+設計（1）から単体テスト（4）までが 1 本のブランチに乗り、まとめて 1 つの PR になる（2.11）。
 
 ```
 [1. 詳細設計]
@@ -363,6 +364,21 @@ Vibe Coding を始める前に、Claude Code が最初に実行する初期化 w
 コード変更は必ず **worktree + PR** で進める。`main` に直接コミットしない。マージするのはユーザーだけで、
 Claude は CI が緑になるところまでを担当する。
 
+**1 PR = 1 サイクル（設計 + 実装 + 単体テスト）**
+
+`docs/design/NN-<feature>.md` とその実装は同じ PR に入れる。2.5 のサイクルがそのまま 1 本の PR になる。
+
+設計だけの PR を先に出して実装を次の PR に回さない。分けると、ユーザーは文書だけを読んで承認し、
+実装は誰も読み返さない設計の上に後から乗る。両者がずれても、マージの時点では誰にも見えない。
+同じ PR にあれば「この設計でこのコードになった」を 1 回で読める。
+
+設計段階でユーザーの Go/No-Go を仰ぎたいときは、**commit する前に会話で聞く**。commit した時点から
+先はフローが動き出す（下の hook 表）。
+
+例外は、実装を伴わない設計文書そのものが成果物であるとき（過去の設計判断の撤回、追補、方針だけの
+記録）。このときは `KIKIMI_ALLOW_DESIGN_ONLY_PR=1` を付け、なぜ単独なのかを PR 本文に書く。
+既存の設計文書を直すだけの PR は最初から対象外で、何も付けなくてよい。
+
 **分担**
 
 | 担当 | 範囲 |
@@ -427,6 +443,7 @@ commit を積んだ）は理由を出して残す。SessionStart hook から毎�
 | PostToolUse (Edit/Write) | 変更した Swift ファイルに SwiftLint | — |
 | PreToolUse (Bash) | `main` での `git commit` を拒否。そのうえで `mise run build` が通ることを確認 | `KIKIMI_ALLOW_MAIN_COMMIT=1` |
 | Stop | worktree に commit があって PR が緑でなければ、ターンを終わらせない | `KIKIMI_SKIP_PR_FLOW_GUARD=1` |
+| Stop | 新規の設計文書に実装が伴っていなければ、CI が緑でもターンを終わらせない | `KIKIMI_ALLOW_DESIGN_ONLY_PR=1` |
 | SessionStart | マージ済み worktree を片付ける | — |
 
 `.githooks/pre-push` が push 前に `mise run test` を通す（`git push --no-verify` で解除）。
@@ -451,7 +468,15 @@ commit を積んだ）は理由を出して残す。SessionStart hook から毎�
 | `NO_PR` | push 済みだが PR がない | 止めて `gh pr create` させる |
 | `PENDING` | 必須チェックが走行中 | 止めて `mise run pr:wait` を foreground で回させる |
 | `FAILING` | 必須チェックが赤 | 止めて直させる。自動修正は 3 回まで |
+| `DESIGN_ONLY` | 緑だが、新規追加された `docs/design/NN-*.md` に実装が付いていない | 止めて同じ PR に実装させる |
 | `GREEN` | 必須チェックが全部緑 | 通す（報告して終わり） |
+
+`DESIGN_ONLY` の判定は `.mise/tasks/pr/_design_only.sh` が持つ。**新規追加（git の status が `A`）の
+設計文書があり、かつ実装パス（`Kikimi/` `KikimiTests/` `web/` `tools/` `.mise/` `.claude/`
+`.github/` `.githooks/` `Package.swift` `project.yml`）の変更が 1 つも無い**ときだけ真になる。
+既存文書の編集・追補では発火しないので、design 32 のような「既存設計を改定するだけ」の PR は
+止まらない。実装パスを広く取っているのは、workflow や mise タスクの設計をそれ自身の中で実装する
+PR を巻き込まないため。
 
 暴走止めは 2 系統。`FAILING` は 1 つの PR につき 3 回で打ち切ってユーザーに委ね、それとは別に、
 同じ状態が 6 回続いたら状態に関係なく解放する。判定表は `mise run test:hooks` が検証する

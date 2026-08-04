@@ -54,6 +54,8 @@ mise run wt fix/xxx        # .claude/worktrees/fix/xxx を作る（origin/main �
 mise run pr:wait           # 必須チェックが緑になるまで待つ。foreground で回す
 ```
 
+- **設計と実装は同じ PR に入れる**。`docs/design/NN-*.md` を新しく書いたら、その実装と単体テストを
+  同じブランチに積んでから PR を緑にする。設計だけの PR を作って実装を次の PR に回さない
 - **マージはユーザーが行う。Claude は絶対にマージしない**。CI が緑になったことを報告して止まる
 - マージ済み worktree の削除は SessionStart hook が `mise run wt:reap` で自動実行する。手で消さない
 - 会話・調査だけなら `main` のままでよい。ファイルを書き換える作業は worktree
@@ -68,10 +70,14 @@ mise run pr:wait           # 必須チェックが緑になるまで待つ。for
 | `main` で `git commit` | `build-before-commit.sh` | 拒否。あわせて `mise run build` を通す |
 | push | `.githooks/pre-push` | `mise run test` を通す |
 | ターンを終えようとしたとき | `pr-flow-guard.sh` | worktree に commit があって PR が緑でなければ終わらせない |
+| 同上（設計だけの PR） | `pr-flow-guard.sh` | CI が緑でも、新しい設計文書に実装が伴っていなければ終わらせない |
 
 `pr-flow-guard.sh` の判定は `mise run pr:status`（`NO_COMMITS` / `UNPUSHED` / `NO_PR` / `PENDING` /
-`FAILING` / `GREEN`）。未コミットの間は黙っているので、実装途中に質問して止まるのは今までどおり。
-CI が赤なら自動で 3 回まで直しに行き、それでも赤ならユーザーの判断を仰いで止まる。
+`FAILING` / `DESIGN_ONLY` / `GREEN`）。未コミットの間は黙っているので、実装途中に質問して止まるのは
+今までどおり。CI が赤なら自動で 3 回まで直しに行き、それでも赤ならユーザーの判断を仰いで止まる。
+`DESIGN_ONLY` は新規追加された `docs/design/NN-*.md` があって実装側の変更が 1 つも無いときだけ出る
+（既存設計文書への追補・修正では出ない）。単独の設計文書として正当なときは
+`KIKIMI_ALLOW_DESIGN_ONLY_PR=1` を付け、その理由を PR 本文に書く。
 
 ## Build
 

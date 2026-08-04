@@ -95,6 +95,8 @@ git -C "$main" config user.name Test
 printf 'tracked\n' > "$main/tracked.txt"
 printf 'ignored.txt\n' > "$main/.gitignore"
 printf 'ignored\n' > "$main/ignored.txt"
+mkdir -p "$main/docs/design"
+printf '# 01\n' > "$main/docs/design/01-existing.md"
 git -C "$main" add -A
 git -C "$main" commit --quiet -m "init"
 
@@ -128,6 +130,9 @@ reset_counters
 check 2 "$(guard NO_PR)"          "NO_PR blocks"
 reset_counters
 check 2 "$(guard PENDING)"        "PENDING blocks"
+
+reset_counters
+check 2 "$(guard DESIGN_ONLY)"    "DESIGN_ONLY blocks (a design doc is not finished work on its own)"
 
 echo "pr-flow-guard: runaway guards"
 reset_counters
@@ -171,6 +176,54 @@ check 0 "$(edit "$sandbox/outside.txt")"       "a file outside any repository is
 printf '{"tool_name":"Edit","tool_input":{"file_path":"%s"}}' "$main/tracked.txt" |
   KIKIMI_ALLOW_MAIN_EDIT=1 "$EDIT_GUARD" >/dev/null 2>&1
 check 0 "$?" "KIKIMI_ALLOW_MAIN_EDIT=1 bypasses the guard"
+
+# --- design-only detection (what turns a green PR into DESIGN_ONLY) ---------------------------
+# Runs last: each case re-points the fixture worktree at a fresh branch off `main`, which the
+# guard cases above would not appreciate. `main` stands in for `origin/main` (the sandbox has no
+# remote), which is exactly why `_design_only.sh` takes the base ref as an argument.
+echo "design-only detection"
+readonly DESIGN_ONLY="$repo_root/.mise/tasks/pr/_design_only.sh"
+
+design_only() { # design_only -> exit code of the detector on the worktree's current branch
+  ( cd "$wt" && "$DESIGN_ONLY" main >/dev/null 2>&1; echo $? )
+}
+# Files are added by explicit path, never `add -A`: the stub `pr/status` written above lives under
+# `.mise/`, which the detector counts as implementation -- committing it would mask every case.
+case_branch() { git -C "$wt" checkout --quiet -B "$1" main; }
+case_commit() { git -C "$wt" add -- "$@" && git -C "$wt" commit --quiet -m "fixture"; }
+
+case_branch case-design-only
+mkdir -p "$wt/docs/design"
+printf '# 50\n' > "$wt/docs/design/50-new.md"
+case_commit docs/design/50-new.md
+check 0 "$(design_only)" "adding docs/design/NN-*.md alone is design-only"
+
+case_branch case-design-with-impl
+printf '# 50\n' > "$wt/docs/design/50-new.md"
+mkdir -p "$wt/Kikimi"
+printf 'let answer = 42\n' > "$wt/Kikimi/New.swift"
+case_commit docs/design/50-new.md Kikimi/New.swift
+check 1 "$(design_only)" "the same doc with its implementation is not"
+
+case_branch case-design-with-harness
+printf '# 50\n' > "$wt/docs/design/50-new.md"
+mkdir -p "$wt/.claude/workflows"
+printf '// workflow\n' > "$wt/.claude/workflows/new.js"
+case_commit docs/design/50-new.md .claude/workflows/new.js
+check 1 "$(design_only)" "a design implemented in the harness itself is not"
+
+case_branch case-design-edit
+printf '# amended\n' >> "$wt/docs/design/01-existing.md"
+case_commit docs/design/01-existing.md
+check 1 "$(design_only)" "editing an existing design doc is not (addenda stay unblocked)"
+
+case_branch case-plain-docs
+printf 'note\n' > "$wt/docs/note.md"
+case_commit docs/note.md
+check 1 "$(design_only)" "a document outside docs/design/ is not"
+
+case_branch case-no-commits
+check 1 "$(design_only)" "a branch with no commits of its own is not"
 
 echo
 if [ "$failures" -gt 0 ]; then
