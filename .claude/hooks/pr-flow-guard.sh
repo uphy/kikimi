@@ -16,7 +16,7 @@
 # waiting happens, and the agent runs that itself.
 #
 #   allowed to stop : not a worktree / no commits of its own / PR required checks green
-#   blocked         : unpushed / no PR / checks pending / checks failing
+#   blocked         : unpushed / no PR / checks pending / checks failing / design doc without code
 #
 # Two independent runaway guards, since a Stop hook that always blocks would loop forever:
 #   - FAILING is auto-retried at most MAX_FIX_ATTEMPTS times per PR, then the turn is allowed to end
@@ -97,6 +97,14 @@ on what still needs the user'"'"'s UI verification).'
     next='Wait for the required checks in the FOREGROUND: `mise run pr:wait` (it exits as soon as they
 pass or one fails; Build & test takes about 4 minutes). Do not background it -- this hook fires again
 the moment you stop, and only a concluded result advances the flow.'
+    ;;
+  DESIGN_ONLY)
+    next='Implement the design in THIS pull request -- design and implementation ship together
+(docs/development-process.md 2.11). Write the code and its layer-1 tests against the design doc
+listed above, commit, push, and run `mise run pr:wait` again. Do not open a follow-up PR for the
+implementation, and do not report the design as finished work on its own.
+(If this really is a standalone document -- a design reversal, an addendum -- set
+KIKIMI_ALLOW_DESIGN_ONLY_PR=1 and say so in the PR body.)'
     ;;
   FAILING)
     next="Fix CI (automatic attempt $fix_attempts of $MAX_FIX_ATTEMPTS). Read the failing job:

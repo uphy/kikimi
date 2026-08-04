@@ -16,6 +16,7 @@
 #   NO_PR           the branch is pushed but has no pull request
 #   PENDING         the PR exists; at least one required check has not concluded
 #   FAILING         a required check failed (or was cancelled)
+#   DESIGN_ONLY     checks pass, but the branch adds a design doc with no implementation (2.11)
 #   GREEN           every required check passes -- the flow is done, a human merges from here
 #
 #   mise run pr:status              # the worktree the shell is in
@@ -104,6 +105,19 @@ fi
 if [ "$pending" -gt 0 ]; then
   note "PR #$pr_number: $pending required check(s) still running."
   answer PENDING
+fi
+
+# Green CI is necessary but not sufficient: a PR that only adds `docs/design/NN-*.md` has nothing
+# to run those checks against (docs/development-process.md 2.11 -- design and implementation ship
+# together). Judged last, so a red or still-running PR is reported as such first; the design docs
+# are not going anywhere.
+if [ "${KIKIMI_ALLOW_DESIGN_ONLY_PR:-}" != "1" ]; then
+  design_only_script="$toplevel/.mise/tasks/pr/_design_only.sh"
+  if [ -x "$design_only_script" ] && design_docs="$("$design_only_script" 2>/dev/null)"; then
+    note "PR #$pr_number: required checks pass, but this branch only adds design docs:"
+    printf '  %s\n' $design_docs >&2
+    answer DESIGN_ONLY
+  fi
 fi
 
 note "PR #$pr_number: every required check passes."
