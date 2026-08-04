@@ -533,7 +533,9 @@ stateDiagram-v2
 
 **区間終了シーケンス（`pauseRecording()`/`endMeeting()` 共通）**:
 
-1. ボタン状態を `.pausing`（`pauseRecording()`）または `.ending`（`endMeeting()`）にする
+1. ボタン状態を `.pausing`（`pauseRecording()`）または `.ending`（`endMeeting()`）にし、
+   **同時に `elapsedTimerTask` をキャンセルする**（手順4のキャンセルより前倒しする点に注意。
+   理由は下記「経過時間ティッカーは `.recording` の間だけ動かす」）
 2. まだ Recording であれば `AudioCapture.stop()` → `TranscriptPipeline.stopAndDrain()` の順に `await`
    する（07章9章の順序契約。`stopAndDrain()` を `SessionStore` の区間終了メソッドより前に呼ばないと
    `segmentCount` と実ファイル行数が一瞬ずれるため、この順序は厳守する）。既に Paused から
@@ -558,6 +560,18 @@ stateDiagram-v2
 （`Task.sleep(for: .seconds(1))` ループ）で更新し、`.paused(elapsedSeconds:)` は一時停止時点の
 `meta.durationMs` を固定値として表示する（カウントアップしない）。`AsyncTimerSequence` 等の外部依存は
 使わず、`Task` のキャンセルで簡潔に停止できる形にする。
+
+**経過時間ティッカーは `.recording` の間だけ動かす（必須仕様）**: ティッカーは毎 tick
+`recordingButtonState` を `.recording(elapsedSeconds:)` で**上書きする**ので、`.pausing`/`.ending` に
+遷移したあとも動き続けると1秒以内にその遷移状態を消してしまう。`endMeeting()` は STT ドレイン・
+最終サマリパス・`on_session_end` Watcher・wiki export を順に `await` するため数十秒かかることがあり、
+その間ずっと「終了処理中…」が消えたまま会議時計が進み、「一時停止」「会議終了」ボタンも再び押せる
+状態に戻ってしまう（`endMeeting()` の二重呼び出しにつながる）。対策は二重にかける:
+
+- 停止手順1で `stopElapsedTimer()` を即座に呼ぶ（手順4の呼び出しは冪等なのでそのまま残す）
+- ティッカーのループ本体は書き込み前に `guard case .recording = recordingButtonState else { return }`
+  で自衛する（`.recording` へ戻る経路はすべて `runRecordingSegmentStart` を通り、そこで
+  `startElapsedTimer()` が改めて呼ばれるため、ループを抜けて問題ない）
 
 ### 6.1.1 ウィンドウクローズ = しまう（`windowShouldClose`）
 

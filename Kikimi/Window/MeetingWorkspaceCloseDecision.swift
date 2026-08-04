@@ -49,13 +49,24 @@ enum WindowCloseDecision: Equatable {
 /// judgment is unit-testable without driving `WindowManager.shared` (a hard-wired singleton with no
 /// test seam, same rationale `WindowCloseDecision`'s doc comment above gives for its own extraction).
 enum MeetingEndReshowDecision: Equatable {
-    /// `true` only when the window was actually stowed (`orderOut`'d) or still in compact-pill form
-    /// at the moment `endMeeting()` reached this point. A normally-displayed, non-stowed, non-compact
-    /// window is left alone (`false`): it was already visible with its full chrome, so there is
-    /// nothing to reveal -- `endMeeting()` (from the header's `⏹`, or the menu bar's confirmed
-    /// "会議を終了…", §3.3) runs exactly the same either way, this decision just answers whether a
-    /// visibility/mode change needs to happen alongside it.
+    /// `true` only when the window is still in compact-pill form at the moment `endMeeting()` reached
+    /// this point -- that window is already on screen, so expanding it back to normal size changes no
+    /// visibility and steals no focus.
+    ///
+    /// A normally-displayed, non-compact window is left alone (`false`): it was already visible with
+    /// its full chrome, so there is nothing to reveal -- `endMeeting()` (from the header's `⏹`, or
+    /// the menu bar's confirmed "会議を終了…", §3.3) runs exactly the same either way, this decision
+    /// just answers whether a visibility/mode change needs to happen alongside it.
+    ///
+    /// A **stowed** window is also left alone, deliberately -- hence `isStowed` being an input this
+    /// function reads but never ORs in. R6 originally reshowed it too ("しまったまま終了してもサマリが
+    /// 見える"), but the reveal lands whenever the confirmation processing happens to finish, which is
+    /// tens of seconds after the user pressed 会議終了 and moved on to something else; the Session
+    /// Window is a `.floating`-level `canBecomeKey` panel, so it jumps in front of every other app and
+    /// takes keyboard focus at an arbitrary moment. A window the user explicitly put away stays away:
+    /// the summary is still there whenever they reopen it from the menu bar or the Session List.
     static func shouldReshow(isStowed: Bool, isCompact: Bool) -> Bool {
-        isStowed || isCompact
+        guard !isStowed else { return false }
+        return isCompact
     }
 }

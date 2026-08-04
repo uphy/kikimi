@@ -416,10 +416,16 @@ private actor FakeWikiExporter: WikiExporting {
     private(set) var exportCallCount = 0
     private(set) var exportedSessionIds: [String] = []
     private var error: Error?
+    /// See `closeGate()`.
+    private var isGated = false
+    private var gateWaiters: [CheckedContinuation<Void, Never>] = []
 
     func export(sessionHandle: SessionHandle) async throws {
         exportCallCount += 1
         exportedSessionIds.append(await sessionHandle.sessionId)
+        if isGated {
+            await withCheckedContinuation { gateWaiters.append($0) }
+        }
         if let error {
             throw error
         }
@@ -427,6 +433,22 @@ private actor FakeWikiExporter: WikiExporting {
 
     func setError(_ error: Error) {
         self.error = error
+    }
+
+    /// Blocks every `export(sessionHandle:)` call until `openGate()` releases it -- same mechanism
+    /// (and same rationale: no stopwatch, no machine-speed dependency) as `FakeRefinementLLM
+    /// .closeGate()` above. Lets a test park `endMeeting()` mid-confirmation-processing and assert
+    /// what the UI shows while it is parked. `endMeeting()` calls `export` unconditionally, so this
+    /// is the one stage guaranteed to be reached regardless of how much transcript exists.
+    func closeGate() {
+        isGated = true
+    }
+
+    func openGate() {
+        isGated = false
+        let parked = gateWaiters
+        gateWaiters = []
+        for waiter in parked { waiter.resume() }
     }
 }
 
@@ -989,6 +1011,68 @@ struct MeetingWorkspaceViewModelTests {
         #expect(refreshedMeta.recordings[0].endedAt != nil)
         let storedRecordingSessionId = await store.recordingSessionId
         #expect(storedRecordingSessionId == nil)
+    }
+
+    // MARK: Elapsed-time ticker vs. the .pausing/.ending transitional states (`docs/design/06-ui-panels.md` §6.1)
+
+    @Test("endMeeting() holds .ending for the whole confirmation processing -- the 1-second elapsed ticker must not overwrite it back to .recording")
+    func endMeetingHoldsEndingWhileConfirmationProcessingRuns() async throws {
+        let root = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = makeStore(root: root)
+        let created = try await store.createDraftSession()
+        let handle = try await store.openSession(created.id)
+
+        let capture = FakeAudioCapture()
+        let pipeline = FakeTranscriptPipeline()
+        let exporter = FakeWikiExporter()
+        // Parks `endMeeting()` inside its `wikiExporter.export(...)` call (unconditionally reached, so
+        // this doesn't depend on how much transcript the session has) for as long as this test needs.
+        await exporter.closeGate()
+        let viewModel = makeViewModel(handle: handle, store: store, capture: capture, pipeline: pipeline, wikiExporter: exporter)
+
+        await viewModel.startRecording()
+        #expect(viewModel.recordingButtonState == .recording(elapsedSeconds: 0))
+
+        let ending = Task { await viewModel.endMeeting() }
+        // Longer than `startElapsedTimer()`'s 1-second period, so at least one tick has had its
+        // chance to fire while `endMeeting()` is parked. Before the fix, that tick reassigned
+        // `.recording(elapsedSeconds:)` over `.ending`: "終了処理中…" vanished within a second, the
+        // meeting clock kept climbing over time nothing was being recorded, and the 一時停止/会議終了
+        // buttons came back mid-confirmation (a second `endMeeting()` was one click away).
+        try await Task.sleep(for: .milliseconds(1_100))
+        #expect(viewModel.recordingButtonState == .ending)
+
+        await exporter.openGate()
+        await ending.value
+        #expect(viewModel.recordingButtonState == .ended)
+
+        // And nothing revives the ticker afterwards either.
+        try await Task.sleep(for: .milliseconds(1_100))
+        #expect(viewModel.recordingButtonState == .ended)
+    }
+
+    @Test("the elapsed ticker stops writing as soon as recordingButtonState leaves .recording")
+    func elapsedTickerStopsOnceStateLeavesRecording() async throws {
+        let root = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = makeStore(root: root)
+        let created = try await store.createDraftSession()
+        let handle = try await store.openSession(created.id)
+
+        let capture = FakeAudioCapture()
+        let pipeline = FakeTranscriptPipeline()
+        let viewModel = makeViewModel(handle: handle, store: store, capture: capture, pipeline: pipeline)
+
+        await viewModel.startRecording()
+        // Simulates the transitional assignment `pauseRecording()`/`endMeeting()` make on their first
+        // line, without running the rest of either -- this is the ticker's own guard under test, the
+        // second half of the two-layer defense (the first being their eager `stopElapsedTimer()`).
+        viewModel.recordingButtonState = .ending
+
+        try await Task.sleep(for: .milliseconds(1_100))
+
+        #expect(viewModel.recordingButtonState == .ending)
     }
 
     // MARK: endMeeting() Wiki export (`docs/design/08-wiki-export.md`)

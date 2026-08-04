@@ -76,6 +76,12 @@ extension MeetingWorkspaceViewModel {
             return
         }
 
+        // Freeze the elapsed clock the moment `.pausing` goes on screen, not at
+        // `finishStoppingCapture()` below: audio has already stopped being captured by the time the
+        // first `await` returns, so any further tick would count time that was never recorded. Same
+        // reason `endMeeting()` does this. Idempotent -- `finishStoppingCapture()` calls it again.
+        stopElapsedTimer()
+
         await stopCaptureAndPipelineIfNeeded(diarizationEndReason: .paused)
 
         do {
@@ -150,6 +156,13 @@ extension MeetingWorkspaceViewModel {
         default:
             return
         }
+
+        // Freeze the elapsed clock here, not at `finishStoppingCapture()` far below: everything
+        // between this line and there (STT drain, final summary pass, `on_session_end` Watchers,
+        // wiki export) can run for tens of seconds, and a still-running ticker would both keep the
+        // meeting clock climbing over time nothing is being recorded and overwrite `.ending` back to
+        // `.recording` on its next tick. Idempotent -- `finishStoppingCapture()` calls it again.
+        stopElapsedTimer()
 
         await stopCaptureAndPipelineIfNeeded(diarizationEndReason: .ended)
 
@@ -264,9 +277,9 @@ extension MeetingWorkspaceViewModel {
 
         // `docs/design/18-recording-window-stow-and-compact.md` §3.4/§5.4/R6: unconditionally reset
         // out of compact mode (covers "コンパクトの復帰") and unconditionally notify the wiring
-        // closure (covers "しまってあった場合の再表示") -- the decision of whether the closure should
-        // actually reveal the window belongs to whoever wired it (`MeetingWorkspaceWindowController
-        // .init`), not to this view model.
+        // closure -- the decision of whether the closure should actually reveal the window belongs to
+        // whoever wired it (`MeetingWorkspaceWindowController.init`), not to this view model. A
+        // stowed window is deliberately *not* revealed (`MeetingEndReshowDecision.shouldReshow`).
         windowMode = .normal
         onMeetingEnded?(sessionId)
     }

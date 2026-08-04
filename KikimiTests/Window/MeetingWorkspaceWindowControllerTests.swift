@@ -43,16 +43,15 @@ struct WindowCloseDecisionTests {
 /// `viewModel.onMeetingEnded` closure so it's exercisable here without driving `WindowManager.shared`.
 @Suite("MeetingEndReshowDecision")
 struct MeetingEndReshowDecisionTests {
-    @Test("reshows when the window was stowed, regardless of compact state")
-    func reshowsWhenStowed() {
-        #expect(MeetingEndReshowDecision.shouldReshow(isStowed: true, isCompact: false))
-        #expect(MeetingEndReshowDecision.shouldReshow(isStowed: true, isCompact: true))
+    @Test("never reshows a stowed window -- a window the user put away stays away, and would otherwise steal focus tens of seconds later when the confirmation processing finishes")
+    func neverReshowsWhenStowed() {
+        #expect(!MeetingEndReshowDecision.shouldReshow(isStowed: true, isCompact: false))
+        #expect(!MeetingEndReshowDecision.shouldReshow(isStowed: true, isCompact: true))
     }
 
-    @Test("reshows when the window is still compact, regardless of stowed state")
-    func reshowsWhenCompact() {
+    @Test("expands a still-compact, non-stowed window back to normal -- it is already on screen, so no visibility/focus change happens")
+    func reshowsWhenCompactAndNotStowed() {
         #expect(MeetingEndReshowDecision.shouldReshow(isStowed: false, isCompact: true))
-        #expect(MeetingEndReshowDecision.shouldReshow(isStowed: true, isCompact: true))
     }
 
     @Test("does not reshow a window that is neither stowed nor compact -- an already-visible, normal window's endMeeting() (via the header's ⏹, or the menu bar's confirmed 会議を終了…) needs no reshow")
