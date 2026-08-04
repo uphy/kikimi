@@ -7,10 +7,20 @@ set -euo pipefail
 # works for paths under that directory -- so this task uses the same place rather than a sibling
 # directory outside the repo.
 
-branch="${1:-}"
+branch=""
+move=false
+for arg in "$@"; do
+  case "$arg" in
+    --move) move=true ;;
+    -*) echo "unknown option: $arg" >&2; exit 2 ;;
+    *) [ -z "$branch" ] && branch="$arg" ;;
+  esac
+done
+
 if [ -z "$branch" ]; then
-  echo "usage: mise run wt <branch-name>" >&2
+  echo "usage: mise run wt <branch-name> [--move]" >&2
   echo "   e.g. mise run wt fix/summary-pane-blank" >&2
+  echo "        mise run wt fix/summary-pane-blank --move   # 未コミットの作業も一緒に運ぶ" >&2
   exit 2
 fi
 
@@ -24,10 +34,16 @@ fi
 
 path="$main_worktree/.claude/worktrees/$branch"
 
+already_existed=false
 if [ -d "$path" ]; then
   echo "already exists: $path"
-  exit 0
+  if ! $move; then
+    exit 0
+  fi
+  already_existed=true
 fi
+
+if ! $already_existed; then
 
 git -C "$main_worktree" fetch --quiet origin main
 
@@ -70,6 +86,65 @@ done
 # a pure cache, so dropping the copies costs nothing and is what makes the clone above usable.
 if [ -d "$path/.build" ]; then
   find "$path/.build" -type d -name ModuleCache -prune -exec rm -rf {} +
+fi
+
+fi # ! already_existed
+
+# `--move`: carry the main checkout's uncommitted work into the new worktree and leave `main`
+# clean. The recovery path when an edit landed on `main` by mistake -- which the
+# `no-edit-on-main.sh` PreToolUse hook now prevents at the source, but which still needs a
+# one-command fix for work that predates it (or that arrived via `KIKIMI_ALLOW_MAIN_EDIT=1`).
+#
+# Deliberately not `git stash`: the stash stack is shared by the main checkout and every worktree,
+# and concurrent agent sessions pop each other's entries. A patch plus an explicit copy of the
+# untracked files touches nothing anyone else can see.
+if $move; then
+  tracked_patch="$(mktemp -t kikimi-wt-move)"
+  git -C "$main_worktree" diff HEAD --binary > "$tracked_patch"
+  # `--others --exclude-standard` = new files the user wrote, minus everything gitignored (.build,
+  # CLAUDE.local.md, ...), which the clone above already handled.
+  untracked="$(git -C "$main_worktree" ls-files --others --exclude-standard)"
+
+  if [ ! -s "$tracked_patch" ] && [ -z "$untracked" ]; then
+    echo "--move: nothing to move ($main_worktree is clean)"
+    rm -f "$tracked_patch"
+  else
+    if [ -s "$tracked_patch" ]; then
+      # Refuse rather than half-apply: a patch that does not fit means the worktree is not the
+      # pristine origin/main the caller assumed, and silently mangling the only copy of the work
+      # would be unrecoverable.
+      if ! git -C "$path" apply --check "$tracked_patch" 2>/dev/null; then
+        echo "error: the uncommitted changes do not apply cleanly onto $branch." >&2
+        echo "       Nothing was moved; $main_worktree is untouched. Patch kept at $tracked_patch" >&2
+        exit 1
+      fi
+      git -C "$path" apply "$tracked_patch"
+    fi
+
+    if [ -n "$untracked" ]; then
+      printf '%s\n' "$untracked" | while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        mkdir -p "$path/$(dirname "$file")"
+        cp "$main_worktree/$file" "$path/$file"
+      done
+    fi
+
+    # Only now that everything is safely in the new worktree, restore the main checkout.
+    if [ -s "$tracked_patch" ]; then
+      git -C "$main_worktree" checkout -- .
+    fi
+    if [ -n "$untracked" ]; then
+      printf '%s\n' "$untracked" | while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        rm -f "$main_worktree/$file"
+      done
+    fi
+    rm -f "$tracked_patch"
+
+    echo
+    echo "--move: carried over and restored $main_worktree"
+    git -C "$path" status --short
+  fi
 fi
 
 echo

@@ -375,10 +375,18 @@ Claude は CI が緑になるところまでを担当する。
 
 ```bash
 mise run wt fix/summary-pane-blank   # .claude/worktrees/fix/summary-pane-blank を作る
-cd .claude/worktrees/fix/summary-pane-blank
+# EnterWorktree tool に path を渡してセッションごと移動する
 # 実装 → コミット → push → gh pr create
 mise run pr:wait                     # 必須チェックが緑になるまで待つ（マージはしない）
 ```
+
+`cd` だけでは足りない。`build-before-commit.sh` は hook payload の `cwd`（＝セッションの作業
+ディレクトリ）でブランチを判定するので、セッションが `main` に居たままだと `git -C <worktree> commit`
+も `main` へのコミットとして拒否される。
+
+既に `main` を汚してしまった場合は `mise run wt <branch> --move`。tracked の差分をパッチで、
+untracked の新規ファイルをコピーで新しい worktree へ運び、`main` を元の状態に戻す。`git stash` は
+使わない（スタックが全 worktree で共有されていて、並行して動く別セッションが取り違える）。
 
 `mise run wt` は origin/main から生やし、gitignore されているローカル資産（`CLAUDE.local.md`、
 `docs/references/chirami-map.md`、`.build`、`web/node_modules`、`Kikimi/Resources/editor`）を
@@ -413,11 +421,56 @@ commit を積んだ）は理由を出して残す。SessionStart hook から毎�
 
 **ローカル側（`.claude/settings.json`）**
 
-| hook | 内容 |
-|---|---|
-| PostToolUse (Edit/Write) | 変更した Swift ファイルに SwiftLint |
-| PreToolUse (Bash) | `main` での `git commit` を拒否（`KIKIMI_ALLOW_MAIN_COMMIT=1` で解除）。そのうえで `mise run build` が通ることを確認 |
-| SessionStart | マージ済み worktree を片付ける |
+| hook | 内容 | 解除 |
+|---|---|---|
+| PreToolUse (Edit/Write/NotebookEdit) | `main` の tracked ファイルへの編集を拒否し、`mise run wt --move` を案内する | `KIKIMI_ALLOW_MAIN_EDIT=1` |
+| PostToolUse (Edit/Write) | 変更した Swift ファイルに SwiftLint | — |
+| PreToolUse (Bash) | `main` での `git commit` を拒否。そのうえで `mise run build` が通ることを確認 | `KIKIMI_ALLOW_MAIN_COMMIT=1` |
+| Stop | worktree に commit があって PR が緑でなければ、ターンを終わらせない | `KIKIMI_SKIP_PR_FLOW_GUARD=1` |
+| SessionStart | マージ済み worktree を片付ける | — |
+
+`.githooks/pre-push` が push 前に `mise run test` を通す（`git push --no-verify` で解除）。
+
+**なぜ入口と出口の両方を塞ぐのか**
+
+`build-before-commit.sh` は `git commit` を含むコマンドにしか反応しない。実装 → ビルド → `mise run apply`
+→ 報告、を commit なしで進めたエージェントは一度も引っかからず、作業が `main` に取り残されて PR にならない
+（2026-08-04 に実際に起きた）。編集の入口（PreToolUse）とターンの出口（Stop）を塞いで初めて、フローが
+守られているかどうかが本人の記憶に依存しなくなる。
+
+**Stop hook の判定**
+
+判定そのものは `mise run pr:status` が持つ。hook もエージェントも同じスクリプトを読むので、
+「今どの段階か」の答えが食い違うことがない。
+
+| 状態 | 意味 | ターン終了 |
+|---|---|---|
+| `NOT_A_WORKTREE` | worktree の外（`main` での調査・会話） | 通す |
+| `NO_COMMITS` | まだ自分の commit がない | 通す（実装中の質問はここ） |
+| `UNPUSHED` | commit が origin に届いていない | 止めて push させる |
+| `NO_PR` | push 済みだが PR がない | 止めて `gh pr create` させる |
+| `PENDING` | 必須チェックが走行中 | 止めて `mise run pr:wait` を foreground で回させる |
+| `FAILING` | 必須チェックが赤 | 止めて直させる。自動修正は 3 回まで |
+| `GREEN` | 必須チェックが全部緑 | 通す（報告して終わり） |
+
+暴走止めは 2 系統。`FAILING` は 1 つの PR につき 3 回で打ち切ってユーザーに委ね、それとは別に、
+同じ状態が 6 回続いたら状態に関係なく解放する。判定表は `mise run test:hooks` が検証する
+（一時 git リポジトリとスタブで駆動するので、ネットワークにも実リポジトリにも触らない）。
+
+**git hook から git を呼ぶタスクを書くときの注意**
+
+git は hook の環境に `GIT_DIR` を渡す。この変数は **`git -C <path>` より優先される**ので、
+`.githooks/pre-push` から呼ばれた先で `git -C /tmp/... init` しても、実際には呼び出し元の
+リポジトリが再初期化される。`mise run test:hooks` を作った際にこれを踏み、実リポジトリの
+`core.bare` が `true` になり、`user.name`/`user.email` が上書きされ、フィクスチャが
+作業ツリーの上にコミットされた。
+
+対策は 3 段。`.githooks/pre-push` が `mise run test` の前に `GIT_*` を全部 unset し、
+`test:hooks` 自身も冒頭で unset したうえで、**`git init` より前に** 残存を検査して中断する
+（`git init` 自体が破壊的なので、初期化後の検査では手遅れ）。最後の砦として、初期化後に
+work tree と git dir の両方がサンドボックス内にあることを確認する。work tree だけの確認では
+足りない — `GIT_DIR` が効いている状態の `git init` は cwd を work tree として採用するので、
+work tree は正しく見えたまま git dir だけが実リポジトリを指す。
 
 ### 2.13 開発方式のまとめ
 
