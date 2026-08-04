@@ -553,7 +553,7 @@ Handy（実物のスクリーンショット）を参考に、ホットキーを
 | H1 | **表示タイミングは `.capturing` 状態の間だけ**。key-up で `.transcribing` に遷移した瞬間、即座に非表示にする。D2 の `.refining`（LLM 整形待ち）・`.inserting`（AX 誤爆チェック待ち）の間は HUD を出さない。D1/D2 の整形有無に関わらず同じ挙動（**追補・`docs/design/32-dictation-hud-refining-visibility.md`**: refine 有効時は key-up 後も「整形中…」フェーズ表示のまま残し、テール終端で非表示にする改定が入った。refine 無効時は本決定のまま） |
 | H2 | **閉じるボタンは実装しない**。HUD は表示専用（`ignoresMouseEvents = true`）で、ユーザー操作を一切受け付けない。会議側の退避パネル（`DictationOverlayPanel`）とは異なり、ここに `[挿入]`/`[コピー]`/`[閉じる]` のような能動的な役割はない |
 | H3 | **フォーカスを奪わない**。`FloatingPanel` の新しい `.borderless` スタイル（§13.2）を使い、`orderFront`（`makeKeyAndOrderFront` ではない）で表示する。会議中の別アプリでの作業を一切妨げない |
-| H4 | **見た目**: 画面下部中央に浮かぶ横長（420×104pt）の白い角丸パネル。上段に書き起こし中のテキスト（グレー、最大2行、あふれたら先頭を切り詰めて末尾を残す `truncationMode: .head`）、下段に録音インジケータ（ピンクの点滅ドット）・装飾的な波形アニメーション（実際の音声レベル解析はしない）・経過時間（`m:ss`）を横並びで表示する |
+| H4 | **見た目**: 画面下部中央に浮かぶ横長（420×104pt）の白い角丸パネル。上段に書き起こし中のテキスト（グレー、最大2行、あふれたら先頭を切り詰めて末尾を残す `truncationMode: .head`）、下段に録音インジケータ（ピンクの点滅ドット）・装飾的な波形アニメーション（実際の音声レベル解析はしない）・経過時間（`m:ss`）を横並びで表示する（**追補・`docs/design/49-dictation-hud-slim.md`**: capturing 中のテキスト表示を廃止し、その間は小型ピル（240×48pt）に縮める改定が入った。テキスト上段と 420×104pt は `.processing` フェーズ専用になり、波形は実マイクレベル連動のバーに置き換わった） |
 | H5 | **セグメント分割はしない**（既存方針を維持）。`DictationTranscriber` はディクテーションの文脈で句読点/idle/文字数による分割ロジックを持たないため、HUD に流すテキストも「今までに確定した累積テキストをそのまま」で、会議側 `SttEngine` のセグメント確定ロジックとは無関係 |
 
 ### 13.2 コンポーネント構成
@@ -597,6 +597,9 @@ flowchart LR
   `state = .idle` に戻すのと同じタイミングで HUD も `hide()` する
 - mic フィードコールバック内（`state == .capturing` を再確認するガードの内側）で `transcriber.feed(samples:)`
   の戻り値を受け取り、`nil` でなければ `liveHUDPanel?.updateText(_:)` を呼ぶ
+  （**追補・`docs/design/49-dictation-hud-slim.md`**: この転送は廃止した。戻り値は
+  `DictationRawSelection.select` 向けに受け取り続けるが HUD へは渡さず、代わりにこのコールバックで
+  算出した RMS を `liveHUDPanel?.updateLevel(_:)` へ渡す）
 - `handleHotkeyUp()`: `state = .transcribing` に設定した直後、最初の行で `liveHUDPanel?.hide()` を呼ぶ（H1）。
   以降の整形・挿入処理より前に必ず非表示になる
 

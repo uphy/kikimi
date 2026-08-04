@@ -68,14 +68,13 @@ extension DictationController {
             )
             do {
                 try await input.start { [weak self] samples in
+                    // design 49 §3.1: the RMS is computed here, on the tap's own callback thread,
+                    // so the main actor only ever receives a single `Float` -- walking the buffer
+                    // there would put per-buffer work on the same actor the capture path already
+                    // hops through (the delay word-drop fixes 3a/3b spent effort removing).
+                    let level = DictationAudioLevelMeter.rms(samples)
                     Task { @MainActor [weak self] in
-                        guard let self, self.state == .capturing, let transcriber = self.transcriber else { return }
-                        // Word-drop fix 3b: switches the HUD from "マイク準備中…" to capturing on the
-                        // mic's first actually-delivered buffer (`DictationLiveHUDPresenting`).
-                        self.liveHUDPanel?.markCapturing()
-                        if let cumulativeText = try? await transcriber.feed(samples: samples) {
-                            self.liveHUDPanel?.updateText(cumulativeText)
-                        }
+                        await self?.handleCapturedSamples(samples, level: level)
                     }
                 }
             } catch {
@@ -109,6 +108,24 @@ extension DictationController {
                 self.audioInput = input
             }
         }
+    }
+
+    /// One mic buffer, already reduced to its RMS by the caller. Extracted from the capture
+    /// callback above so layer-1 tests can drive it without a real mic
+    /// (`docs/design/49-dictation-hud-slim.md` §5).
+    ///
+    /// `feed(samples:)`'s return value is deliberately dropped: it is the first-pass cumulative
+    /// text, which the key-up batch re-decode and the refine both rewrite before anything is
+    /// inserted, so showing it mid-utterance would only pull the user's eyes to text that is about
+    /// to change (HS1). The call itself still matters -- it is what advances the streaming decode
+    /// that `DictationRawSelection.select` later falls back to.
+    func handleCapturedSamples(_ samples: [Float], level: Float) async {
+        guard state == .capturing, let transcriber else { return }
+        // Word-drop fix 3b: switches the HUD from "マイク準備中…" to capturing on the mic's first
+        // actually-delivered buffer (`DictationLiveHUDPresenting`).
+        liveHUDPanel?.markCapturing()
+        liveHUDPanel?.updateLevel(level)
+        _ = try? await transcriber.feed(samples: samples)
     }
 
     /// Not `private` (unlike `handleHotkeyDown()`): `DictationControllerHistoryTests` calls this
