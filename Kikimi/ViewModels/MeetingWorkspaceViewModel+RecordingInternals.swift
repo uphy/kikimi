@@ -217,6 +217,16 @@ extension MeetingWorkspaceViewModel {
         elapsedTimerTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
+                // The ticker owns `recordingButtonState` only while it is actually `.recording`.
+                // Without this guard, a tick landing after `pauseRecording()`/`endMeeting()` set
+                // `.pausing`/`.ending` (they run for seconds: STT drain, final summary pass,
+                // `on_session_end` Watchers, wiki export) overwrites that transitional state back to
+                // `.recording` within one second -- erasing the "終了処理中…" feedback, resuming the
+                // elapsed clock, and re-enabling the 一時停止/会議終了 buttons mid-confirmation.
+                // Exiting the loop (rather than skipping the write) is correct: every path back into
+                // `.recording` goes through `runRecordingSegmentStart`, which calls
+                // `startElapsedTimer()` again.
+                guard case .recording = self.recordingButtonState else { return }
                 let elapsedInSegment = self.now().timeIntervalSince(segmentStartedAt)
                 let totalSeconds = max(0, Int((Double(baseDurationMs) / 1_000) + elapsedInSegment))
                 self.recordingButtonState = .recording(elapsedSeconds: totalSeconds)

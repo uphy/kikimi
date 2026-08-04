@@ -39,7 +39,8 @@
 | R3 | メニューバーアイコンを状態表示に使う: 録音中は録音アイコン + 経過時間（MM:SS）、警告バナー保有中は警告アイコン。メニューには「しまってあるウィンドウを表示」項目と、Recording 中のみ「会議を終了…」項目（確認アラートつき、§3.3）を出す |
 | R4 | コンパクトモードは**同一 NSPanel のコンテンツ・フレーム切替**（別ウィンドウは作らない）。モードは**永続化しない**（アプリ再起動後は常に通常表示。Recording はそもそも再起動を跨がないため） |
 | R5 | コンパクト中はウィンドウフレームを `state.yaml` に**保存しない**（保存されるのは常に展開時のフレーム）。展開時フレームはコントローラがメモリ上に保持し、展開で復元する |
-| R6 | 会議終了（Ended 遷移）時: コンパクトなら通常表示へ自動復帰、しまってあれば自動再表示する（確定処理の結果＝サマリをユーザーに見せる。17-session-window-redesign.md R4 の自動切替と同じ「状態遷移の瞬間のみ介入」原則）。**再表示が発動するのは「しまってある（`orderOut` 済み）または コンパクト中」のときだけ**（通常表示中のウィンドウはそもそも再表示不要）。メニューバーの「会議を終了」経由でも同じ経路で自動再表示される — しまったまま終了してもサマリが見える |
+| R6 | 会議終了（Ended 遷移）時: コンパクトなら通常表示へ自動復帰する（確定処理の結果＝サマリをユーザーに見せる。17-session-window-redesign.md R4 の自動切替と同じ「状態遷移の瞬間のみ介入」原則）。**発動するのは「コンパクト中かつしまっていない」ときだけ**（通常表示中のウィンドウはそもそも復帰不要）。**しまってある（`orderOut` 済み）ウィンドウは再表示しない**（改定。理由は下記） |
+| R6' | R6 の当初仕様は「しまってあれば自動再表示（しまったまま終了してもサマリが見える）」だったが**廃止**した。再表示が起きるのは確定処理（STT ドレイン・最終サマリパス・`on_session_end` Watcher・wiki export）が終わった瞬間 — ユーザーが会議終了を押してから数十秒後、既に別の作業に移っている任意のタイミングになる。Session Window は `level = .floating` かつ `canBecomeKey == true` なので、そこで全アプリの手前に飛び出してキーボードフォーカスを奪う。**ユーザーが明示的にしまったウィンドウはしまったまま**にし、サマリはメニューバー / Session List から開いたときに見せる |
 | R7 | 旧 close 確認フロー（3 択ダイアログ・`RecordingCloseChoice`・`isConfirmingClose` / `closeApprovedAfterStop` の二段フラグ）は**廃止**する。`WindowCloseDecision` は R2 の 3 値（allow / stow / deny）テーブルに改定する（06-ui-panels.md §6.1.1 が正）。「Recording は同時に 1 つ」排他と、アプリ終了確認（06-ui-panels.md §9 の `applicationShouldTerminate`）は**変更しない** |
 | R8 | 新設ボタンはすべて既存の AX contract（`.help` + `.accessibilityLabel` を可視ラベルと同期）に従う（kikimi-verify での自動操作のため） |
 
@@ -92,7 +93,9 @@ close を拒否（`false` を返す）して代わりに以下を実行する。
 |---|---|
 | メニューバー | メニュー項目「<タイトル> を表示」をクリック |
 | Session List | 該当セッションの「開く」（既存の `openWorkspace` が hidden なコントローラを `showWindow` でフロントに出す。**既存コードで既に動く経路**だが、`visible = true` の書き戻しを追加する） |
-| 会議終了 | R6 の自動再表示（`on_session_end` 完了後） |
+
+（会議終了は再表示の経路では**ない** — R6' のとおり、しまってあるウィンドウは終了しても出てこない。
+コンパクト中の通常サイズ復帰だけが `showWorkspaceWindow` を通る）
 
 **しまっている間の挙動**
 
@@ -145,8 +148,9 @@ close を拒否（`false` を返す）して代わりに以下を実行する。
   ウィンドウの文脈が見えないメニューからの確定操作なので、この経路だけは確認を挟む
   （ヘッダの `⏹` はウィンドウ内で内容を見た上での操作なので従来どおり確認なし）。
   承諾されたら該当 ViewModel の `endMeeting()` を呼ぶ（`WindowManager` 経由でコントローラへ
-  ディスパッチ）。承諾時点で既に Ended / 遷移中なら no-op。しまってあれば R6 の自動再表示で
-  終了後にサマリが見える。Paused セッションの終了はメニューには置かない（「〜 を表示」で
+  ディスパッチ）。承諾時点で既に Ended / 遷移中なら no-op。しまってあるウィンドウは終了後も
+  しまったまま（R6'）で、サマリはメニューバーの「〜 を表示」から開いたときに見える。
+  Paused セッションの終了はメニューには置かない（「〜 を表示」で
   開いてから `⏹`。露出を最小に保つ）
 - メニューからの一時停止操作は MVP では**入れない**（§8 将来候補）
 - **メニュー本体はタイマー tick で再描画してはならない（必須仕様）**: `MenuBarExtra(.menu)` の
@@ -352,8 +356,8 @@ func showWorkspaceWindow(sessionId: String)
   実マシンの `state.yaml` を汚染する。代わりに ViewModel へ注入 closure
   `onMeetingEnded: ((String) -> Void)?` を追加し（`summaryUpdaterFactory` と同じ seam パターン）、
   `MeetingWorkspaceWindowController` の init で `WindowManager.showWorkspaceWindow` に配線する。
-  テストでは未配線（nil）のまま副作用ゼロ。呼び出し条件は R6 のとおり
-  「しまってある または コンパクト中」のみ（`MeetingEndReshowDecision.shouldReshow` で判定）
+  テストでは未配線（nil）のまま副作用ゼロ。呼び出し条件は R6 / R6' のとおり
+  「コンパクト中かつしまっていない」のみ（`MeetingEndReshowDecision.shouldReshow` で判定）
 - メニューバーの「会議を終了…」（§3.3）: `WindowManager` に
   `endRecordingMeetingFromMenuBar()` を新設する。確認 `NSAlert`（アプリモーダル）を表示し、
   承諾されたら録音中セッションのコントローラを引いて ViewModel の `endMeeting()` を呼ぶ。
@@ -450,8 +454,8 @@ enum CompactTicker {
 - `@Published var windowMode: WorkspaceWindowMode = .normal`（§4.1）
 - `var onMeetingEnded: ((String) -> Void)?` を追加（§5.1 の注入 seam。テストでは nil のまま）
 - `endMeeting()` の Ended 確定後: `windowMode = .normal` に戻し、`onMeetingEnded?(sessionId)` を
-  呼ぶ（R6。しまってあった場合の再表示・コンパクトの復帰を両方カバー。発動条件の判定と
-  close 進行中の抑止は配線側 = コントローラ/WindowManager の責務）
+  呼ぶ（R6。コンパクトの復帰をカバーする。しまってあった場合は再表示しない = R6'。発動条件の
+  判定と close 進行中の抑止は配線側 = コントローラ/WindowManager の責務）
 - 録音パイプライン・整形・サマリ・Watcher のコードには一切手を入れない
 
 ## 6. 失敗モード・エッジケース
@@ -499,8 +503,9 @@ enum CompactTicker {
   `$windowMode` 購読の初回 replay で `saveWindowState` が走らないこと
 - `showWorkspaceWindow` の `visible = true` 書き戻し: エントリ既存なら `visible` のみ更新、
   未存在ならフルエントリ新規作成、コントローラ不在なら AppState に**何も書かれない**こと
-- R6 経路: `onMeetingEnded` が (a) しまってある / コンパクト中の endMeeting で再表示を発火する
-  （`MeetingEndReshowDecision.shouldReshow` の全分岐）、(b) 未配線（nil）なら副作用ゼロ
+- R6 経路: `onMeetingEnded` が (a) コンパクト中かつしまっていない endMeeting でだけ復帰を発火し、
+  しまってある場合は発火しない（`MeetingEndReshowDecision.shouldReshow` の全分岐。R6'）、
+  (b) 未配線（nil）なら副作用ゼロ
 - `MenuBarStatusModel`: `recordingSessionId` 変化時に旧 ViewModel の購読が解除される
   （cancellable 集合が入れ替わり、旧 VM への強参照が残らない）
 

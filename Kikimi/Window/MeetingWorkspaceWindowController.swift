@@ -159,10 +159,11 @@ final class MeetingWorkspaceWindowController: NSWindowController, NSWindowDelega
 
         // `docs/design/18-recording-window-stow-and-compact.md` §5.1/§5.4 (R6): the sole place this
         // seam is wired -- `MeetingWorkspaceViewModelTests` never sets it, so `endMeeting()` there has
-        // zero window-visibility side effects. Reveals the window only if it was actually stowed or
-        // still compact at the moment `endMeeting()` reached this point; an already-visible, normal
-        // window (ended via the header's `⏹`, or via the menu bar's confirmed "会議を終了…", §3.3) is
-        // left alone -- it needs no visibility/mode change. The actual yes/no judgment is
+        // zero window-visibility side effects. Fires only for a window still in compact-pill form at
+        // the moment `endMeeting()` reached this point; an already-visible, normal window (ended via
+        // the header's `⏹`, or via the menu bar's confirmed "会議を終了…", §3.3) and a stowed one are
+        // both left alone -- see `shouldReshow`'s doc comment for why stowed no longer reveals. The
+        // actual yes/no judgment is
         // `MeetingEndReshowDecision.shouldReshow(_:_:)`, a pure function factored out below so it's
         // unit-testable independent of this controller/`WindowManager` (§7 "R6 経路のレイヤ1テスト").
         viewModel.onMeetingEnded = { [weak self] sessionId in
