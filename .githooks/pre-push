@@ -38,6 +38,15 @@ fi
 
 echo "pre-push: running 'mise run test'..." >&2
 
+# Git exports GIT_DIR (and friends) into every hook's environment, and those variables outrank
+# `git -C <path>` in every git command run downstream. A task that legitimately builds a throwaway
+# repository -- `mise run test:hooks` does exactly that -- therefore has its `git init` / `git add`
+# / `git commit` silently redirected at *this* repository when it runs from here. That is not
+# hypothetical: it flipped `core.bare`, overwrote `user.name`/`user.email` and committed the
+# fixture over the real tree, once, before this line existed. Scrub the environment so anything
+# `mise run test` invokes sees a normal shell.
+unset $(env | sed -n 's/^\(GIT_[A-Z_]*\)=.*/\1/p') 2>/dev/null || true
+
 if ! output="$(mise run test 2>&1)"; then
   # Same shape as the CI job's failure summary (`.github/workflows/ci.yml`): the lines that name
   # what broke, not the whole run. `✘` also prefixes skipped tests, hence the exclusion.

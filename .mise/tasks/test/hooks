@@ -31,13 +31,65 @@ check() { # check <expected-exit> <actual-exit> <description>
   fi
 }
 
+# GIT_DIR and friends outrank `git -C <path>` in every git command below, so a caller that has
+# them set (any git hook: `.githooks/pre-push` runs `mise run test`, which depends on this task)
+# would have this fixture's `git init`/`add`/`commit` redirected at the *real* repository. That is
+# how, once, this test flipped the repo's `core.bare`, overwrote `user.name`/`user.email` and
+# committed its fixture over the working tree. `pre-push` scrubs them too; this is the backstop
+# that makes the task safe to run from anywhere.
+unset $(env | sed -n 's/^\(GIT_[A-Z_]*\)=.*/\1/p') 2>/dev/null || true
+
+# Verify the scrub before touching git at all. `git init` is itself destructive under a stray
+# GIT_DIR -- it re-initialises that repository and flips `core.bare` -- so a check placed after it
+# is already too late. GIT_ASKPASS/GIT_EDITOR/GIT_PAGER say nothing about *which* repository git
+# will act on and are left alone.
+#
+# `grep -E`, not `sed`: BSD sed (which is what macOS ships, and this repo is macOS-only) has no
+# alternation in its basic regular expressions, so a `\|` pattern here silently matches nothing --
+# a guard that always passes is worse than no guard.
+leaked="$(env | grep -E '^(GIT_DIR|GIT_COMMON_DIR|GIT_WORK_TREE|GIT_INDEX_FILE|GIT_OBJECT_DIRECTORY|GIT_ALTERNATE_OBJECT_DIRECTORIES|GIT_PREFIX|GIT_CONFIG|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM)=' | cut -d= -f1)"
+if [ -n "$leaked" ]; then
+  echo "refusing to run: these git environment variables would redirect the fixture at a real repository:" >&2
+  printf '  %s\n' $leaked >&2
+  exit 1
+fi
+
 sandbox="$(mktemp -d -t kikimi-hook-tests)"
+if [ -z "$sandbox" ] || [ ! -d "$sandbox" ]; then
+  echo "could not create a sandbox directory; refusing to run destructive fixtures." >&2
+  exit 1
+fi
 trap 'rm -rf "$sandbox"' EXIT
 
 # --- fixture: a main checkout on `main`, plus one worktree on a feature branch ----------------
 main="$sandbox/repo"
 mkdir -p "$main"
 git -C "$main" init --quiet --initial-branch=main
+
+# Hard stop before the first destructive command: prove the repository git resolves from `$main`
+# really is the one just created under $TMPDIR, and not some ambient repository an inherited
+# environment variable, a symlink or a stray `git init` failure pointed us at.
+#
+# Both halves are load-bearing. With GIT_DIR set and cwd inside the sandbox, `git init` writes into
+# GIT_DIR (the real repository) while adopting cwd as the work tree -- so `--show-toplevel` alone
+# reports the sandbox and waves the fixture straight through to commit over the real tree. The
+# `--absolute-git-dir` check is what actually catches that.
+expected="$(cd "$main" && pwd -P)"
+resolved_toplevel="$(git -C "$main" rev-parse --show-toplevel 2>/dev/null || true)"
+resolved_gitdir="$(git -C "$main" rev-parse --absolute-git-dir 2>/dev/null || true)"
+case "$resolved_gitdir" in
+  "$expected"/*) gitdir_ok=true ;;
+  *) gitdir_ok=false ;;
+esac
+if [ "$resolved_toplevel" != "$expected" ] || [ "$gitdir_ok" != true ]; then
+  echo "sandbox check failed:" >&2
+  echo "  expected work tree : $expected" >&2
+  echo "  actual work tree   : ${resolved_toplevel:-<none>}" >&2
+  echo "  actual git dir     : ${resolved_gitdir:-<none>}  (must live under the work tree)" >&2
+  echo "Refusing to run: the fixture would have written into that repository." >&2
+  exit 1
+fi
+
 git -C "$main" config user.email test@example.com
 git -C "$main" config user.name Test
 printf 'tracked\n' > "$main/tracked.txt"

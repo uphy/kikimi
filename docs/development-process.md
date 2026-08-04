@@ -457,6 +457,21 @@ commit を積んだ）は理由を出して残す。SessionStart hook から毎�
 同じ状態が 6 回続いたら状態に関係なく解放する。判定表は `mise run test:hooks` が検証する
 （一時 git リポジトリとスタブで駆動するので、ネットワークにも実リポジトリにも触らない）。
 
+**git hook から git を呼ぶタスクを書くときの注意**
+
+git は hook の環境に `GIT_DIR` を渡す。この変数は **`git -C <path>` より優先される**ので、
+`.githooks/pre-push` から呼ばれた先で `git -C /tmp/... init` しても、実際には呼び出し元の
+リポジトリが再初期化される。`mise run test:hooks` を作った際にこれを踏み、実リポジトリの
+`core.bare` が `true` になり、`user.name`/`user.email` が上書きされ、フィクスチャが
+作業ツリーの上にコミットされた。
+
+対策は 3 段。`.githooks/pre-push` が `mise run test` の前に `GIT_*` を全部 unset し、
+`test:hooks` 自身も冒頭で unset したうえで、**`git init` より前に** 残存を検査して中断する
+（`git init` 自体が破壊的なので、初期化後の検査では手遅れ）。最後の砦として、初期化後に
+work tree と git dir の両方がサンドボックス内にあることを確認する。work tree だけの確認では
+足りない — `GIT_DIR` が効いている状態の `git init` は cwd を work tree として採用するので、
+work tree は正しく見えたまま git dir だけが実リポジトリを指す。
+
 ### 2.13 開発方式のまとめ
 
 | 項目 | 選択 |
