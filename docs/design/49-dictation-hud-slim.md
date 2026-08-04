@@ -96,13 +96,15 @@ HUD 側（MainActor）で行う。
 
 ### 3.3 `DictationController+Gesture.swift`
 
-- mic フィードコールバック（現行 70〜80 行目）:
-  - クロージャ本体で `DictationAudioLevelMeter.rms(samples)` を計算し、MainActor 側で
-    `liveHUDPanel?.updateLevel(rms)` を呼ぶ
-  - `liveHUDPanel?.updateText(cumulativeText)` を削除する（HS1）。`transcriber.feed(samples:)` の
-    呼び出し自体と戻り値の受け取りは残す（HS6。`_ = try? await ...` にはせず、streaming テキストの
-    蓄積は transcriber 側の既存責務のまま）
-  - `markCapturing()` の呼び出し位置は変えない
+- mic フィードコールバックの中身を `handleCapturedSamples(_:level:)` として切り出す（`internal`。
+  レイヤ 1 から実マイク無しで駆動するため。§5）。コールバック側に残るのは
+  `DictationAudioLevelMeter.rms(samples)` の計算と `Task { @MainActor }` への受け渡しだけにする
+- `handleCapturedSamples(_:level:)` の中身:
+  - `guard state == .capturing, let transcriber` は従来どおり（key-up 後に遅れて届いたバッファを捨てる）
+  - `markCapturing()` → `updateLevel(level)` → `feed(samples:)` の順で呼ぶ
+  - `liveHUDPanel?.updateText(cumulativeText)` は削除する（HS1）。`feed(samples:)` の呼び出し自体は
+    残し、戻り値だけ捨てる（HS6。streaming デコードを進めるのは `DictationRawSelection.select` の
+    フォールバック元として必要）
 - `handleHotkeyUp()` 以降のテール（`beginProcessing()` / raw 確定後の `updateText(trimmedRaw)` /
   各終了経路の `hide()`）は design 32 のまま変更しない
 - コード内 doc コメントのうち「書き起こし中のテキストをリアルタイム表示する」旨を書いている箇所
@@ -133,16 +135,17 @@ HUD 側（MainActor）で行う。
 
 `KikimiTests/Dictation/` に追加・改修する。
 
-1. `DictationAudioLevelMeter.rms(_:)`: 空配列 → 0、直流 1.0 の配列 → 1.0、振幅 0.5 の矩形波 → 0.5
-2. `DictationAudioLevelMeter.normalize(rms:)`: `rms == 0` → 0、フルスケール → 1、
-   `-50dB` 以下 → 0、単調非減少であること
-3. `DictationAudioLevelMeter.Smoother`: 上昇時は下降時より速く追従すること、
-   同じ目標値を与え続けると収束すること
-4. spy HUD（`DictationLiveHUDPresenting`）: **capturing 中の mic フィードで `updateText` が
-   呼ばれないこと**（HS1 の回帰防止）。既存の `DictationControllerHistoryTests` の
-   `simulateCapturing(...)` 経路に mic フィード相当の駆動が無いため、この検証は
-   `handleHotkeyDown()` を通さずに済むよう、コールバック相当の内部メソッドを
-   `internal` で切り出すか、既存 spy に「capturing 中の呼び出し回数」を記録して 0 を検証する形にする
+1. `DictationAudioLevelMeter.rms(_:)`: 空配列 → 0、無音 → 0、フルスケール矩形波 → 1、振幅 0.5 → 0.5
+2. `DictationAudioLevelMeter.normalize(rms:)`: `rms == 0` → 0、フルスケール → 1、フルスケール超は
+   1 にクランプ、`-50dB` ちょうどと以下 → 0、`-25dB` → 0.5、単調非減少であること
+3. `DictationAudioLevelMeter.Smoother`: 1 ステップの追従量が上昇時 > 下降時であること、
+   同じ目標値を与え続けると収束すること、`reset()` で 0 に戻ること
+4. spy HUD（`DictationLiveHUDPresenting`）を注入し、`simulateCapturing(...)` の後に
+   `handleCapturedSamples(_:level:)` を直接呼ぶ:
+   - **`updateText` が 1 回も呼ばれないこと**（HS1 の回帰防止）と、`updateLevel` に渡した値が
+     順に届くこと・`markCapturing()` がバッファごとに呼ばれること
+   - key-up 後に遅れて届いたバッファは `guard state == .capturing` で捨てられ、
+     `updateLevel` も `markCapturing` も呼ばれないこと
 5. design 32 §5 のテスト 5（raw 確定後に `updateText(選択 raw)`）は**そのまま維持**する
    ——`.processing` でのテキスト表示は本設計でも残るため
 

@@ -17,6 +17,7 @@ final class SpyDictationLiveHUD: DictationLiveHUDPresenting {
     private(set) var beginProcessingCount = 0
     private(set) var hideCount = 0
     private(set) var updatedTexts: [String] = []
+    private(set) var updatedLevels: [Float] = []
 
     func show() {
         showCount += 1
@@ -24,6 +25,10 @@ final class SpyDictationLiveHUD: DictationLiveHUDPresenting {
 
     func markCapturing() {
         markCapturingCount += 1
+    }
+
+    func updateLevel(_ rms: Float) {
+        updatedLevels.append(rms)
     }
 
     func beginProcessing() {
@@ -216,6 +221,35 @@ struct DictationControllerLiveHUDTests {
         #expect(hud.beginProcessingCount == 1)
         try await waitUntil { controller.state == .idle }
         #expect(hud.hideCount == 1)
+    }
+
+    @Test("capturing: mic buffers feed the level meter and never the text (design 49 HS1)")
+    func capturingFeedsLevelNotText() async {
+        let hud = SpyDictationLiveHUD()
+        let controller = makeController(config: makeConfig(refine: true), hud: hud)
+        controller.simulateCapturing(transcriber: await transcriber(finishing: "テスト"), capturedTarget: realCapturedTarget())
+
+        await controller.handleCapturedSamples([0.2, -0.2, 0.2, -0.2], level: 0.2)
+        await controller.handleCapturedSamples([0.5, -0.5], level: 0.5)
+
+        #expect(hud.updatedLevels == [0.2, 0.5])
+        // The regression this guards: the first-pass transcript used to be pushed here on every
+        // chunk boundary, and it is not what ends up being inserted.
+        #expect(hud.updatedTexts.isEmpty)
+        #expect(hud.markCapturingCount == 2)
+    }
+
+    @Test("a mic buffer arriving after key-up is ignored (state is no longer .capturing)")
+    func lateMicBufferIsIgnored() async {
+        let hud = SpyDictationLiveHUD()
+        let controller = makeController(config: makeConfig(refine: true), hud: hud)
+        controller.simulateCapturing(transcriber: await transcriber(finishing: "テスト"), capturedTarget: realCapturedTarget())
+
+        controller.handleHotkeyUp()
+        await controller.handleCapturedSamples([0.9, -0.9], level: 0.9)
+
+        #expect(hud.updatedLevels.isEmpty)
+        #expect(hud.markCapturingCount == 0)
     }
 
     @Test("refine on: the selected raw text is pushed to the HUD before refinement")

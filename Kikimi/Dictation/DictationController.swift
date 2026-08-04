@@ -65,8 +65,10 @@ final class DictationController: ObservableObject {
     /// utterance -- same singleton-per-window-kind lifecycle as `overlayPanel`. Shown in
     /// `handleHotkeyDown()`; at key-up it is either hidden immediately (`dictation.refine` off,
     /// design 25 H1) or switched to its processing phase and hidden at the end of every tail path
-    /// (`docs/design/32-dictation-hud-refining-visibility.md` HR1/HR4). Held as the protocol (built
-    /// by `liveHUDPanelFactory`) so layer-1 tests can substitute a spy. `internal`: also used by
+    /// (`docs/design/32-dictation-hud-refining-visibility.md` HR1/HR4). While capturing it carries
+    /// no transcript, only the mic level and the elapsed time
+    /// (`docs/design/49-dictation-hud-slim.md` HS1). Held as the protocol (built by
+    /// `liveHUDPanelFactory`) so layer-1 tests can substitute a spy. `internal`: also used by
     /// `handleHotkeyDown()`/`handleHotkeyUp()` (`+Gesture.swift`).
     var liveHUDPanel: (any DictationLiveHUDPresenting)?
 
