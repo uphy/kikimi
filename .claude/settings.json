@@ -12,6 +12,18 @@
         ]
       }
     ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR}/.claude/hooks/pr-flow-guard.sh\"",
+            "timeout": 60,
+            "statusMessage": "Checking the worktree's PR is green before stopping..."
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Edit|Write",
@@ -26,6 +38,17 @@
       }
     ],
     "PreToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR}/.claude/hooks/no-edit-on-main.sh\"",
+            "timeout": 15,
+            "statusMessage": "Checking this edit is not landing on main..."
+          }
+        ]
+      },
       {
         "matcher": "Bash",
         "hooks": [

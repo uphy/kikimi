@@ -48,17 +48,30 @@ phase-cycle / fix-cycle workflow には UI 検証ステップを含めない。
 
 ```bash
 mise run wt fix/xxx        # .claude/worktrees/fix/xxx を作る（origin/main 起点、ローカル資産も持ち込む）
-cd .claude/worktrees/fix/xxx
+                           # 既に main を汚してしまったら --move を足すと差分ごと運ぶ
+# EnterWorktree tool に path を渡してセッションごと移動する（cd だけでは commit hook が main と判定する）
 # 実装 → コミット → push → gh pr create
-mise run pr:wait           # 必須チェックが緑になるまで待つ。バックグラウンド実行推奨
+mise run pr:wait           # 必須チェックが緑になるまで待つ。foreground で回す
 ```
 
 - **マージはユーザーが行う。Claude は絶対にマージしない**。CI が緑になったことを報告して止まる
 - マージ済み worktree の削除は SessionStart hook が `mise run wt:reap` で自動実行する。手で消さない
 - 会話・調査だけなら `main` のままでよい。ファイルを書き換える作業は worktree
-- `main` で `git commit` すると PreToolUse hook が止める。止められたら worktree に移してやり直す
 - **UI 動作確認は同時に 1 worktree だけ**。`~/Applications/Kikimi.app` と `~/.config/kikimi` /
   `~/.local/state/kikimi` は全 worktree で共有される
+
+このフローは覚えておく類のものではなく、hook が強制する。破ろうとすると止まる。
+
+| いつ | hook | 何が起きるか |
+|---|---|---|
+| `main` の tracked ファイルを Edit/Write | `no-edit-on-main.sh` | 拒否。`mise run wt <branch> --move` を案内する |
+| `main` で `git commit` | `build-before-commit.sh` | 拒否。あわせて `mise run build` を通す |
+| push | `.githooks/pre-push` | `mise run test` を通す |
+| ターンを終えようとしたとき | `pr-flow-guard.sh` | worktree に commit があって PR が緑でなければ終わらせない |
+
+`pr-flow-guard.sh` の判定は `mise run pr:status`（`NO_COMMITS` / `UNPUSHED` / `NO_PR` / `PENDING` /
+`FAILING` / `GREEN`）。未コミットの間は黙っているので、実装途中に質問して止まるのは今までどおり。
+CI が赤なら自動で 3 回まで直しに行き、それでも赤ならユーザーの判断を仰いで止まる。
 
 ## Build
 
@@ -118,9 +131,12 @@ Claude Code からの直叩きは PreToolUse hook（`.claude/hooks/mise-swift-gu
 - `mise run clean` — ビルド成果物を削除
 - `mise run purge` — アプリ・config・state を全削除
 - `mise run lint` / `mise run lint-fix` — SwiftLint（`lint` は `web/` の `tsc --noEmit` も走らせる）
-- `mise run wt <branch>` — 作業用 worktree を `.claude/worktrees/<branch>` に作る
+- `mise run wt <branch> [--move]` — 作業用 worktree を `.claude/worktrees/<branch>` に作る
+  （`--move` は `main` の未コミット作業を運んで `main` を元に戻す）
 - `mise run wt:reap` — マージ済み PR の worktree を片付ける（SessionStart hook が自動で叩く）
 - `mise run pr:wait [<pr>]` — PR の必須チェックが緑になるまで待つ
+- `mise run pr:status [--verbose]` — 今いる worktree が PR フローのどこにいるかを1語で返す
+- `mise run test:hooks` — フロー強制 hook の判定テーブルを検証する（`mise run test` が依存）
 - `mise run verify-smoke` — `kikimi-verify` のスモークテスト
 
 ### 配布ビルド（`KIKIMI_RELEASE_BUILD=1`）

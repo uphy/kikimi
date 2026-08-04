@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+#MISE description="worktree + PR フローを強制する hook の判定テーブルを検証する"
+set -uo pipefail
+
+# `pr-flow-guard.sh` blocks the end of a turn, so a bug in its decision table is not a wrong answer
+# -- it is a session that either never stops or never enforces anything. Both runaway guards
+# (MAX_FIX_ATTEMPTS, MAX_SAME_STATE) are counters that only fire after several turns, which is
+# exactly the kind of logic no one exercises by hand. Hence this.
+#
+# Hermetic: builds a throwaway git repo + worktree under $TMPDIR and drives the guard with a stub
+# `pr/status` that reports whatever state the case under test needs. Never touches the real repo,
+# never reaches the network. Runs in about a second.
+#
+# Not part of CI (`.github/workflows/ci.yml` calls `swift test` directly); `mise run test` depends
+# on it, so the pre-push hook is what keeps it honest.
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+readonly GUARD="$repo_root/.claude/hooks/pr-flow-guard.sh"
+readonly EDIT_GUARD="$repo_root/.claude/hooks/no-edit-on-main.sh"
+
+failures=0
+checks=0
+
+check() { # check <expected-exit> <actual-exit> <description>
+  checks=$((checks + 1))
+  if [ "$1" = "$2" ]; then
+    printf '  ok    %s\n' "$3"
+  else
+    printf '  FAIL  %s (expected exit %s, got %s)\n' "$3" "$1" "$2" >&2
+    failures=$((failures + 1))
+  fi
+}
+
+sandbox="$(mktemp -d -t kikimi-hook-tests)"
+trap 'rm -rf "$sandbox"' EXIT
+
+# --- fixture: a main checkout on `main`, plus one worktree on a feature branch ----------------
+main="$sandbox/repo"
+mkdir -p "$main"
+git -C "$main" init --quiet --initial-branch=main
+git -C "$main" config user.email test@example.com
+git -C "$main" config user.name Test
+printf 'tracked\n' > "$main/tracked.txt"
+printf 'ignored.txt\n' > "$main/.gitignore"
+printf 'ignored\n' > "$main/ignored.txt"
+git -C "$main" add -A
+git -C "$main" commit --quiet -m "init"
+
+wt="$main/.claude/worktrees/feat/x"
+git -C "$main" worktree add --quiet -b feat/x "$wt" main
+
+# Stub status script: the guard prefers the branch's own copy, so this is what it will run.
+mkdir -p "$wt/.mise/tasks/pr"
+cat > "$wt/.mise/tasks/pr/status" <<'STUB'
+#!/usr/bin/env bash
+echo "stub detail" >&2
+echo "${KIKIMI_FAKE_PR_STATE:-GREEN}"
+STUB
+chmod +x "$wt/.mise/tasks/pr/status"
+
+guard() { # guard <state> -> exit code
+  printf '{"cwd":"%s","stop_hook_active":false}' "$wt" |
+    KIKIMI_FAKE_PR_STATE="$1" "$GUARD" >/dev/null 2>&1
+  echo $?
+}
+reset_counters() { rm -f "$main/.git/kikimi-pr-flow-state"; }
+
+echo "pr-flow-guard: decision table"
+reset_counters
+check 0 "$(guard NOT_A_WORKTREE)" "NOT_A_WORKTREE lets the turn end"
+check 0 "$(guard NO_COMMITS)"     "NO_COMMITS lets the turn end (questions stay possible pre-commit)"
+check 0 "$(guard GREEN)"          "GREEN lets the turn end"
+reset_counters
+check 2 "$(guard UNPUSHED)"       "UNPUSHED blocks"
+reset_counters
+check 2 "$(guard NO_PR)"          "NO_PR blocks"
+reset_counters
+check 2 "$(guard PENDING)"        "PENDING blocks"
+
+echo "pr-flow-guard: runaway guards"
+reset_counters
+check 2 "$(guard FAILING)" "FAILING blocks on automatic fix attempt 1"
+check 2 "$(guard FAILING)" "FAILING blocks on attempt 2"
+check 2 "$(guard FAILING)" "FAILING blocks on attempt 3"
+check 0 "$(guard FAILING)" "FAILING releases the turn after 3 attempts (a human takes over)"
+
+reset_counters
+for i in 1 2 3 4 5 6; do
+  check 2 "$(guard NO_PR)" "NO_PR blocks, repeat $i of the same-state cap"
+done
+check 0 "$(guard NO_PR)" "a state repeating past the cap releases the turn"
+
+reset_counters
+check 2 "$(guard FAILING)" "counter primed"
+check 0 "$(guard GREEN)"   "GREEN clears the counters"
+check 2 "$(guard FAILING)" "...so the next red PR starts its 3 attempts from scratch"
+check 2 "$(guard FAILING)" "attempt 2 after the reset"
+check 2 "$(guard FAILING)" "attempt 3 after the reset"
+check 0 "$(guard FAILING)" "and releases again at the cap"
+
+reset_counters
+printf '{"cwd":"%s"}' "$wt" | KIKIMI_FAKE_PR_STATE=FAILING KIKIMI_SKIP_PR_FLOW_GUARD=1 "$GUARD" >/dev/null 2>&1
+check 0 "$?" "KIKIMI_SKIP_PR_FLOW_GUARD=1 bypasses the guard"
+
+# The main checkout is not a worktree, so the flow never applies there.
+printf '{"cwd":"%s"}' "$main" | "$GUARD" >/dev/null 2>&1
+check 0 "$?" "the main checkout is never blocked"
+
+echo "no-edit-on-main: decision table"
+edit() { # edit <file-path> -> exit code
+  printf '{"tool_name":"Edit","tool_input":{"file_path":"%s"}}' "$1" | "$EDIT_GUARD" >/dev/null 2>&1
+  echo $?
+}
+check 2 "$(edit "$main/tracked.txt")"          "a tracked file in the main checkout on main is blocked"
+check 2 "$(edit "$main/new/nested/file.txt")"  "a not-yet-existing path in the main checkout is blocked"
+check 0 "$(edit "$main/ignored.txt")"          "a gitignored file in the main checkout is allowed"
+check 0 "$(edit "$wt/tracked.txt")"            "a file inside a worktree is allowed"
+check 0 "$(edit "$sandbox/outside.txt")"       "a file outside any repository is allowed"
+printf '{"tool_name":"Edit","tool_input":{"file_path":"%s"}}' "$main/tracked.txt" |
+  KIKIMI_ALLOW_MAIN_EDIT=1 "$EDIT_GUARD" >/dev/null 2>&1
+check 0 "$?" "KIKIMI_ALLOW_MAIN_EDIT=1 bypasses the guard"
+
+echo
+if [ "$failures" -gt 0 ]; then
+  echo "$failures of $checks checks failed." >&2
+  exit 1
+fi
+echo "$checks checks passed."

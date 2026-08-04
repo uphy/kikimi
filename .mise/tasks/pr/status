@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+#MISE description="今いる worktree の PR がどの段階にいるかを1語で返す（hook とエージェント共用）"
+#
+# The single source of truth for "what is the next step in the worktree + PR flow"
+# (docs/development-process.md 2.11). `.claude/hooks/pr-flow-guard.sh` runs this to decide whether
+# a turn may end, and an agent can run it directly to see where it stands. Keeping one
+# implementation means the hook and the human-readable answer can never disagree.
+#
+# Prints the state word on stdout (always exactly one line), plus human-readable detail on stderr.
+# Always exits 0 -- callers branch on the word, not on the exit code, so a `set -e` caller never
+# dies just because a PR happens to be red.
+#
+#   NOT_A_WORKTREE  cwd is not one of `.claude/worktrees/*` -- the flow does not apply
+#   NO_COMMITS      the branch has no commits of its own yet (nothing to open a PR with)
+#   UNPUSHED        commits exist that origin has not seen
+#   NO_PR           the branch is pushed but has no pull request
+#   PENDING         the PR exists; at least one required check has not concluded
+#   FAILING         a required check failed (or was cancelled)
+#   GREEN           every required check passes -- the flow is done, a human merges from here
+#
+#   mise run pr:status              # the worktree the shell is in
+#   mise run pr:status --verbose    # also list each required check
+set -uo pipefail
+
+verbose=false
+[ "${1:-}" = "--verbose" ] && verbose=true
+
+note() { echo "$@" >&2; }
+answer() { echo "$1"; exit 0; }
+
+command -v git >/dev/null 2>&1 || answer NOT_A_WORKTREE
+
+toplevel="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[ -n "$toplevel" ] || answer NOT_A_WORKTREE
+
+# The flow applies to worktrees only. `git rev-parse --git-common-dir` points at the *main*
+# checkout's `.git` from anywhere, so comparing it with `--git-dir` distinguishes a worktree
+# (`.git/worktrees/<name>`) from the main checkout (`.git`) without any path-string guessing.
+# `pwd -P`: git resolves symlinks in the paths it prints, so the comparison has to be made in the
+# physical form too (on macOS a repo under /tmp reads back as /private/tmp and would otherwise
+# never compare equal).
+git_dir="$(cd "$(git rev-parse --git-dir 2>/dev/null)" && pwd -P)"
+common_dir="$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" && pwd -P)"
+[ "$git_dir" != "$common_dir" ] || answer NOT_A_WORKTREE
+
+branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+[ -n "$branch" ] || answer NOT_A_WORKTREE
+
+# Commits of this branch's own, measured against the base it was cut from. `origin/main` (not the
+# local `main`, which may be behind) matches what `mise run wt` branches off.
+base="$(git merge-base HEAD origin/main 2>/dev/null || true)"
+if [ -n "$base" ]; then
+  own_commits="$(git rev-list --count "$base..HEAD" 2>/dev/null || echo 0)"
+else
+  own_commits="$(git rev-list --count HEAD 2>/dev/null || echo 0)"
+fi
+if [ "$own_commits" -eq 0 ]; then
+  note "branch $branch has no commits of its own yet."
+  answer NO_COMMITS
+fi
+
+# Unpushed is judged against the *remote-tracking ref as git last saw it*, deliberately without a
+# fetch: this runs from a Stop hook on every turn, and a network round trip there would tax every
+# single turn to catch a case (someone pushing this branch from elsewhere) that does not happen.
+remote_sha="$(git rev-parse --quiet --verify "refs/remotes/origin/$branch" 2>/dev/null || true)"
+if [ -z "$remote_sha" ] || [ "$(git rev-parse HEAD)" != "$remote_sha" ]; then
+  ahead="$(git rev-list --count "${remote_sha:-$base}..HEAD" 2>/dev/null || echo "$own_commits")"
+  note "$ahead commit(s) on $branch that origin has not seen."
+  answer UNPUSHED
+fi
+
+command -v gh >/dev/null 2>&1 || {
+  note "gh is not installed; cannot inspect the pull request."
+  answer NO_PR
+}
+
+pr_number="$(gh pr view --json number --jq .number 2>/dev/null || true)"
+if [ -z "$pr_number" ]; then
+  note "no pull request for $branch."
+  answer NO_PR
+fi
+
+checks_json="$(gh pr checks "$pr_number" --required --json name,bucket,link 2>/dev/null || true)"
+if [ -z "$checks_json" ] || [ "$checks_json" = "[]" ]; then
+  # The required checks are registered by the `main` ruleset but only appear once the workflow run
+  # has been created, which lags the push by a few seconds. "No rows yet" is pending, not green.
+  note "PR #$pr_number: required checks have not been reported yet."
+  answer PENDING
+fi
+
+if $verbose; then
+  printf '%s' "$checks_json" | jq -r '.[] | "  \(.bucket)\t\(.name)\t\(.link)"' >&2
+fi
+
+failing="$(printf '%s' "$checks_json" | jq -r '[.[] | select(.bucket == "fail" or .bucket == "cancel")] | length')"
+pending="$(printf '%s' "$checks_json" | jq -r '[.[] | select(.bucket == "pending")] | length')"
+
+if [ "$failing" -gt 0 ]; then
+  note "PR #$pr_number: $failing required check(s) failing."
+  printf '%s' "$checks_json" | jq -r '.[] | select(.bucket == "fail" or .bucket == "cancel") | "  FAIL \(.name)  \(.link)"' >&2
+  answer FAILING
+fi
+
+if [ "$pending" -gt 0 ]; then
+  note "PR #$pr_number: $pending required check(s) still running."
+  answer PENDING
+fi
+
+note "PR #$pr_number: every required check passes."
+answer GREEN

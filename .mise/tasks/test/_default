@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-#MISE description="単体テスト (swift test + vitest)"
-#MISE depends=["test:web"]
+#MISE description="単体テスト (swift test + vitest + hook 判定テーブル)"
+#MISE depends=["test:web", "test:hooks"]
 set -euo pipefail
 
 # `KIKIMI_TEST_HIDDEN=1`: the window suites order real `NSPanel`s in, which without this flashes
