@@ -237,8 +237,9 @@ pause / resume / endMeeting は `WindowManager.workspaceControllers[sessionId]` 
 @MainActor
 protocol AutoRecordWorkspaceProviding {
     /// Returns the open view model, or opens the Session Window (`WindowManager.openWorkspace`) and returns its view model.
-    func workspace(for sessionId: String) async throws -> AutoRecordWorkspace
-    func quickRecord(overrides: DraftMetaOverrides) async throws -> AutoRecordWorkspace
+    /// `presentation` applies only when the window has to be (re)opened (§3.6).
+    func workspace(for sessionId: String, presentation: WorkspacePresentation) async throws -> AutoRecordWorkspace
+    func quickRecord(overrides: DraftMetaOverrides, presentation: WorkspacePresentation) async throws -> AutoRecordWorkspace
     var recordingSessionId: String? { get }
 }
 ```
@@ -411,6 +412,46 @@ Recording 中のセッションはまず止める必要がある。ただし既�
 - 手順 8 が失敗したら `error` ログを出し、セッションは Paused として残す（`pauseRecording(_:)` 相当の meta 更新を行ってから
   `.paused` にする）。`取り消す` のバナーは消し、失敗のバナー（`.warning`）を出す
 
+### 3.6 ウィンドウを出さない録音と macOS 通知
+
+自動録音は、既定ではウィンドウを一度も表に出さずに動かす。ユーザーは会議に集中していて、Kikimi のウィンドウが
+Meet の上に出ると邪魔になる。
+
+- **開始**: `quickRecord(overrides:presentation:)` に `.stowed` を渡す。`WindowManager.openWorkspace(sessionId:presentation:)` は
+  `.stowed` のときウィンドウを表示せずにコントローラと VM だけを作り、`stowedSessionIds` に入れる
+  （design 18 §3.2 の「しまう」と同じ状態。メニューバーの「〜 を表示」から開ける）
+- **終了・再開**: §3.0.1 でウィンドウが閉じられていて開き直すときも、`.stowed` で開き直す。
+  design 18 の R6' のとおり、しまってあるウィンドウは会議終了で自動的には出てこない
+- `auto_record.google_meet.window: shown` のときは従来どおりウィンドウを表示する（§4）
+- ユーザーが自分で表示したウィンドウを Coordinator がしまい直すことはしない
+- 自動終了したセッションのウィンドウがまだしまってあれば閉じる（`closeWorkspaceWindowIfStowed`）。閉じないと、会議ごとに
+  Ended の VM とメニューバーの「〜 を表示」が溜まり続ける。サマリは「会議を終了しました」の通知か Session List から開く
+- 設定トグルを通らずにオンになった場合（`config.yaml` を直接書いた、通知の追加前からオンだった）に備え、監視を始めるとき
+  通知の許可が未決定なら一度だけ求める
+
+ウィンドウ内のバナーはしまってあると見えないので、同じ内容を macOS 通知（`UNUserNotificationCenter`）でも出す。
+通知の送信は `protocol AutoRecordNotifying` の裏に閉じ、テストではフェイクに差し替える。
+
+| 契機 | 通知の本文 | アクション | 消すタイミング |
+|---|---|---|---|
+| 自動開始（§3.1） | 「Google Meet の録音を始めました」＋タイトル（あれば） | `取り消す` | 60 秒後（バナーと同じ）・エントリが外れたとき |
+| 退出を検出（§3.2） | 「Meet から退出しました。HH:mm に会議を終了します」 | `終了しない` | 満了・再参加・エントリが外れたとき |
+| 自動終了（§3.2-3） | 「会議を終了しました」 | なし（本文クリックでウィンドウを表示） | 残す |
+| 発言 0 件で破棄（§3.2-3） | 「発言がなかったため録音を破棄しました」 | なし | 残す |
+| 自動開始に失敗（録音が始まらなかった） | 「Google Meet の自動録音を開始できませんでした…」。あわせてウィンドウを表示する | なし | 残す |
+| 猶予 0 で退出（§3.2-2） | 「Meet から退出したため録音を一時停止しました」 | なし | 残す |
+
+- `AutoRecordNotifying` は `post(_:)`・`remove(_:sessionId:)`・`requestAuthorization()`・`currentAuthorization()` を持つ。
+  本番の `AutoRecordNotifier.shared` は `.app` バンドルの外（`swift test`）では何もしない。delegate とカテゴリは起動時の `activate()` で設定する
+- 既に開いているコントローラに `.stowed` で `openWorkspace` を呼んでも表示は変えない（表示中のウィンドウをしまわない）
+- 通知の識別子はセッション ID と種類から作り（`autoRecord.<kind>.<sessionId>`）、同じセッションの古い通知は差し替える
+- アクションと本文クリックは `UNUserNotificationCenterDelegate` で受け、`MeetAutoRecordCoordinator` の
+  バナーのボタンと同じ処理（§3.4 の `BannerActionID`）に流す。本文クリックは `showWorkspaceWindow(sessionId:)`
+  （ウィンドウが閉じていれば `openWorkspace(sessionId:presentation: .shown)` で開き直す。既存なら内部で `showWorkspaceWindow` に流れる）
+- アプリが前面にいても出す（`willPresent` で `.banner` と `.list` を返す）。音は鳴らさない
+- 通知の許可は、設定でトグルをオンにしたとき Automation の許可と続けて求める（§4）。拒否されても録音は動く。
+  そのときは通知を出さず、メニューバーの録音中表示とウィンドウ内のバナーだけになる
+
 ## 4. 設定
 
 `config.yaml` に `auto_record` セクションを足す（`AudioConfig` と同じ形の `AutoRecordConfig`）。
@@ -420,10 +461,14 @@ auto_record:
   google_meet:
     enabled: false          # 既定は無効（オプトイン）
     end_grace_seconds: 120  # 退出から会議終了までの猶予。0 なら自動終了せず Paused のまま残す
+    window: stowed          # stowed: ウィンドウを出さずに録音する（§3.6）/ shown: 開始時にウィンドウを表示する
 ```
 
+- `window` が `stowed` / `shown` 以外のとき（綴り間違い）は警告せず既定の `stowed` で読む（設定全体を壊さない）
 - 設定画面の一般タブに「会議の自動録音」セクションを足し、`Google Meet への参加で録音を始める` のトグルと
-  猶予の選択（しない / 1 分 / 2 分 / 5 分）を置く
+  猶予の選択（しない / 1 分 / 2 分 / 5 分）と、「録音中のウィンドウ」の選択（隠す / 表示する）を置く
+- 通知の許可（§3.6）は、Automation の許可を求めた直後に `requestAuthorization(options: [.alert])` で求める。
+  拒否されていたら、トグルの下に「通知がオフのため、自動録音の開始・終了はメニューバーでしか分かりません」と出す
 - トグルを有効にした時点で `ChromeTabInspector.inspect(mode: .interactive)` を一度呼び、Automation の許可ダイアログを出す。
   **許可ダイアログを出すのはこの経路だけ**（§2.2.1）。Chrome が起動していなければダイアログは出せないので、
   トグルの下に「Chrome を起動したあと、もう一度オンにすると許可を求めます」と出し、「許可を確認」ボタンで同じ呼び出しをやり直せるようにする
@@ -481,8 +526,6 @@ auto_record:
 - Zoom・Teams・Slack ハッドル（ネイティブアプリなので別の検出器になる。`MeetPresenceDetector` と同じ
   イベントを出す検出器を足せば `MeetAutoRecordCoordinator` はそのまま使える形にしておく）
 - Safari・Arc など Chrome 以外のブラウザ
-- macOS 通知（`UNUserNotificationCenter`）。現在アプリに通知の仕組みが無く、ディクテーションで一度外した経緯が
-  ある。録音開始時はウィンドウが開くので、バナーで足りると判断した
 - 会議コードやカレンダーの予定から会議プロファイルを選ぶ（design 41 §11 の既定プロファイルの議論と合わせて扱う）
 - 録音するシステム音声を Chrome だけに絞る（既存の選択はそのまま使う）
 
@@ -495,6 +538,8 @@ auto_record:
 | `Kikimi/AutoRecord/MeetPresenceDetector.swift`（新規） | §2.3 の純粋な状態機械（再試行・世代番号・許可後の再問い合わせ） |
 | `Kikimi/AutoRecord/MeetPresenceMonitor.swift`（新規） | §2.3 の I/O 側。スナップショットと問い合わせの実行、実行中フラグ |
 | `Kikimi/AutoRecord/MeetAutoRecordCoordinator.swift`（新規） | §3 の `managed` 辞書・終了タイマー・操作元フラグ・購読 |
+| `Kikimi/AutoRecord/AutoRecordNotifier.swift`（新規） | §3.6 の `AutoRecordNotifying` と `UNUserNotificationCenter` の実装・delegate |
+| `Kikimi/Window/WindowManager.swift` | §3.6 の `openWorkspace(sessionId:presentation:)`・`quickRecord(overrides:presentation:)` |
 | `Kikimi/AutoRecord/AutoRecordWorkspaceProviding.swift`（新規） | §3.0.1 のプロトコルと `WindowManager` アダプタ |
 | `Kikimi/AutoRecord/ChromeAutomationPermissionRequester.swift`（新規） | §4 の `AutomationPermissionRequesting` の本番実装（`inspect(mode: .interactive)` の薄いラッパー）。`KikimiApp` が起動時に `AutomationPermissionRequesterRegistry.shared` へ入れる |
 | `Kikimi/AudioCapture/AudioInputEnumerator.swift` | private ヘルパーを internal にし、`IsRunningInput` を読めるようにする |
@@ -552,6 +597,13 @@ auto_record:
 - `discardAutoRecordedSession()`（フェイクの `RefinementQueue` と `SummaryUpdater` で、flush と `updateNow` が呼ばれないこと・
   削除後に書き込みが起きないこと）
 - AppleScript の実呼び出しと Automation 許可の流れは単体テストの対象外。UI 動作確認でユーザーが確かめる
+
+- §3.6（Coordinator をフェイクの notifier と provider で動かす）
+  - `window: stowed` の自動開始で `presentation: .stowed` が渡り、開始の通知が出る。60 秒後に消える
+  - 退出で終了予定の通知が出て、再参加・`終了しない`・満了で消える。満了後に終了または破棄の通知が出る
+  - 通知の `取り消す` / `終了しない` がバナーのボタンと同じ結果になる
+  - `window: shown` では `presentation: .shown` が渡る
+- `WindowManager.openWorkspace(sessionId:presentation: .stowed)` がウィンドウを表示せずに `stowedSessionIds` に入れる
 
 ## 11. 見積もり
 

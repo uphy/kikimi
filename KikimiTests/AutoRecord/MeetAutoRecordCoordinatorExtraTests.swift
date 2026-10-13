@@ -14,7 +14,10 @@ struct MeetAutoRecordCoordinatorExtraTests {
     private func makeCoordinator(
         grace: Int = 120, monitor: MeetPresenceMonitor? = nil
     ) -> MeetAutoRecordCoordinator {
-        MeetAutoRecordCoordinator(provider: provider, clock: clock, graceSeconds: { grace }, monitor: monitor)
+        MeetAutoRecordCoordinator(
+            provider: provider, clock: clock, graceSeconds: { grace }, monitor: monitor,
+            notifier: FakeAutoRecordNotifier(), presentation: { .shown }
+        )
     }
 
     private func tab(_ code: String = "abc-defg-hij", title: String = "Weekly sync") -> MeetTab {

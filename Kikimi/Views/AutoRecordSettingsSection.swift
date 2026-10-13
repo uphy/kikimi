@@ -34,6 +34,7 @@ struct AutoRecordSettingsSection: View {
     @ObservedObject private var appConfig = AppConfig.shared
     @State private var outcome: AutomationPermissionOutcome?
     @State private var isChecking = false
+    @State private var notificationsDenied = false
 
     private struct GraceChoice: Identifiable {
         let label: String
@@ -57,8 +58,22 @@ struct AutoRecordSettingsSection: View {
             ) {
                 ForEach(graceChoices) { Text($0.label).tag($0.seconds) }
             }
+            Picker("録音中のウィンドウ", selection: appConfig.binding(\.autoRecord.googleMeet.window)) {
+                Text("隠す").tag(AutoRecordWindowMode.stowed)
+                Text("表示する").tag(AutoRecordWindowMode.shown)
+            }
             if appConfig.data.autoRecord.googleMeet.enabled {
                 permissionNotice
+                if notificationsDenied {
+                    Text("通知がオフのため、自動録音の開始・終了はメニューバーでしか分かりません。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("通知設定を開く") { Self.openNotificationSettings() }
+                }
+            }
+        }
+        .task {
+            if appConfig.data.autoRecord.googleMeet.enabled {
+                notificationsDenied = await AutoRecordNotifier.shared.currentAuthorization() == .denied
             }
         }
     }
@@ -79,6 +94,7 @@ struct AutoRecordSettingsSection: View {
                     requestPermission()
                 } else {
                     outcome = nil
+                    notificationsDenied = false
                 }
             }
         )
@@ -109,8 +125,16 @@ struct AutoRecordSettingsSection: View {
         Task {
             let result = await requester.requestInteractive()
             outcome = result
+            // Notifications follow the Automation prompt (design 50 section 4). Denial does not stop recording.
+            notificationsDenied = await AutoRecordNotifier.shared.requestAuthorization() == .denied
             isChecking = false
         }
+    }
+
+    private static func openNotificationSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension")
+        else { return }
+        NSWorkspace.shared.open(url)
     }
 
     private static func openAutomationSettings() {

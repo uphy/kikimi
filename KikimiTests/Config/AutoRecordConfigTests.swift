@@ -15,6 +15,15 @@ struct AutoRecordConfigTests {
     func defaults() {
         #expect(AutoRecordConfig.default.googleMeet.enabled == false)
         #expect(AutoRecordConfig.default.googleMeet.endGraceSeconds == 120)
+        #expect(AutoRecordConfig.default.googleMeet.window == .stowed)
+    }
+
+    @Test("window decodes stowed/shown and falls back to stowed for unknown values")
+    func windowMode() throws {
+        let shown = try decodeData("auto_record:\n  google_meet:\n    window: shown")
+        #expect(shown.autoRecord.googleMeet.window == .shown)
+        let bogus = try decodeData("auto_record:\n  google_meet:\n    window: floating")
+        #expect(bogus.autoRecord.googleMeet.window == .stowed)
     }
 
     @Test("a config without auto_record: falls back to the default")

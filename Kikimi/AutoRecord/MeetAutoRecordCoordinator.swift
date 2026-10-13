@@ -74,6 +74,8 @@ final class MeetAutoRecordCoordinator {
     private let clock: AutoRecordClock
     private let graceSeconds: @MainActor () -> Int
     private let monitor: MeetPresenceMonitor
+    private let notifier: AutoRecordNotifying
+    private let presentation: @MainActor () -> WorkspacePresentation
 
     private(set) var managed: [String: ManagedSession] = [:]
     private(set) var currentSessionId: String?
@@ -91,7 +93,9 @@ final class MeetAutoRecordCoordinator {
         provider: AutoRecordWorkspaceProviding? = nil,
         clock: AutoRecordClock? = nil,
         graceSeconds: (@MainActor () -> Int)? = nil,
-        monitor: MeetPresenceMonitor? = nil
+        monitor: MeetPresenceMonitor? = nil,
+        notifier: AutoRecordNotifying? = nil,
+        presentation: (@MainActor () -> WorkspacePresentation)? = nil
     ) {
         // Defaults are resolved here: default-argument expressions are not main-actor isolated.
         let monitor = monitor ?? MeetPresenceMonitor()
@@ -99,6 +103,10 @@ final class MeetAutoRecordCoordinator {
         self.clock = clock ?? SystemAutoRecordClock()
         self.graceSeconds = graceSeconds ?? { AppConfig.shared.data.autoRecord.googleMeet.endGraceSeconds }
         self.monitor = monitor
+        self.notifier = notifier ?? AutoRecordNotifier.shared
+        self.presentation = presentation ?? {
+            AppConfig.shared.data.autoRecord.googleMeet.window == .shown ? .shown : .stowed
+        }
         monitor.onEvent = { [weak self] event in self?.submit(event) }
     }
 
@@ -118,9 +126,24 @@ final class MeetAutoRecordCoordinator {
             .sink { [weak self] enabled in
                 MainActor.assumeIsolated {
                     guard let self else { return }
-                    if enabled { self.startMonitoring() } else { self.stopMonitoring() }
+                    if enabled {
+                        self.startMonitoring()
+                        self.requestNotificationAuthorizationIfUndetermined()
+                    } else {
+                        self.stopMonitoring()
+                    }
                 }
             }
+    }
+
+    /// Enabling through `config.yaml` (or before notifications existed) skips the settings toggle that
+    /// normally asks; ask once here so a hidden recording is never silent (section 3.6).
+    private func requestNotificationAuthorizationIfUndetermined() {
+        Task { [notifier] in
+            if await notifier.currentAuthorization() == nil {
+                _ = await notifier.requestAuthorization()
+            }
+        }
     }
 
     // MARK: Event intake
@@ -185,7 +208,7 @@ final class MeetAutoRecordCoordinator {
         managed[sessionId]?.endTimer = nil
         let workspace: AutoRecordWorkspace
         do {
-            workspace = try await provider.workspace(for: sessionId)
+            workspace = try await provider.workspace(for: sessionId, presentation: presentation())
         } catch {
             logger.error("auto-resume failed for session \(sessionId, privacy: .public): cannot open workspace: \(String(describing: error), privacy: .public)")
             removeEntry(sessionId, reason: "workspace unavailable")
@@ -205,6 +228,7 @@ final class MeetAutoRecordCoordinator {
         managed[sessionId]?.phase = .recording
         managed[sessionId]?.pausedByCoordinator = false
         workspace.removeBanners(withId: WorkspaceBanner.autoRecordEndScheduled(deadline: .distantPast).id)
+        notifier.remove([.endScheduled], sessionId: sessionId)
         currentSessionId = sessionId
         logger.info("auto-resumed session \(sessionId, privacy: .public): rejoined meeting \(code, privacy: .public)")
         return true
@@ -212,15 +236,19 @@ final class MeetAutoRecordCoordinator {
 
     /// Section 3.1-3 / 3.1-4.
     private func startNewSession(for tab: MeetTab) async {
+        let overrides = Self.overrides(for: tab)
         let workspace: AutoRecordWorkspace
         do {
-            workspace = try await provider.quickRecord(overrides: Self.overrides(for: tab))
+            workspace = try await provider.quickRecord(overrides: overrides, presentation: presentation())
         } catch {
             logger.error("auto-record start failed for meeting \(tab.code, privacy: .public): \(String(describing: error), privacy: .public)")
             return
         }
         guard case .recording = workspace.recordingButtonState else {
             logger.error("auto-record start failed for session \(workspace.sessionId, privacy: .public): state is not recording; leaving the draft for the user")
+            // A hidden draft holding the failure banner would go unnoticed (section 3.6).
+            provider.showWindow(sessionId: workspace.sessionId)
+            notifier.post(AutoRecordNotification(kind: .startFailed, sessionId: workspace.sessionId))
             return
         }
         let id = workspace.sessionId
@@ -232,6 +260,7 @@ final class MeetAutoRecordCoordinator {
         currentSessionId = id
         attach(workspace)
         scheduleStartBannerExpiry(id, deadline: deadline)
+        notifier.post(AutoRecordNotification(kind: .started, sessionId: id, title: overrides.title))
         logger.info("auto-started session \(id, privacy: .public): joined Google Meet \(tab.code, privacy: .public)")
     }
 
@@ -257,7 +286,7 @@ final class MeetAutoRecordCoordinator {
         guard entry.phase == .recording else { return }
         let workspace: AutoRecordWorkspace
         do {
-            workspace = try await provider.workspace(for: id)
+            workspace = try await provider.workspace(for: id, presentation: presentation())
         } catch {
             logger.error("auto-pause failed for session \(id, privacy: .public): cannot open workspace: \(String(describing: error), privacy: .public)")
             removeEntry(id, reason: "workspace unavailable")
@@ -280,11 +309,13 @@ final class MeetAutoRecordCoordinator {
             managed[id]?.phase = .pausedNoAutoEnd
             logger.info("auto-paused session \(id, privacy: .public): left meeting \(code, privacy: .public); auto end disabled")
             removeEntry(id, reason: "auto end disabled")
+            notifier.post(AutoRecordNotification(kind: .pausedNoAutoEnd, sessionId: id))
             return
         }
         let deadline = clock.now.addingTimeInterval(TimeInterval(grace))
         managed[id]?.phase = .pausedAwaitingEnd(deadline: deadline)
         workspace.showBanner(.autoRecordEndScheduled(deadline: deadline))
+        notifier.post(AutoRecordNotification(kind: .endScheduled, sessionId: id, deadline: deadline))
         managed[id]?.endTimer = Task { [self] in
             do { try await clock.sleep(until: deadline) } catch { return }
             await endTimerFired(id)
@@ -302,7 +333,7 @@ final class MeetAutoRecordCoordinator {
 
         let workspace: AutoRecordWorkspace
         do {
-            workspace = try await provider.workspace(for: id)
+            workspace = try await provider.workspace(for: id, presentation: presentation())
         } catch {
             logger.error("auto-end failed for session \(id, privacy: .public): cannot open workspace: \(String(describing: error), privacy: .public)")
             return
@@ -317,18 +348,24 @@ final class MeetAutoRecordCoordinator {
             await workspace.endMeeting()
             if case .ended = workspace.recordingButtonState {
                 logger.info("auto-ended session \(id, privacy: .public): grace period expired after leaving the meeting")
+                notifier.post(AutoRecordNotification(kind: .ended, sessionId: id))
+                // Clicking the notification reopens it; keeping a hidden Ended window only leaks it.
+                provider.closeIfStowed(sessionId: id)
             } else {
                 logger.error("auto-end failed for session \(id, privacy: .public): state is not ended")
             }
         } else {
             logger.info("auto-discarding session \(id, privacy: .public): grace period expired and nothing was transcribed")
-            await workspace.discardAutoRecordedSession()
+            if await workspace.discardAutoRecordedSession() {
+                notifier.post(AutoRecordNotification(kind: .discarded, sessionId: id))
+            }
         }
     }
 
     // MARK: Banner buttons
 
-    private func handleBannerAction(sessionId id: String, action: BannerActionID) {
+    /// Banner buttons and notification actions share this path (design 50 section 3.6).
+    func handleBannerAction(sessionId id: String, action: BannerActionID) {
         guard managed[id] != nil else { return }
         switch action {
         case .keepMeetingOpen:
@@ -425,6 +462,7 @@ final class MeetAutoRecordCoordinator {
             managed[id] = entry
             // A closed window took its banners with it; nothing to remove then.
             liveWorkspaces[id]?.value?.removeBanners(withId: WorkspaceBanner.autoRecordStarted(sessionId: id).id)
+            notifier.remove([.started], sessionId: id)
         }
     }
 
@@ -437,6 +475,7 @@ final class MeetAutoRecordCoordinator {
             workspace.removeBanners(withId: WorkspaceBanner.autoRecordEndScheduled(deadline: .distantPast).id)
             workspace.onBannerAction = nil
         }
+        notifier.remove([.started, .endScheduled], sessionId: id)
         subscriptions.removeValue(forKey: id)
         liveWorkspaces.removeValue(forKey: id)
         lastState.removeValue(forKey: id)

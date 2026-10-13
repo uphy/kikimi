@@ -134,27 +134,38 @@ final class FakeAutoRecordProvider: AutoRecordWorkspaceProviding {
     private(set) var workspaces: [String: FakeAutoRecordWorkspace] = [:]
     private(set) var quickRecordOverrides: [DraftMetaOverrides] = []
     private(set) var reopenCount = 0
+    private(set) var quickRecordPresentations: [WorkspacePresentation] = []
+    private(set) var reopenPresentations: [WorkspacePresentation] = []
     private var closedSnapshots: [String: (RecordingButtonState, Bool)] = [:]
     private var nextIndex = 1
 
-    func quickRecord(overrides: DraftMetaOverrides) async throws -> AutoRecordWorkspace {
+    func quickRecord(overrides: DraftMetaOverrides, presentation: WorkspacePresentation) async throws -> AutoRecordWorkspace {
         quickRecordOverrides.append(overrides)
+        quickRecordPresentations.append(presentation)
         let workspace = FakeAutoRecordWorkspace(sessionId: "session-\(nextIndex)", state: startOutcome)
         nextIndex += 1
         workspaces[workspace.sessionId] = workspace
         return workspace
     }
 
-    func workspace(for sessionId: String) async throws -> AutoRecordWorkspace {
+    func workspace(for sessionId: String, presentation: WorkspacePresentation) async throws -> AutoRecordWorkspace {
         if let openError { throw openError }
         if let existing = workspaces[sessionId] { return existing }
         guard let snapshot = closedSnapshots[sessionId] else { throw CocoaError(.fileNoSuchFile) }
         reopenCount += 1
+        reopenPresentations.append(presentation)
         let reopened = FakeAutoRecordWorkspace(sessionId: sessionId, state: snapshot.0)
         reopened.hasConfirmedTranscript = snapshot.1
         workspaces[sessionId] = reopened
         return reopened
     }
+
+    private(set) var shownWindows: [String] = []
+    private(set) var closedIfStowed: [String] = []
+
+    func showWindow(sessionId: String) { shownWindows.append(sessionId) }
+
+    func closeIfStowed(sessionId: String) { closedIfStowed.append(sessionId) }
 
     /// Simulates the user closing the Session Window of a Paused session.
     func closeWindow(of sessionId: String) {
@@ -182,5 +193,30 @@ final class FakeChromeAudioSource: ChromeAudioActivitySource {
     /// Delivers a snapshot as the real source does (on the main thread). No-op while stopped.
     func emit(_ activity: ChromeAudioActivity) {
         handler?(activity)
+    }
+}
+
+/// Records what the coordinator asked of the notification center; never touches `UNUserNotificationCenter`.
+@MainActor
+final class FakeAutoRecordNotifier: AutoRecordNotifying {
+    private(set) var posted: [AutoRecordNotification] = []
+    private(set) var removed: [(kinds: [AutoRecordNotificationKind], sessionId: String)] = []
+    var authorization: AutoRecordNotificationAuthorization? = .granted
+
+    func post(_ notification: AutoRecordNotification) { posted.append(notification) }
+
+    func remove(_ kinds: [AutoRecordNotificationKind], sessionId: String) {
+        removed.append((kinds, sessionId))
+    }
+
+    func requestAuthorization() async -> AutoRecordNotificationAuthorization { authorization ?? .denied }
+    func currentAuthorization() async -> AutoRecordNotificationAuthorization? { authorization }
+
+    func postedKinds(for sessionId: String) -> [AutoRecordNotificationKind] {
+        posted.filter { $0.sessionId == sessionId }.map(\.kind)
+    }
+
+    func wasRemoved(_ kind: AutoRecordNotificationKind, sessionId: String) -> Bool {
+        removed.contains { $0.sessionId == sessionId && $0.kinds.contains(kind) }
     }
 }
