@@ -114,6 +114,27 @@ enum DraftSeed: Equatable, Sendable {
     case profile(id: String)
 }
 
+// MARK: - DraftMetaOverrides
+
+/// Values written into a new Draft's `SessionMeta` at creation time, on top of the defaults
+/// (`docs/design/50-meet-auto-record.md` §3.1). Applied inside `createDraftSession(seed:overrides:)`
+/// rather than via a later `updateMeta`, which would race the view model's hydrate and its
+/// `startRecording()` meta writes.
+struct DraftMetaOverrides: Equatable, Sendable {
+    /// Initial title. `nil` or empty keeps the default empty title.
+    var title: String?
+    /// Initial `titleAutoNamedOnce`. Applied only when a non-empty `title` is given: a title that is
+    /// kept must not be overwritten by the first automatic title, while a session left untitled still
+    /// gets named by the first summary update.
+    var titleAutoNamedOnce: Bool = false
+    var autoRecord: AutoRecordMeta?
+
+    static let none = DraftMetaOverrides()
+
+    var resolvedTitle: String { title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "" }
+    var resolvedTitleAutoNamedOnce: Bool { resolvedTitle.isEmpty ? false : titleAutoNamedOnce }
+}
+
 // MARK: - AppliedDraftSeed
 
 /// What `SessionStore.createDraftSession(seed:)` actually applied (`docs/design/

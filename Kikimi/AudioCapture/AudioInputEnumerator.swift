@@ -137,39 +137,37 @@ struct AudioInputEnumerator: AudioInputEnumerating {
 
     // MARK: - CoreAudio process enumeration
 
-    private func readRawProcessObservations() -> [RawProcessObservation] {
+    /// All CoreAudio process object IDs currently registered. Shared with
+    /// `ChromeAudioActivityMonitor` (`docs/design/50-meet-auto-record.md` section 2.1); the
+    /// per-process readers below (`readProcessBundleID` / `readProcessState` / `readProcessPID`)
+    /// are internal for the same reason.
+    static func readProcessObjectIDs() -> [AudioObjectID] {
         let systemObjectID = AudioObjectID(kAudioObjectSystemObject)
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyProcessObjectList,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-
         var dataSize = UInt32(0)
         guard AudioObjectGetPropertyDataSize(systemObjectID, &address, 0, nil, &dataSize) == noErr else {
-            logger.warning("failed to read process object list size")
             return []
         }
-
         let count = Int(dataSize) / MemoryLayout<AudioObjectID>.size
-        guard count > 0 else {
+        guard count > 0 else { return [] }
+        var ids = Array(repeating: AudioObjectID(), count: count)
+        guard AudioObjectGetPropertyData(systemObjectID, &address, 0, nil, &dataSize, &ids) == noErr else {
             return []
         }
+        return ids
+    }
 
-        var processObjectIDs = Array(repeating: AudioObjectID(), count: count)
-        guard AudioObjectGetPropertyData(
-            systemObjectID,
-            &address,
-            0,
-            nil,
-            &dataSize,
-            &processObjectIDs
-        ) == noErr else {
-            logger.warning("failed to read process object list")
-            return []
-        }
+    /// `kAudioProcessPropertyIsRunningInput` for one process object.
+    static func readProcessIsRunningInput(objectID: AudioObjectID) -> Bool {
+        readProcessState(objectID: objectID, selector: kAudioProcessPropertyIsRunningInput)
+    }
 
-        return processObjectIDs.map(observation(forProcessObject:))
+    private func readRawProcessObservations() -> [RawProcessObservation] {
+        Self.readProcessObjectIDs().map(observation(forProcessObject:))
     }
 
     private func observation(forProcessObject objectID: AudioObjectID) -> RawProcessObservation {
@@ -181,7 +179,7 @@ struct AudioInputEnumerator: AudioInputEnumerating {
         return RawProcessObservation(bundleId: bundleId, displayName: displayName, isRunningOutput: isRunningOutput)
     }
 
-    private static func readProcessPID(objectID: AudioObjectID) -> pid_t? {
+    static func readProcessPID(objectID: AudioObjectID) -> pid_t? {
         var value = pid_t(0)
         var size = UInt32(MemoryLayout<pid_t>.size)
         var address = AudioObjectPropertyAddress(
@@ -195,7 +193,7 @@ struct AudioInputEnumerator: AudioInputEnumerating {
         return value
     }
 
-    private static func readProcessBundleID(objectID: AudioObjectID) -> String? {
+    static func readProcessBundleID(objectID: AudioObjectID) -> String? {
         var bundleID: CFString = "" as CFString
         var size = UInt32(MemoryLayout<CFString>.size)
         var address = AudioObjectPropertyAddress(
@@ -209,7 +207,7 @@ struct AudioInputEnumerator: AudioInputEnumerating {
         return bundleID as String
     }
 
-    private static func readProcessState(objectID: AudioObjectID, selector: AudioObjectPropertySelector) -> Bool {
+    static func readProcessState(objectID: AudioObjectID, selector: AudioObjectPropertySelector) -> Bool {
         var value = UInt32(0)
         var size = UInt32(MemoryLayout<UInt32>.size)
         var address = AudioObjectPropertyAddress(

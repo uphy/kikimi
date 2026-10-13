@@ -182,6 +182,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             await WindowManager.shared.launch()
         }
         DictationController.shared.launch()
+        // Meet auto-record (`docs/design/50-meet-auto-record.md`): the settings toggle asks for the
+        // Automation permission through this registry; monitoring follows `auto_record.google_meet.enabled`.
+        AutomationPermissionRequesterRegistry.shared = ChromeAutomationPermissionRequester()
+        MeetAutoRecordCoordinator.shared.bind(to: AppConfig.shared)
         // `mise run apply`'s "may I quit?" endpoint (`docs/design/46-control-socket.md`). Started
         // last: it reports on the two above, and a failure to bind is logged and ignored.
         ControlSocketServer.shared.start()

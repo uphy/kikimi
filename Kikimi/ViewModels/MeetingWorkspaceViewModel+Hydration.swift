@@ -7,6 +7,13 @@ import Foundation
 // because Swift's `private` does not span files.
 
 extension MeetingWorkspaceViewModel {
+    /// Returns once the `init`-time hydration has finished, so `meta`/`recordingButtonState` reflect
+    /// disk rather than the placeholder (`.startRecording`). Needed by callers that act on a freshly
+    /// opened window right away (the auto-record coordinator, `docs/design/50-meet-auto-record.md` §3.0.1).
+    func waitUntilHydrated() async {
+        await hydrationTask?.value
+    }
+
     /// Replaces the placeholder `meta`/empty `contextText`/`summaryTemplateText` seeded by `init`
     /// with the real values read from `sessionHandle` (a `var` actor property, unreadable
     /// synchronously from `init` — see `init`'s doc comment). Also derives the real initial

@@ -85,6 +85,7 @@ struct GeneralSettingsTab: View {
                     isOn: appConfig.binding(\.audio.suggestHeadphonesOnBuiltInSpeaker)
                 )
             }
+            AutoRecordSettingsSection()
             Section("既定テンプレート") {
                 TextField("既定 context.md のパス", text: appConfig.binding(\.defaults.contextFile))
                 TextField("既定 summary_template.md のパス", text: appConfig.binding(\.defaults.summaryTemplateFile))
