@@ -21,6 +21,8 @@ import SwiftUI
 @MainActor
 final class SessionListWindowController: NSWindowController, NSWindowDelegate {
     private let viewModel: SessionListViewModel
+    /// Read access for `WindowManager.handleSessionDeleted(sessionId:)`'s list refresh.
+    var listViewModel: SessionListViewModel { viewModel }
     private let logger = Logger(subsystem: "io.github.uphy.Kikimi", category: "SessionListWindowController")
 
     /// Debounces `windowDidMove`/`windowDidResize` writes to `state.yaml` (design doc section 9:

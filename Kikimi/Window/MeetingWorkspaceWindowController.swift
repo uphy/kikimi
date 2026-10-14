@@ -254,6 +254,13 @@ final class MeetingWorkspaceWindowController: NSWindowController, NSWindowDelega
         appState.markWindowHidden(sessionId: sessionId)
     }
 
+    /// Marks a freshly created controller as stowed without ever showing its window (design 50
+    /// section 3.6). The state is the same as after `stow()`, minus the `orderOut`/`AppState` write:
+    /// there is nothing to hide, and `AppState` never learned the window was visible.
+    func markStowedWithoutShowing() {
+        isStowed = true
+    }
+
     /// Reverses `stow()`, and doubles as the single `visible = true` write-back path (§4.3) for
     /// every re-display route `WindowManager.showWorkspaceWindow(sessionId:)` funnels through (menu
     /// bar / Session List "開く" / R6's auto-reshow) -- calling `persistVisibleState()` once here is

@@ -51,7 +51,7 @@ extension MeetingWorkspaceViewModel {
                 return .pausedDisabledOtherRecording(elapsedSeconds: elapsedSeconds, otherSessionId: activeSessionId)
             }
             return .paused(elapsedSeconds: elapsedSeconds)
-        case .starting, .recording, .pausing, .resuming, .ending, .ended:
+        case .starting, .recording, .pausing, .resuming, .ending, .discarding, .ended:
             return current
         }
     }

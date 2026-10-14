@@ -5456,3 +5456,130 @@ struct MeetingWorkspaceViewModelElapsedTimeTests {
         )
     }
 }
+
+// MARK: - discardAutoRecordedSession (`docs/design/50-meet-auto-record.md` §3.5)
+
+extension MeetingWorkspaceViewModelTests {
+    private struct DiscardFixture {
+        let root: URL
+        let store: SessionStore
+        let sessionId: String
+        let viewModel: MeetingWorkspaceViewModel
+        let summaryLLM: FakeSummaryLLM
+        let refinementLLM: FakeRefinementLLM
+        let capture: FakeAudioCapture
+    }
+
+    private func makeRecordingFixture() async throws -> DiscardFixture {
+        let root = makeTemporaryDirectory()
+        let store = makeStore(root: root)
+        let created = try await store.createDraftSession()
+        let handle = try await store.openSession(created.id)
+        let capture = FakeAudioCapture()
+        let pipeline = FakeTranscriptPipeline()
+        let summaryLLM = FakeSummaryLLM()
+        let refinementLLM = FakeRefinementLLM()
+        let viewModel = makeViewModel(
+            handle: handle, store: store, capture: capture, pipeline: pipeline,
+            llm: summaryLLM, refinementLLM: refinementLLM
+        )
+        return DiscardFixture(
+            root: root, store: store, sessionId: created.id, viewModel: viewModel,
+            summaryLLM: summaryLLM, refinementLLM: refinementLLM, capture: capture
+        )
+    }
+
+    private func sessionDirectoryExists(root: URL, sessionId: String) -> Bool {
+        FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("sessions", isDirectory: true).appendingPathComponent(sessionId).path
+        )
+    }
+
+    @Test("discardAutoRecordedSession() while Recording deletes the session without any summary or refinement LLM call")
+    func discardWhileRecording() async throws {
+        let fixture = try await makeRecordingFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let viewModel = fixture.viewModel
+
+        await viewModel.startRecording()
+        // A segment sitting in the refinement queue: a pause would `flush()` it into an LLM call.
+        let segment = try await viewModel.sessionHandle.appendTranscriptSegment(
+            source: .mic, startMs: 0, endMs: 500, text: "hello", confidence: 0.9
+        )
+        await viewModel.refinementQueue?.enqueue(segment)
+
+        await viewModel.discardAutoRecordedSession()
+
+        #expect(fixture.capture.stopCallCount == 1)
+        #expect(await fixture.summaryLLM.callCount == 0, "no pause-flush summary update")
+        #expect(await fixture.refinementLLM.callCount == 0, "pending refinement must be dropped, not flushed")
+        #expect(await fixture.store.recordingSessionId == nil)
+        #expect(sessionDirectoryExists(root: fixture.root, sessionId: fixture.sessionId) == false)
+        #expect(viewModel.refinementQueue == nil)
+        #expect(viewModel.recordingButtonState == .discarding)
+    }
+
+    @Test("discardAutoRecordedSession() from Paused also deletes the session")
+    func discardWhilePaused() async throws {
+        let fixture = try await makeRecordingFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        await fixture.viewModel.startRecording()
+        await fixture.viewModel.pauseRecording()
+        await fixture.viewModel.discardAutoRecordedSession()
+
+        #expect(sessionDirectoryExists(root: fixture.root, sessionId: fixture.sessionId) == false)
+        #expect(await fixture.store.recordingSessionId == nil)
+    }
+
+    @Test("discardAutoRecordedSession() is a no-op outside Recording/Paused")
+    func discardIsNoOpInDraft() async throws {
+        let fixture = try await makeRecordingFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        await fixture.viewModel.discardAutoRecordedSession()
+
+        #expect(fixture.viewModel.recordingButtonState == .startRecording)
+        #expect(sessionDirectoryExists(root: fixture.root, sessionId: fixture.sessionId))
+    }
+
+    @Test("a failed delete leaves the session Paused with a warning banner")
+    func discardDeleteFailureLeavesPaused() async throws {
+        let fixture = try await makeRecordingFixture()
+        let sessionsRoot = fixture.root.appendingPathComponent("sessions", isDirectory: true)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: sessionsRoot.path)
+            try? FileManager.default.removeItem(at: fixture.root)
+        }
+        let viewModel = fixture.viewModel
+        await viewModel.startRecording()
+        viewModel.banners.append(.autoRecordStarted(sessionId: fixture.sessionId))
+
+        // A read-only parent directory makes `removeItem` on the session folder fail.
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: sessionsRoot.path)
+        await viewModel.discardAutoRecordedSession()
+
+        guard case .paused = viewModel.recordingButtonState else {
+            Issue.record("expected .paused, got \(viewModel.recordingButtonState)")
+            return
+        }
+        #expect(viewModel.banners.contains { if case .discardFailed = $0 { return true } else { return false } })
+        #expect(viewModel.banners.contains { if case .autoRecordStarted = $0 { return true } else { return false } } == false)
+        #expect(await fixture.store.recordingSessionId == nil)
+        #expect(await viewModel.sessionHandle.meta.state == .paused)
+        #expect(sessionDirectoryExists(root: fixture.root, sessionId: fixture.sessionId))
+    }
+
+    @Test("hasConfirmedTranscript is false for a fresh session and true once a row exists")
+    func hasConfirmedTranscriptReflectsRows() async throws {
+        let fixture = try await makeRecordingFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let viewModel = fixture.viewModel
+
+        #expect(viewModel.hasConfirmedTranscript == false)
+        viewModel.transcriptRows = [
+            TranscriptRowViewModel(id: "seg_00001", startMs: 0, endMs: 500, speaker: .mic, rawText: "hi", state: .raw)
+        ]
+        #expect(viewModel.hasConfirmedTranscript)
+    }
+}

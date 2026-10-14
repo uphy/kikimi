@@ -300,13 +300,24 @@ final class SessionListViewModel: ObservableObject {
             toast = .cannotDeleteActiveRecording(sessionId: sessionId)
             return
         }
+        // The list refresh and `incompleteSessionsBanner` cleanup happen in
+        // `sessionDidDelete(sessionId:)`, which `handleSessionDeleted` calls on the live list view model
+        // (`docs/design/50-meet-auto-record.md` §3.5).
         WindowManager.shared.handleSessionDeleted(sessionId: sessionId)
-        // A crashed session surfaced by the crash-recovery banner (`state: recording` on disk from a
-        // previous run, so not `recordingSessionId` — the delete above succeeds) must also drop out
-        // of `incompleteSessionsBanner`, otherwise the banner keeps naming a session that no longer
-        // exists until the next launch.
+        // `sessionDidDelete` refreshes too, but only on the window-owned view model and without being
+        // awaited; callers of `delete` expect `sessions` to be current when it returns.
         incompleteSessionsBanner.removeAll { $0.id == sessionId }
         await refresh()
+    }
+
+    /// Post-delete bookkeeping for a session removed by any path (called from
+    /// `WindowManager.handleSessionDeleted(sessionId:)`). A crashed session surfaced by the
+    /// crash-recovery banner (`state: recording` on disk from a previous run, so not
+    /// `recordingSessionId` -- the delete succeeds) must drop out of `incompleteSessionsBanner`,
+    /// otherwise the banner keeps naming a session that no longer exists until the next launch.
+    func sessionDidDelete(sessionId: String) {
+        incompleteSessionsBanner.removeAll { $0.id == sessionId }
+        Task { await refresh() }
     }
 
     /// "Markdown をコピー" (`docs/design/37-transcript-markdown-copy.md` §3.3, TC9/TC11): renders

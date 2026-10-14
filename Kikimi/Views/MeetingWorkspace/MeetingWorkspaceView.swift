@@ -314,7 +314,9 @@ struct MeetingWorkspaceView: View {
     private var bannerList: some View {
         VStack(spacing: 6) {
             ForEach(viewModel.banners) { banner in
-                WorkspaceBannerRow(banner: banner) {
+                WorkspaceBannerRow(banner: banner, onAction: { actionID in
+                    viewModel.onBannerAction?(banner, actionID)
+                }, onDismiss: {
                     // `docs/design/24-system-audio-leak-mitigation.md` §5.2: dismissing this banner
                     // also latches `dismissedBuiltInSpeakerBanner` so `OutputRouteMonitor` re-evaluations
                     // don't resurrect it for the rest of this session window's lifetime.
@@ -323,7 +325,7 @@ struct MeetingWorkspaceView: View {
                     } else {
                         viewModel.banners.removeAll { $0.id == banner.id }
                     }
-                }
+                })
             }
         }
         .padding(.horizontal, 12)
@@ -421,23 +423,32 @@ private struct TitleProposalBadge: View {
 /// `docs/design/06-ui-panels.md` section 11 (failure mode table).
 private struct WorkspaceBannerRow: View {
     let banner: WorkspaceBanner
+    let onAction: (BannerActionID) -> Void
     let onDismiss: () -> Void
+
+    private var isInfo: Bool { banner.severity == .info }
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.yellow)
+            Image(systemName: isInfo ? "info.circle.fill" : "exclamationmark.triangle.fill")
+                .foregroundStyle(isInfo ? Color.accentColor : Color.yellow)
             Text(message)
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer()
+            ForEach(banner.actions) { action in
+                Button(action.label) { onAction(action.id) }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.accentColor)
+                    .accessibilityLabel(action.label)
+            }
             Button(action: onDismiss) {
                 Image(systemName: "xmark")
             }
             .buttonStyle(.plain)
         }
         .padding(8)
-        .background(Color.yellow.opacity(0.15))
+        .background(isInfo ? Color.secondary.opacity(0.12) : Color.yellow.opacity(0.15))
         .cornerRadius(6)
     }
 
@@ -465,6 +476,14 @@ private struct WorkspaceBannerRow: View {
         case .profileFallback(let requestedProfileId):
             // `docs/design/41-meeting-profiles.md` §3.3/§6.5
             return "プロファイル \(requestedProfileId) が見つからないため既定で作成しました"
+        case .discardFailed(let message):
+            return "セッションを破棄できませんでした。一時停止のまま残します: \(message)"
+        case .autoRecordStarted:
+            return "Google Meet への参加を検出して録音を始めました"
+        case .autoRecordEndScheduled(let deadline):
+            // An absolute time stays correct without re-rendering, unlike a countdown.
+            let time = deadline.formatted(date: .omitted, time: .shortened)
+            return "Meet からの退出を検出して一時停止しました。\(time) に会議を終了します"
         }
     }
 

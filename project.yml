@@ -72,6 +72,7 @@ targets:
         NSPrincipalClass: NSApplication
         NSMicrophoneUsageDescription: "Kikimi needs microphone access to transcribe meetings."
         NSAudioCaptureUsageDescription: "Kikimi needs system audio access to transcribe meeting audio from other apps."
+        NSAppleEventsUsageDescription: "Google Meet への参加を検出するため、Google Chrome で開いているタブの URL を読み取ります。"
         CFBundleURLTypes:
           - CFBundleURLName: io.github.uphy.Kikimi
             CFBundleURLSchemes:

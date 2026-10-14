@@ -119,6 +119,71 @@ extension MeetingWorkspaceViewModel {
         recordingButtonState = .paused(elapsedSeconds: Self.cumulativeElapsedSeconds(for: meta, now: now()))
     }
 
+    /// `true` once at least one confirmed transcript segment exists for this session. Read by the
+    /// auto-record coordinator to decide between ending and discarding when the end grace period
+    /// expires (`docs/design/50-meet-auto-record.md` §3.2-3).
+    var hasConfirmedTranscript: Bool {
+        !transcriptRows.isEmpty || meta.segmentCount > 0
+    }
+
+    /// Stops an auto-recorded session without any LLM work or `on_session_end`, then deletes it
+    /// (`docs/design/50-meet-auto-record.md` §3.5). A no-op unless `.recording`, `.paused` or
+    /// `.pausedDisabledOtherRecording`. If deletion fails, the session is left Paused and a
+    /// `.discardFailed` banner is shown. Returns `false` only for the no-op case.
+    @discardableResult
+    func discardAutoRecordedSession() async -> Bool {
+        let wasRecording: Bool
+        let previousState = recordingButtonState
+        switch recordingButtonState {
+        case .recording:
+            wasRecording = true
+        case .paused, .pausedDisabledOtherRecording:
+            wasRecording = false
+        default:
+            return false
+        }
+        recordingButtonState = .discarding
+
+        stopElapsedTimer()
+        await stopCaptureAndPipelineIfNeeded(diarizationEndReason: .paused)
+        // No `updateNow(.pauseFlush)` and no `refinementQueue.flush()`: the session is about to be deleted.
+        stopSummaryUpdater()
+        if let queue = refinementQueue {
+            await queue.cancelAndWait()
+            refinementEventsTask?.cancel()
+            refinementEventsTask = nil
+            refinementQueue = nil
+        }
+        // Not `shutdown()`: that ends `events` for good, which would leave a session kept after a failed
+        // delete with a dead Watchers tab. `deinit` shuts the runner down once the window is closed.
+        await watcherRunner.stopIntervalWatchers()
+        if wasRecording {
+            await sessionStore.abandonRecording(sessionId)
+        }
+        finishStoppingCapture()
+
+        do {
+            try await sessionStore.deleteSession(sessionId)
+        } catch {
+            logger.error(
+                "discardAutoRecordedSession: deleting session \(self.sessionId, privacy: .public) failed, leaving it Paused: \(String(describing: error), privacy: .public)"
+            )
+            if wasRecording {
+                try? await sessionStore.markAbandonedRecordingPaused(sessionId)
+            }
+            meta = await sessionHandle.meta
+            banners.removeAll { if case .autoRecordStarted = $0 { return true } else { return false } }
+            banners.append(.discardFailed(message: String(describing: error)))
+            // Keep `.pausedDisabledOtherRecording` as it was; a session that was recording is now Paused.
+            recordingButtonState = wasRecording
+                ? .paused(elapsedSeconds: Self.cumulativeElapsedSeconds(for: meta, now: now()))
+                : previousState
+            return true
+        }
+        WindowManager.shared.handleSessionDeleted(sessionId: sessionId)
+        return true
+    }
+
     /// Paused -> Recording. Re-runs the audio-input guard/resolution (a different device/app may
     /// have become (un)available since the pause), then `SessionStore.resumeRecording(_:)`, then
     /// `runRecordingSegmentStart(previousStateOnFailure:)`. A no-op unless `recordingButtonState`
