@@ -40,10 +40,12 @@ struct ChromeTabInspectorTests {
         let output = "1\(f)https://meet.google.com/abc-defg-hij?authuser=0\(f)↗ Meet - 定例\(r)"
             + "0\(f)https://meet.google.com/landing\(f)Meet\(r)"
             + "0\(f)https://meet.google.com/xyz-wvut-srq\(f)Other\(r)"
+            + "2\(f)https://meet.google.com/fff-ffff-fff\(f)Front\(r)"
         let tabs = ChromeTabInspector.parseTabs(output)
         #expect(tabs == [
             MeetTab(code: "abc-defg-hij", title: "定例", isActive: true),
-            MeetTab(code: "xyz-wvut-srq", title: "Other", isActive: false)
+            MeetTab(code: "xyz-wvut-srq", title: "Other", isActive: false),
+            MeetTab(code: "fff-ffff-fff", title: "Front", isActive: true, isFrontmost: true)
         ])
     }
 

@@ -43,7 +43,10 @@ final class MeetPresenceMonitor {
         guard !isRunning else { return }
         isRunning = true
         epoch += 1
-        detector = MeetPresenceDetector(retryDelays: detector.retryDelays, leaveDebounce: detector.leaveDebounce)
+        detector = MeetPresenceDetector(
+            retryDelays: detector.retryDelays, leaveDebounce: detector.leaveDebounce,
+            switchCheckInterval: detector.switchCheckInterval
+        )
         lastPermitted = nil
         pendingRequest = nil
         audioMonitor.start { [weak self] audio in
@@ -87,6 +90,7 @@ final class MeetPresenceMonitor {
             return
         }
         isQueryRunning = true
+        logger.info("tab query \(request.generation) started")
         let inspector = inspector
         let launchEpoch = epoch
         Task { [weak self] in
@@ -97,6 +101,7 @@ final class MeetPresenceMonitor {
 
     private func queryFinished(_ result: ChromeTabInspectionResult, request: MeetPresenceDetector.QueryRequest, epoch resultEpoch: Int) {
         isQueryRunning = false
+        logger.info("tab query \(request.generation) finished: \(Self.summary(of: result), privacy: .public)")
         switch result {
         case .tabs: lastPermitted = true
         // Forget a stale "permitted" so the non-prompting check runs again and can notice a re-grant.
@@ -109,9 +114,23 @@ final class MeetPresenceMonitor {
         }
         if let pending = pendingRequest {
             pendingRequest = nil
-            if isRunning, detector.isChecking, detector.currentGeneration == pending.generation {
+            // Any request still current is relaunched: a check during `Checking` and an in-meeting switch
+            // check alike (dropping the latter would leave the detector waiting for its result forever).
+            if isRunning, detector.currentGeneration == pending.generation {
                 launch(pending)
             }
+        }
+    }
+
+    /// Log-safe summary: counts only, no URLs, titles or meeting codes.
+    private static func summary(of result: ChromeTabInspectionResult) -> String {
+        switch result {
+        case let .tabs(tabs):
+            "\(tabs.count) meet tab(s), frontmost meet tab: \(tabs.contains(where: \.isFrontmost))"
+        case .chromeNotRunning:
+            "chrome not running"
+        case let .failed(failure):
+            "failed (\(failure))"
         }
     }
 }

@@ -37,6 +37,8 @@ struct MeetPresenceDetector {
     let retryDelays: [TimeInterval]
     /// How long the input must stay off before `left` is emitted.
     let leaveDebounce: TimeInterval
+    /// While in a meeting, how often to look for a switch to another meeting (section 2.3).
+    let switchCheckInterval: TimeInterval
 
     private var state: State = .idle
     private var generation = 0
@@ -44,10 +46,15 @@ struct MeetPresenceDetector {
     private var riseAt = Date.distantPast
     private var permissionRetryUsed = false
     private var lastLeftCode: String?
+    /// When the next in-meeting switch check is due.
+    private var switchCheckDue = Date.distantFuture
+    /// Generation of the in-flight switch check, if any.
+    private var switchCheckGeneration: Int?
 
-    init(retryDelays: [TimeInterval] = [5, 15, 30], leaveDebounce: TimeInterval = 3) {
+    init(retryDelays: [TimeInterval] = [5, 15, 30], leaveDebounce: TimeInterval = 3, switchCheckInterval: TimeInterval = 30) {
         self.retryDelays = retryDelays
         self.leaveDebounce = leaveDebounce
+        self.switchCheckInterval = switchCheckInterval
     }
 
     var isChecking: Bool {
@@ -118,6 +125,13 @@ struct MeetPresenceDetector {
                 state = .leavePending(tab: tab, since: now, sawInput: saw)
             } else {
                 state = .inMeeting(tab: tab, sawInput: saw)
+                if switchCheckGeneration == nil, now >= switchCheckDue {
+                    // Chrome's audio never stops when the user moves straight from one meeting to the next
+                    // (the next one's waiting room opens the mic first), so look at the tabs instead.
+                    generation += 1
+                    switchCheckGeneration = generation
+                    output.query = QueryRequest(generation: generation)
+                }
             }
 
         case let .leavePending(tab, since, sawInput):
@@ -136,12 +150,24 @@ struct MeetPresenceDetector {
     /// Feed the result of a tab query. Results of stale generations are ignored.
     mutating func handleQueryResult(_ result: ChromeTabInspectionResult, generation resultGeneration: Int, now: Date) -> Output {
         var output = Output()
+        if resultGeneration == switchCheckGeneration {
+            switchCheckGeneration = nil
+            switchCheckDue = now.addingTimeInterval(switchCheckInterval)
+            if resultGeneration == generation, case let .inMeeting(current, _) = state,
+               case let .tabs(tabs) = result,
+               let front = tabs.first(where: \.isFrontmost), front.code != current.code {
+                lastLeftCode = current.code
+                enterMeeting(front, now: now)
+                output.events = [.left(code: current.code), .joined(front)]
+            }
+            return output
+        }
         guard resultGeneration == generation, case let .checking(retriesDone) = state else { return output }
 
         switch result {
         case let .tabs(tabs):
             if let tab = chooseTab(tabs) {
-                state = .inMeeting(tab: tab, sawInput: lastAudio?.input ?? false)
+                enterMeeting(tab, now: now)
                 output.events.append(.joined(tab))
                 return output
             }
@@ -161,6 +187,11 @@ struct MeetPresenceDetector {
 
     // MARK: - Helpers
 
+    private mutating func enterMeeting(_ tab: MeetTab, now: Date) {
+        state = .inMeeting(tab: tab, sawInput: lastAudio?.input ?? false)
+        switchCheckDue = now.addingTimeInterval(switchCheckInterval)
+    }
+
     private mutating func startCheck(retriesDone: Int, output: inout Output) {
         generation += 1
         state = .checking(retriesDone: retriesDone)
@@ -178,6 +209,8 @@ struct MeetPresenceDetector {
     /// Bumps the generation so any in-flight result is discarded.
     private mutating func resetToIdle() {
         generation += 1
+        switchCheckGeneration = nil
+        switchCheckDue = .distantFuture
         state = .idle
     }
 

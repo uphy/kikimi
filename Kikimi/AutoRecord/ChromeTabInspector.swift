@@ -7,7 +7,10 @@ import OSLog
 struct MeetTab: Equatable, Sendable {
     let code: String
     let title: String
+    /// The active tab of its window.
     let isActive: Bool
+    /// The active tab of the frontmost Chrome window (used to notice a switch to another meeting).
+    var isFrontmost: Bool = false
 }
 
 enum ChromeTabInspectionFailure: Equatable, Sendable {
@@ -130,7 +133,13 @@ final class ChromeTabInspector: ChromeTabInspecting, @unchecked Sendable {
                             set u to URL of t
                             if u contains "meet.google.com/" then
                                 set flag to "0"
-                                if ti is activeIdx then set flag to "1"
+                                if ti is activeIdx then
+                                    if wi is 1 then
+                                        set flag to "2"
+                                    else
+                                        set flag to "1"
+                                    end if
+                                end if
                                 set out to out & flag & fs & u & fs & (title of t) & rs
                             end if
                         end try
@@ -176,12 +185,17 @@ final class ChromeTabInspector: ChromeTabInspecting, @unchecked Sendable {
     }
 
     /// Parses the script output: records separated by U+001E, fields (`active`, `url`, `title`) by U+001F.
+    /// `active` is `0` (inactive), `1` (active tab of a background window) or `2` (active tab of the
+    /// frontmost window; `window 1` is frontmost in Chrome's AppleScript ordering).
     static func parseTabs(_ output: String) -> [MeetTab] {
         output.components(separatedBy: recordSeparator).compactMap { record in
             let fields = record.components(separatedBy: fieldSeparator)
             guard fields.count >= 3, let code = meetCode(fromURL: fields[1]) else { return nil }
             let title = fields[2...].joined(separator: fieldSeparator)
-            return MeetTab(code: code, title: cleanTitle(title), isActive: fields[0] == "1")
+            return MeetTab(
+                code: code, title: cleanTitle(title),
+                isActive: fields[0] != "0", isFrontmost: fields[0] == "2"
+            )
         }
     }
 }
