@@ -5,7 +5,7 @@ import OSLog
 /// time) and forwards `joined` / `left` events. See `docs/design/50-meet-auto-record.md` section 2.3.
 @MainActor
 final class MeetPresenceMonitor {
-    private let logger = Logger(subsystem: "io.github.uphy.Kikimi", category: "MeetPresenceMonitor")
+    private let trace = AutoRecordTrace(category: "MeetPresenceMonitor")
     private let audioMonitor: ChromeAudioActivitySource
     private let inspector: ChromeTabInspecting
     private let now: () -> Date
@@ -52,7 +52,7 @@ final class MeetPresenceMonitor {
         audioMonitor.start { [weak self] audio in
             MainActor.assumeIsolated { self?.handle(audio) }
         }
-        logger.info("meet presence monitoring started")
+        trace.info("meet presence monitoring started")
     }
 
     func stop() {
@@ -61,7 +61,7 @@ final class MeetPresenceMonitor {
         epoch += 1
         audioMonitor.stop()
         pendingRequest = nil
-        logger.info("meet presence monitoring stopped")
+        trace.info("meet presence monitoring stopped")
     }
 
     private func handle(_ audio: ChromeAudioActivity) {
@@ -77,7 +77,11 @@ final class MeetPresenceMonitor {
 
     private func process(_ output: MeetPresenceDetector.Output) {
         for event in output.events {
-            logger.info("meet presence event: \(String(describing: event))")
+            // Codes only: a `joined` tab also carries the meeting title.
+            switch event {
+            case let .joined(tab): trace.info("meet presence event: joined \(tab.code)")
+            case let .left(code): trace.info("meet presence event: left \(code)")
+            }
             onEvent?(event)
         }
         if let request = output.query { launch(request) }
@@ -90,7 +94,7 @@ final class MeetPresenceMonitor {
             return
         }
         isQueryRunning = true
-        logger.info("tab query \(request.generation) started")
+        trace.info("tab query \(request.generation) started")
         let inspector = inspector
         let launchEpoch = epoch
         Task { [weak self] in
@@ -101,7 +105,7 @@ final class MeetPresenceMonitor {
 
     private func queryFinished(_ result: ChromeTabInspectionResult, request: MeetPresenceDetector.QueryRequest, epoch resultEpoch: Int) {
         isQueryRunning = false
-        logger.info("tab query \(request.generation) finished: \(Self.summary(of: result), privacy: .public)")
+        trace.info("tab query \(request.generation) finished: \(Self.summary(of: result))")
         switch result {
         case .tabs: lastPermitted = true
         // Forget a stale "permitted" so the non-prompting check runs again and can notice a re-grant.

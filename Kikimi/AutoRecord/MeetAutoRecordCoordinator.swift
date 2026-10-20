@@ -69,7 +69,7 @@ final class MeetAutoRecordCoordinator {
         weak var value: AutoRecordWorkspace?
     }
 
-    private let logger = Logger(subsystem: "io.github.uphy.Kikimi", category: "MeetAutoRecordCoordinator")
+    private let trace = AutoRecordTrace(category: "MeetAutoRecordCoordinator")
     private let provider: AutoRecordWorkspaceProviding
     private let clock: AutoRecordClock
     private let graceSeconds: @MainActor () -> Int
@@ -189,7 +189,7 @@ final class MeetAutoRecordCoordinator {
 
     private func handleJoined(_ tab: MeetTab) async {
         if let active = provider.recordingSessionId {
-            logger.info("auto-record skipped: session \(active, privacy: .public) is already recording (meeting \(tab.code, privacy: .public))")
+            trace.info("auto-record skipped: session \(active) is already recording (meeting \(tab.code))")
             return
         }
         let rejoinable = managed.values.first { entry in
@@ -210,7 +210,7 @@ final class MeetAutoRecordCoordinator {
         do {
             workspace = try await provider.workspace(for: sessionId, presentation: presentation())
         } catch {
-            logger.error("auto-resume failed for session \(sessionId, privacy: .public): cannot open workspace: \(String(describing: error), privacy: .public)")
+            trace.error("auto-resume failed for session \(sessionId): cannot open workspace: \(String(describing: error))")
             removeEntry(sessionId, reason: "workspace unavailable")
             return false
         }
@@ -220,7 +220,7 @@ final class MeetAutoRecordCoordinator {
         guard managed[sessionId] != nil else { return true }
 
         guard case .recording = workspace.recordingButtonState else {
-            logger.warning("auto-resume failed for session \(sessionId, privacy: .public); leaving it Paused")
+            trace.warning("auto-resume failed for session \(sessionId); leaving it Paused")
             managed[sessionId]?.phase = .pausedNoAutoEnd
             removeEntry(sessionId, reason: "resume failed")
             return true
@@ -230,7 +230,7 @@ final class MeetAutoRecordCoordinator {
         workspace.removeBanners(withId: WorkspaceBanner.autoRecordEndScheduled(deadline: .distantPast).id)
         notifier.remove([.endScheduled], sessionId: sessionId)
         currentSessionId = sessionId
-        logger.info("auto-resumed session \(sessionId, privacy: .public): rejoined meeting \(code, privacy: .public)")
+        trace.info("auto-resumed session \(sessionId): rejoined meeting \(code)")
         return true
     }
 
@@ -241,11 +241,11 @@ final class MeetAutoRecordCoordinator {
         do {
             workspace = try await provider.quickRecord(overrides: overrides, presentation: presentation())
         } catch {
-            logger.error("auto-record start failed for meeting \(tab.code, privacy: .public): \(String(describing: error), privacy: .public)")
+            trace.error("auto-record start failed for meeting \(tab.code): \(String(describing: error))")
             return
         }
         guard case .recording = workspace.recordingButtonState else {
-            logger.error("auto-record start failed for session \(workspace.sessionId, privacy: .public): state is not recording; leaving the draft for the user")
+            trace.error("auto-record start failed for session \(workspace.sessionId): state is not recording; leaving the draft for the user")
             // A hidden draft holding the failure banner would go unnoticed (section 3.6).
             provider.showWindow(sessionId: workspace.sessionId)
             notifier.post(AutoRecordNotification(kind: .startFailed, sessionId: workspace.sessionId))
@@ -261,7 +261,7 @@ final class MeetAutoRecordCoordinator {
         attach(workspace)
         scheduleStartBannerExpiry(id, deadline: deadline)
         notifier.post(AutoRecordNotification(kind: .started, sessionId: id, title: overrides.title))
-        logger.info("auto-started session \(id, privacy: .public): joined Google Meet \(tab.code, privacy: .public)")
+        trace.info("auto-started session \(id): joined Google Meet \(tab.code)")
     }
 
     static func overrides(for tab: MeetTab) -> DraftMetaOverrides {
@@ -280,7 +280,7 @@ final class MeetAutoRecordCoordinator {
 
     private func handleLeft(code: String) async {
         guard let id = currentSessionId, let entry = managed[id], entry.meetingCode == code else {
-            logger.info("meeting \(code, privacy: .public) left: no managed session, ignoring")
+            trace.info("meeting \(code) left: no managed session, ignoring")
             return
         }
         guard entry.phase == .recording else { return }
@@ -288,7 +288,7 @@ final class MeetAutoRecordCoordinator {
         do {
             workspace = try await provider.workspace(for: id, presentation: presentation())
         } catch {
-            logger.error("auto-pause failed for session \(id, privacy: .public): cannot open workspace: \(String(describing: error), privacy: .public)")
+            trace.error("auto-pause failed for session \(id): cannot open workspace: \(String(describing: error))")
             removeEntry(id, reason: "workspace unavailable")
             return
         }
@@ -299,7 +299,7 @@ final class MeetAutoRecordCoordinator {
         guard managed[id] != nil else { return }
 
         guard case .paused = workspace.recordingButtonState else {
-            logger.error("auto-pause failed for session \(id, privacy: .public); the user can retry from the pause button")
+            trace.error("auto-pause failed for session \(id); the user can retry from the pause button")
             removeEntry(id, reason: "pause failed")
             return
         }
@@ -307,7 +307,7 @@ final class MeetAutoRecordCoordinator {
         let grace = graceSeconds()
         guard grace > 0 else {
             managed[id]?.phase = .pausedNoAutoEnd
-            logger.info("auto-paused session \(id, privacy: .public): left meeting \(code, privacy: .public); auto end disabled")
+            trace.info("auto-paused session \(id): left meeting \(code); auto end disabled")
             removeEntry(id, reason: "auto end disabled")
             notifier.post(AutoRecordNotification(kind: .pausedNoAutoEnd, sessionId: id))
             return
@@ -320,7 +320,7 @@ final class MeetAutoRecordCoordinator {
             do { try await clock.sleep(until: deadline) } catch { return }
             await endTimerFired(id)
         }
-        logger.info("auto-paused session \(id, privacy: .public): left meeting \(code, privacy: .public); ending in \(grace)s unless rejoined")
+        trace.info("auto-paused session \(id): left meeting \(code); ending in \(grace)s unless rejoined")
     }
 
     /// Section 3.2-3.
@@ -335,27 +335,27 @@ final class MeetAutoRecordCoordinator {
         do {
             workspace = try await provider.workspace(for: id, presentation: presentation())
         } catch {
-            logger.error("auto-end failed for session \(id, privacy: .public): cannot open workspace: \(String(describing: error), privacy: .public)")
+            trace.error("auto-end failed for session \(id): cannot open workspace: \(String(describing: error))")
             return
         }
         switch workspace.recordingButtonState {
         case .paused, .pausedDisabledOtherRecording: break
         default:
-            logger.info("auto-end skipped for session \(id, privacy: .public): state changed")
+            trace.info("auto-end skipped for session \(id): state changed")
             return
         }
         if workspace.hasConfirmedTranscript {
             await workspace.endMeeting()
             if case .ended = workspace.recordingButtonState {
-                logger.info("auto-ended session \(id, privacy: .public): grace period expired after leaving the meeting")
+                trace.info("auto-ended session \(id): grace period expired after leaving the meeting")
                 notifier.post(AutoRecordNotification(kind: .ended, sessionId: id))
                 // Clicking the notification reopens it; keeping a hidden Ended window only leaks it.
                 provider.closeIfStowed(sessionId: id)
             } else {
-                logger.error("auto-end failed for session \(id, privacy: .public): state is not ended")
+                trace.error("auto-end failed for session \(id): state is not ended")
             }
         } else {
-            logger.info("auto-discarding session \(id, privacy: .public): grace period expired and nothing was transcribed")
+            trace.info("auto-discarding session \(id): grace period expired and nothing was transcribed")
             if await workspace.discardAutoRecordedSession() {
                 notifier.post(AutoRecordNotification(kind: .discarded, sessionId: id))
             }
@@ -369,7 +369,7 @@ final class MeetAutoRecordCoordinator {
         guard managed[id] != nil else { return }
         switch action {
         case .keepMeetingOpen:
-            logger.info("auto-end cancelled for session \(id, privacy: .public) by the user")
+            trace.info("auto-end cancelled for session \(id) by the user")
             removeEntry(id, reason: "user kept the meeting open")
         case .cancelAutoRecord:
             Task { [self] in await discard(sessionId: id) }
@@ -386,13 +386,13 @@ final class MeetAutoRecordCoordinator {
             }
         }
         guard managed[id] != nil else { return }
-        logger.info("discarding auto-recorded session \(id, privacy: .public): cancelled by the user")
+        trace.info("discarding auto-recorded session \(id): cancelled by the user")
         var discarded = false
         await perform(.discard, on: workspace) { discarded = await workspace.discardAutoRecordedSession() }
         if discarded {
             removeEntry(id, reason: "discarded")
         } else {
-            logger.info("discard of session \(id, privacy: .public) was a no-op; keeping it managed")
+            trace.info("discard of session \(id) was a no-op; keeping it managed")
         }
     }
 
@@ -481,6 +481,6 @@ final class MeetAutoRecordCoordinator {
         lastState.removeValue(forKey: id)
         operationInFlight.removeValue(forKey: id)
         if currentSessionId == id { currentSessionId = nil }
-        logger.info("session \(id, privacy: .public) is no longer auto-managed: \(reason, privacy: .public)")
+        trace.info("session \(id) is no longer auto-managed: \(reason)")
     }
 }

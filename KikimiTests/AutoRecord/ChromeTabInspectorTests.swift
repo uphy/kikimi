@@ -49,6 +49,19 @@ struct ChromeTabInspectorTests {
         ])
     }
 
+    @Test("window records are skipped by the tab parser and summarized without paths")
+    func windowRecords() {
+        let f = ChromeTabInspector.fieldSeparator
+        let r = ChromeTabInspector.recordSeparator
+        let output = "#\(f)1\(f)1\(f)about:blank\(r)"
+            + "#\(f)2\(f)30\(f)https://meet.google.com/abc-defg-hij?authuser=0\(r)"
+            + "2\(f)https://meet.google.com/abc-defg-hij?authuser=0\(f)定例\(r)"
+        #expect(ChromeTabInspector.parseTabs(output) == [
+            MeetTab(code: "abc-defg-hij", title: "定例", isActive: true, isFrontmost: true)
+        ])
+        #expect(ChromeTabInspector.windowSummary(output) == "w1 tabs=1 active=about:blank, w2 tabs=30 active=https://meet.google.com")
+    }
+
     @Test("empty script output yields no tabs")
     func parseEmpty() {
         #expect(ChromeTabInspector.parseTabs("").isEmpty)
