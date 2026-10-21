@@ -50,6 +50,8 @@ struct MeetPresenceDetector {
     private var switchCheckDue = Date.distantFuture
     /// Generation of the in-flight switch check, if any.
     private var switchCheckGeneration: Int?
+    /// While `exhausted(.noMeet)`, when to look at the tabs again.
+    private var exhaustedRecheckDue = Date.distantFuture
 
     init(retryDelays: [TimeInterval] = [5, 15, 30], leaveDebounce: TimeInterval = 3, switchCheckInterval: TimeInterval = 30) {
         self.retryDelays = retryDelays
@@ -114,6 +116,10 @@ struct MeetPresenceDetector {
                 // rises) is a fresh attempt with its own retry schedule (section 2.3).
                 riseAt = now
                 startCheck(retriesDone: 0, output: &output)
+            } else if reason == .noMeet, now >= exhaustedRecheckDue {
+                // Audio is still up but no meeting was recognized: keep looking at a slow pace, in case the
+                // tab only becomes a meeting later or its URL was not recognized at first.
+                startCheck(retriesDone: retryDelays.count, output: &output)
             } else if reason == .permission, automationPermitted, !permissionRetryUsed {
                 permissionRetryUsed = true
                 startCheck(retriesDone: retryDelays.count, output: &output)
@@ -171,15 +177,15 @@ struct MeetPresenceDetector {
                 output.events.append(.joined(tab))
                 return output
             }
-            scheduleRetry(retriesDone: retriesDone)
+            scheduleRetry(retriesDone: retriesDone, now: now)
         case .chromeNotRunning:
-            scheduleRetry(retriesDone: retriesDone)
+            scheduleRetry(retriesDone: retriesDone, now: now)
         case let .failed(failure):
             switch failure {
             case .notAuthorized, .notDetermined:
                 state = .exhausted(.permission)
             case .timeout, .other:
-                scheduleRetry(retriesDone: retriesDone)
+                scheduleRetry(retriesDone: retriesDone, now: now)
             }
         }
         return output
@@ -198,11 +204,12 @@ struct MeetPresenceDetector {
         output.query = QueryRequest(generation: generation)
     }
 
-    private mutating func scheduleRetry(retriesDone: Int) {
+    private mutating func scheduleRetry(retriesDone: Int, now: Date) {
         if retriesDone < retryDelays.count {
             state = .retryWait(due: riseAt.addingTimeInterval(retryDelays[retriesDone]), retriesDone: retriesDone)
         } else {
             state = .exhausted(.noMeet)
+            exhaustedRecheckDue = now.addingTimeInterval(switchCheckInterval)
         }
     }
 

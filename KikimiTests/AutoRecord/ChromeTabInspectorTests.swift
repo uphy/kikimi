@@ -12,6 +12,9 @@ struct ChromeTabInspectorTests {
         #expect(ChromeTabInspector.meetCode(fromURL: "https://meet.google.com/abc-defg-hij") == "abc-defg-hij")
         #expect(ChromeTabInspector.meetCode(fromURL: "https://meet.google.com/abc-defg-hij?authuser=1") == "abc-defg-hij")
         #expect(ChromeTabInspector.meetCode(fromURL: "https://meet.google.com/abc-defg-hij?authuser=x&pli=1") == "abc-defg-hij")
+        #expect(ChromeTabInspector.meetCode(fromURL: "https://meet.google.com/meet/abc-defg-hij?authuser=a@example.com") == "abc-defg-hij")
+        #expect(ChromeTabInspector.meetCode(fromURL: "https://meet.google.com/_meet/abc-defg-hij") == "abc-defg-hij")
+        #expect(ChromeTabInspector.meetCode(fromURL: "https://meet.google.com/abc-defg-hijk") == nil)
     }
 
     @Test("non-meeting Meet URLs and other hosts are rejected")

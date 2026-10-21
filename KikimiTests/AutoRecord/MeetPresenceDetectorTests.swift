@@ -54,7 +54,7 @@ struct MeetPresenceDetectorTests {
         #expect(result.events.count == 1)
     }
 
-    @Test("no Meet tab retries at 5, 15 and 30 seconds, then stops")
+    @Test("no Meet tab retries at 5, 15 and 30 seconds, then slows to one check every 30 seconds")
     func retrySchedule() {
         var d = MeetPresenceDetector()
         var request = d.handleSnapshot(outOnly, now: t0).query!
@@ -68,14 +68,30 @@ struct MeetPresenceDetectorTests {
             request = output.query!
             _ = d.handleQueryResult(failing, generation: request.generation, now: at(due + 0.5))
         }
-        // Exhausted: nothing more while audio stays on.
+        // Exhausted: a slow recheck 30 seconds after the last failure, not before.
         #expect(d.handleSnapshot(outOnly, now: at(60)).query == nil)
-        #expect(d.handleSnapshot(outOnly, now: at(600)).query == nil)
+        let recheck = d.handleSnapshot(outOnly, now: at(60.5)).query!
+        _ = d.handleQueryResult(.tabs([]), generation: recheck.generation, now: at(61))
+        #expect(d.handleSnapshot(outOnly, now: at(90)).query == nil)
 
         // Joining Meet while the output keeps playing: input rises and a fresh query starts.
-        let rise = d.handleSnapshot(inOut, now: at(601))
+        let rise = d.handleSnapshot(inOut, now: at(91))
         #expect(rise.query != nil)
-        let result = d.handleQueryResult(.tabs([tab()]), generation: rise.query!.generation, now: at(602))
+        let result = d.handleQueryResult(.tabs([tab()]), generation: rise.query!.generation, now: at(92))
+        #expect(result.events == [.joined(tab())])
+    }
+
+    @Test("a meeting recognized only on a slow recheck still joins")
+    func slowRecheckJoins() {
+        var d = MeetPresenceDetector()
+        var request = d.handleSnapshot(inOut, now: t0).query!
+        for due in [5.0, 15.0, 30.0] {
+            _ = d.handleQueryResult(.tabs([]), generation: request.generation, now: at(due - 4))
+            request = d.handleSnapshot(inOut, now: at(due)).query!
+        }
+        _ = d.handleQueryResult(.tabs([]), generation: request.generation, now: at(31))
+        let recheck = d.handleSnapshot(inOut, now: at(61)).query!
+        let result = d.handleQueryResult(.tabs([tab()]), generation: recheck.generation, now: at(62))
         #expect(result.events == [.joined(tab())])
     }
 

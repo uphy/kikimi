@@ -185,12 +185,16 @@ final class ChromeTabInspector: ChromeTabInspecting, @unchecked Sendable {
     }
 
     /// Meeting code from a Meet URL (query strings such as `?authuser=` are ignored).
+    /// Also accepts one path segment before the code: meetings opened from some entry points live at
+    /// `https://meet.google.com/meet/abc-defg-hij` (seen 2026-10-21; that meeting went unrecorded).
     static func meetCode(fromURL url: String) -> String? {
-        let prefix = "https://meet.google.com/"
-        guard let range = url.range(of: #"^https://meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}"#, options: .regularExpression) else {
+        let pattern = #"^https://meet\.google\.com/(?:[A-Za-z_]+/)?([a-z]{3}-[a-z]{4}-[a-z]{3})(?:[/?#]|$)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: url, range: NSRange(url.startIndex..., in: url)),
+              let range = Range(match.range(at: 1), in: url) else {
             return nil
         }
-        return String(url[range].dropFirst(prefix.count))
+        return String(url[range])
     }
 
     /// Strips the leading `↗ ` (PiP marker) and `Meet - ` prefix from a tab title.
