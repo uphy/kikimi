@@ -1281,6 +1281,47 @@ struct RefinementQueueTests {
     }
 }
 
+// MARK: - cancelAndWait (`docs/design/50-meet-auto-record.md` §3.5)
+
+extension RefinementQueueTests {
+    @Test("cancelAndWait drops pending segments without calling the LLM and writes nothing")
+    func cancelAndWaitDropsPending() async throws {
+        let handle = makeHandle()
+        let fakeLLM = FakeLLM()
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 10), retryDelay: .zero)
+        await queue.start()
+        for segment in try await appendSegments(3, to: handle) {
+            await queue.enqueue(segment)
+        }
+
+        await queue.cancelAndWait()
+        await queue.flush()
+
+        #expect(await fakeLLM.callCount == 0)
+        #expect(try await handle.readRefinedSegments().isEmpty)
+    }
+
+    @Test("cancelAndWait waits for the in-flight call and discards its result")
+    func cancelAndWaitDiscardsInFlightResult() async throws {
+        let handle = makeHandle()
+        let fakeLLM = FakeLLM()
+        await fakeLLM.setDelay(.milliseconds(200))
+        let segments = try await appendSegments(2, to: handle)
+        await fakeLLM.enqueueResponse(successJSON(segments.map { (id: $0.id, refinedText: "refined") }))
+        let queue = RefinementQueue(sessionHandle: handle, llm: fakeLLM, config: makeConfig(batchSize: 2), retryDelay: .zero)
+        await queue.start()
+        for segment in segments {
+            await queue.enqueue(segment)
+        }
+        try await waitUntil { await fakeLLM.callCount == 1 }
+
+        await queue.cancelAndWait()
+
+        #expect(await fakeLLM.callCount == 1)
+        #expect(try await handle.readRefinedSegments().isEmpty, "the in-flight batch result must not be written")
+    }
+}
+
 private extension FakeLLM {
     func setDelay(_ delay: Duration) {
         artificialDelay = delay

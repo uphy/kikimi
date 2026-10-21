@@ -128,6 +128,13 @@ private struct RecordingControlView: View {
             }
             .foregroundStyle(.secondary)
 
+        case .discarding:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("破棄中…")
+            }
+            .foregroundStyle(.secondary)
+
         case .disabledOtherRecording:
             Text("他の会議を録音中です")
                 .foregroundStyle(.secondary)

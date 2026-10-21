@@ -97,6 +97,11 @@ final class MeetingWorkspaceViewModel: ObservableObject {
     /// this state machine's transitions from a separate file.
     @Published var recordingButtonState: RecordingButtonState = .startRecording
     @Published var banners: [WorkspaceBanner] = []
+    /// Called when a banner's action button is pressed (`docs/design/50-meet-auto-record.md` §3.4).
+    /// Set by the auto-record coordinator; `nil` means action buttons do nothing.
+    var onBannerAction: ((WorkspaceBanner, BannerActionID) -> Void)?
+    /// The `init`-time `hydrateFromSessionHandle()` run, awaited by `waitUntilHydrated()`.
+    private(set) var hydrationTask: Task<Void, Never>?
     /// `docs/design/18-...` §4.1: full window vs. compact pill. Never persisted (R4) -- always
     /// starts `.normal`; `MeetingWorkspaceWindowController` observes it to drive `applyWindowMode(_:)`.
     @Published var windowMode: WorkspaceWindowMode = .normal
@@ -474,7 +479,7 @@ final class MeetingWorkspaceViewModel: ObservableObject {
             self?.playingSegmentId = segmentId
         }
 
-        Task { [weak self] in
+        hydrationTask = Task { [weak self] in
             await self?.hydrateFromSessionHandle()
         }
     }

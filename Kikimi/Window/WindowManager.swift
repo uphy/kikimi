@@ -101,7 +101,7 @@ final class WindowManager: ObservableObject {
 
     /// `docs/design/40-diagram-zoom.md` DZ5: one instance for the whole app, created on first zoom
     /// and kept afterwards so the 3.3MB mermaid bundle is not reloaded every time.
-    private var diagramZoomController: DiagramZoomWindowController?
+    private(set) var diagramZoomController: DiagramZoomWindowController?
     /// The long-lived subscription started once by `launch()`; see `startRecordingSubscription()`.
     private var recordingSubscriptionTask: Task<Void, Never>?
 
@@ -183,8 +183,13 @@ final class WindowManager: ObservableObject {
     /// (section 5.2: "既存があれば showWindow"). Throws `.sessionNotFound` (via
     /// `SessionStore.openSession(_:)`) if the session folder does not exist.
     @discardableResult
-    func openWorkspace(sessionId: String) async throws -> MeetingWorkspaceWindowController {
+    func openWorkspace(
+        sessionId: String,
+        presentation: WorkspacePresentation = .shown
+    ) async throws -> MeetingWorkspaceWindowController {
         if let existing = workspaceControllers[sessionId] {
+            // `.stowed` never changes what the user currently sees (design 50 section 3.6).
+            if presentation == .stowed { return existing }
             // `docs/design/18-recording-window-stow-and-compact.md` §4.3/§5.1: funnels through
             // `showWorkspaceWindow(sessionId:)` (rather than the bare `existing.showWindow(nil)` this
             // used to call directly) so the `visible = true` write-back is a single, shared code path
@@ -197,7 +202,15 @@ final class WindowManager: ObservableObject {
         let viewModel = MeetingWorkspaceViewModel(sessionHandle: handle)
         let controller = MeetingWorkspaceWindowController(viewModel: viewModel)
         workspaceControllers[sessionId] = controller
-        controller.showWindow(nil)
+        switch presentation {
+        case .shown:
+            controller.showWindow(nil)
+        case .stowed:
+            controller.markStowedWithoutShowing()
+            if !stowedSessionIds.contains(sessionId) { stowedSessionIds.append(sessionId) }
+            recomputeMenuBarStatus()
+        }
+        MeetAutoRecordCoordinator.shared.workspaceDidOpen(sessionId: sessionId, viewModel: viewModel)
         return controller
     }
 
@@ -216,9 +229,13 @@ final class WindowManager: ObservableObject {
     /// consolidating every seed-my-Draft-from-a-profile entry point (Session List pulldown, menu bar
     /// submenu, `?profile=` URL scheme) onto the single Session Window banner surface (§6.5).
     @discardableResult
-    func createDraftWorkspace(seed: DraftSeed = .none) async throws -> MeetingWorkspaceWindowController {
-        let result = try await sessionStore.createDraftSession(seed: seed)
-        let controller = try await openWorkspace(sessionId: result.meta.id)
+    func createDraftWorkspace(
+        seed: DraftSeed = .none,
+        overrides: DraftMetaOverrides = .none,
+        presentation: WorkspacePresentation = .shown
+    ) async throws -> MeetingWorkspaceWindowController {
+        let result = try await sessionStore.createDraftSession(seed: seed, overrides: overrides)
+        let controller = try await openWorkspace(sessionId: result.meta.id, presentation: presentation)
         if case .profileFallback(let requestedId) = result.appliedSeed {
             controller.viewModel.banners.append(.profileFallback(requestedProfileId: requestedId))
         }
@@ -231,7 +248,10 @@ final class WindowManager: ObservableObject {
     /// is explicit that this entry point must prioritize the existing Recording session over the
     /// new request, to avoid an unintended disconnect (section 11, failure mode #13).
     @discardableResult
-    func quickRecord() async throws -> MeetingWorkspaceWindowController {
+    func quickRecord(
+        overrides: DraftMetaOverrides = .none,
+        presentation: WorkspacePresentation = .shown
+    ) async throws -> MeetingWorkspaceWindowController {
         if let activeSessionId = recordingSessionId {
             logger.warning(
                 "Ignored kikimi://record/quick: session \(activeSessionId, privacy: .public) is already recording"
@@ -239,7 +259,7 @@ final class WindowManager: ObservableObject {
             throw SessionStoreError.anotherSessionRecording(activeSessionId: activeSessionId)
         }
 
-        let controller = try await createDraftWorkspace()
+        let controller = try await createDraftWorkspace(overrides: overrides, presentation: presentation)
         await controller.viewModel.startRecording()
         return controller
     }
@@ -293,6 +313,13 @@ final class WindowManager: ObservableObject {
         controller.unstow()
         stowedSessionIds.removeAll { $0 == sessionId }
         recomputeMenuBarStatus()
+    }
+
+    /// Closes a still-stowed Session Window so an auto-ended meeting does not leak its controller
+    /// (`docs/design/50-meet-auto-record.md` section 3.6). Shown or missing windows are left alone.
+    func closeWorkspaceWindowIfStowed(sessionId: String) {
+        guard stowedSessionIds.contains(sessionId), let controller = workspaceControllers[sessionId] else { return }
+        controller.close()
     }
 
     // MARK: メニューバー: 会議を終了 (`docs/design/18-recording-window-stow-and-compact.md` §3.3/§5.1)
@@ -375,45 +402,18 @@ final class WindowManager: ObservableObject {
         diagramZoomController?.show(source: source, anchoredTo: anchor)
     }
 
-    /// Resolves a `kikimi://debug/webview` target to the host that can answer it
-    /// (`docs/design/39-webview-markdown.md` MD12). `nil` when no such web view exists yet — the
-    /// tab was never opened, or the overlay has never been shown.
-    ///
-    /// For the three in-window surfaces, the key window wins so that a verification run driving two
-    /// sessions talks to the one it just brought forward; with no key window it falls back to the only
-    /// open workspace (the usual case under `kikimi-verify`).
-    func debugWebViewHost(target: KikimiURLRoute.DebugWebViewTarget) -> MarkdownWebViewHost? {
-        if case .diagram = target {
-            return diagramZoomController?.host
-        }
-
-        let slot: MarkdownWebViewStore.Slot
-        switch target {
-        case .summary: slot = .summary
-        case .summaryTopics: slot = .summaryTopics
-        case .watchers: slot = .watchers
-        case .chat: slot = .chat
-        case .diagram: return nil
-        }
-
-        let controller = workspaceControllers.values.first { $0.window?.isKeyWindow == true }
-            ?? workspaceControllers.values.first
-        return controller?.markdownWebViewStore.existingHost(for: slot)
-    }
-
-    /// "削除" (section 5.2/7, failure mode #5). Closes the session's Session Window window if it
-    /// is open — bypassing the Recording close-confirmation dialog via `NSWindowController.close()`
-    /// rather than `performClose(_:)`, since `SessionListViewModel.delete(sessionId:)` only calls
-    /// this after `SessionStore.deleteSession(_:)` has already succeeded, which itself refuses to
-    /// delete an actively-recording session (`.cannotDeleteActiveRecording`) — so by construction
-    /// there is nothing left to confirm. Also drops the `AppState` entry entirely (as opposed to
-    /// `workspaceWindowDidClose`'s `markWindowHidden`, which keeps it around for reopening).
+    /// "削除" (section 5.2/7, failure mode #5; design 50 §3.5). Closes the session's window if open
+    /// (`close()`, not `performClose(_:)`: callers only call this after `deleteSession(_:)` succeeded, which
+    /// refuses an actively-recording session, so there is nothing to confirm). Drops the `AppState` entry
+    /// (unlike `workspaceWindowDidClose`), refreshes the Session List and tells the auto-record coordinator.
     func handleSessionDeleted(sessionId: String) {
         workspaceControllers[sessionId]?.close()
         workspaceControllers.removeValue(forKey: sessionId)
         appState.removeWindowState(sessionId: sessionId)
         stowedSessionIds.removeAll { $0 == sessionId }
         recomputeMenuBarStatus()
+        sessionListController?.listViewModel.sessionDidDelete(sessionId: sessionId)
+        MeetAutoRecordCoordinator.shared.sessionDidDisappear(sessionId)
     }
 
     // MARK: アプリ終了シーケンス（9章）
@@ -532,7 +532,7 @@ final class WindowManager: ObservableObject {
                 isRecording: isRecording,
                 elapsedSeconds: elapsedSeconds,
                 recordingTitle: Self.displayTitle(viewModel.meta.title),
-                recordingHasWarning: !viewModel.banners.isEmpty,
+                recordingHasWarning: viewModel.banners.contains { $0.severity == .warning },
                 hiddenWindows: hiddenWindowItems()
             )
         )

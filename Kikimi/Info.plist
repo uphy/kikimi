@@ -35,6 +35,8 @@
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Google Meet への参加を検出するため、Google Chrome で開いているタブの URL を読み取ります。</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Kikimi needs system audio access to transcribe meeting audio from other apps.</string>
 	<key>NSHumanReadableCopyright</key>

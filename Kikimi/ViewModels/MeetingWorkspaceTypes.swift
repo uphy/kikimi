@@ -102,6 +102,9 @@ enum RecordingButtonState: Equatable {
     /// `endMeeting`/(if still Recording) `AudioCapture.stop`/`TranscriptPipeline.stopAndDrain` are
     /// in flight — the sole confirmation operation (kikimi.md 4 章 "会議終了"). Buttons disabled.
     case ending
+    /// `discardAutoRecordedSession()` is tearing the session down before deleting it
+    /// (`docs/design/50-meet-auto-record.md` §3.5). Buttons disabled.
+    case discarding
     /// Another window is currently recording. Button disabled.
     case disabledOtherRecording(otherSessionId: String)
     /// Ended. Only the "↩ 再開" (救済) button is shown alongside the total-duration text.
@@ -115,7 +118,7 @@ enum RecordingButtonState: Equatable {
     /// confirmed done, so closing the window still prompts the user to decide.
     var blocksWindowClose: Bool {
         switch self {
-        case .recording, .starting, .pausing, .paused, .pausedDisabledOtherRecording, .resuming, .ending:
+        case .recording, .starting, .pausing, .paused, .pausedDisabledOtherRecording, .resuming, .ending, .discarding:
             return true
         case .startRecording, .disabledOtherRecording, .ended:
             return false
@@ -133,7 +136,7 @@ enum RecordingButtonState: Equatable {
         switch self {
         case .recording, .paused, .pausedDisabledOtherRecording:
             return true
-        case .startRecording, .starting, .pausing, .resuming, .ending, .disabledOtherRecording, .ended:
+        case .startRecording, .starting, .pausing, .resuming, .ending, .discarding, .disabledOtherRecording, .ended:
             return false
         }
     }
@@ -156,7 +159,7 @@ enum RecordingButtonState: Equatable {
             return elapsedSeconds
         case .pausedDisabledOtherRecording(let elapsedSeconds, _):
             return elapsedSeconds
-        case .startRecording, .starting, .pausing, .resuming, .ending, .disabledOtherRecording, .ended:
+        case .startRecording, .starting, .pausing, .resuming, .ending, .discarding, .disabledOtherRecording, .ended:
             return nil
         }
     }
@@ -212,6 +215,13 @@ enum WorkspaceBanner: Equatable, Identifiable {
     /// `WindowManager.createDraftWorkspace(seed:)` after opening the Session Window, not by
     /// `SessionStore` itself (`SessionStore` never touches any UI surface).
     case profileFallback(requestedProfileId: String)
+    /// Recording was started automatically by the Meet auto-record feature
+    /// (`docs/design/50-meet-auto-record.md` §3.1). Informational; action "取り消す".
+    case autoRecordStarted(sessionId: String)
+    /// The meeting will be ended automatically at `deadline` (§3.2). Informational; action "終了しない".
+    case autoRecordEndScheduled(deadline: Date)
+    /// `discardAutoRecordedSession()` could not delete the session; it was left Paused (§3.5).
+    case discardFailed(message: String)
 
     /// A stable identity per banner "kind" (and, where relevant, per `AudioSourceKind`).
     ///
@@ -238,6 +248,61 @@ enum WorkspaceBanner: Equatable, Identifiable {
             return "builtInSpeakerOutputDetected"
         case .profileFallback(let requestedProfileId):
             return "profileFallback(\(requestedProfileId))"
+        case .autoRecordStarted:
+            return "autoRecordStarted"
+        case .discardFailed:
+            return "discardFailed"
+        case .autoRecordEndScheduled:
+            // Deliberately excludes `deadline` (same reasoning as `sttModelDownloading`'s `progress`).
+            return "autoRecordEndScheduled"
         }
     }
+
+    /// Whether this banner reports a problem or is merely informational. Only `.warning` banners
+    /// turn the menu bar icon into the warning icon (`WindowManager.recordingHasWarning`).
+    var severity: BannerSeverity {
+        switch self {
+        case .autoRecordStarted, .autoRecordEndScheduled:
+            return .info
+        case .systemAudioUnavailable, .fileWriteFailed, .transcriptWriteFailed, .sttModelDownloading,
+             .sttModelDownloadFailed, .recordingStartFailed, .builtInSpeakerOutputDetected, .profileFallback,
+             .discardFailed:
+            return .warning
+        }
+    }
+
+    /// Buttons rendered next to the message, in order. Empty for every banner that only offers the
+    /// dismiss (x) button.
+    var actions: [BannerAction] {
+        switch self {
+        case .autoRecordStarted:
+            return [BannerAction(id: .cancelAutoRecord, label: "取り消す")]
+        case .autoRecordEndScheduled:
+            return [BannerAction(id: .keepMeetingOpen, label: "終了しない")]
+        case .systemAudioUnavailable, .fileWriteFailed, .transcriptWriteFailed, .sttModelDownloading,
+             .sttModelDownloadFailed, .recordingStartFailed, .builtInSpeakerOutputDetected, .profileFallback,
+             .discardFailed:
+            return []
+        }
+    }
+}
+
+// MARK: - BannerSeverity / BannerAction
+
+enum BannerSeverity: Equatable, Sendable {
+    case warning
+    case info
+}
+
+/// Identifies which banner button was pressed (`MeetingWorkspaceViewModel.onBannerAction`).
+enum BannerActionID: Equatable, Sendable {
+    /// `.autoRecordStarted`'s "取り消す" (discard the auto-recorded session).
+    case cancelAutoRecord
+    /// `.autoRecordEndScheduled`'s "終了しない" (cancel the automatic meeting end).
+    case keepMeetingOpen
+}
+
+struct BannerAction: Equatable, Sendable, Identifiable {
+    let id: BannerActionID
+    let label: String
 }
