@@ -17,6 +17,17 @@ struct ChromeTabInspectorTests {
         #expect(ChromeTabInspector.meetCode(fromURL: "https://meet.google.com/abc-defg-hijk") == nil)
     }
 
+    @Test("a live stream viewer page is a meeting tab coded stream/<uuid>")
+    func liveStreamCode() {
+        let uuid = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+        #expect(ChromeTabInspector.meetCode(fromURL: "https://meet.google.com/stream/\(uuid)?authuser=0") == "stream/\(uuid)")
+        #expect(ChromeTabInspector.meetCode(fromURL: "https://meet.google.com/stream/\(uuid.uppercased())") == "stream/\(uuid)")
+        #expect(ChromeTabInspector.meetCode(fromURL: "https://meet.google.com/stream/") == nil)
+        #expect(ChromeTabInspector.meetCode(fromURL: "https://meet.google.com/stream/\(uuid)0") == nil)
+        #expect(MeetTab(code: "stream/\(uuid)", title: "", isActive: true).isLiveStream)
+        #expect(!MeetTab(code: "abc-defg-hij", title: "", isActive: true).isLiveStream)
+    }
+
     @Test("non-meeting Meet URLs and other hosts are rejected")
     func notMeetCode() {
         #expect(ChromeTabInspector.meetCode(fromURL: "https://meet.google.com/") == nil)
@@ -34,6 +45,8 @@ struct ChromeTabInspectorTests {
         #expect(ChromeTabInspector.cleanTitle("↗ Weekly sync") == "Weekly sync")
         #expect(ChromeTabInspector.cleanTitle("  Weekly sync \n") == "Weekly sync")
         #expect(ChromeTabInspector.cleanTitle("abc-defg-hij") == "abc-defg-hij")
+        #expect(ChromeTabInspector.cleanTitle("↗ Meet ライブ ストリーム - 全社定例") == "全社定例")
+        #expect(ChromeTabInspector.cleanTitle("Meet Live stream - All hands") == "All hands")
     }
 
     @Test("script output is parsed into tabs")

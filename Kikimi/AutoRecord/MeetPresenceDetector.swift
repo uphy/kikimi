@@ -52,6 +52,9 @@ struct MeetPresenceDetector {
     private var switchCheckGeneration: Int?
     /// While `exhausted(.noMeet)`, when to look at the tabs again.
     private var exhaustedRecheckDue = Date.distantFuture
+    /// Set by the check that follows a `left` while Chrome's audio is still up; tabs of `lastLeftCode` are
+    /// not a meeting then. Cleared when the mic opens again (a rejoin) or a meeting is entered.
+    private var ignoresLeftCode = false
 
     init(retryDelays: [TimeInterval] = [5, 15, 30], leaveDebounce: TimeInterval = 3, switchCheckInterval: TimeInterval = 30) {
         self.retryDelays = retryDelays
@@ -87,6 +90,7 @@ struct MeetPresenceDetector {
         let previous = lastAudio ?? .silent
         lastAudio = audio
         let rose = (audio.input && !previous.input) || (audio.output && !previous.output)
+        if audio.input, !previous.input { ignoresLeftCode = false }
         var output = Output()
 
         switch state {
@@ -126,7 +130,9 @@ struct MeetPresenceDetector {
             }
 
         case let .inMeeting(tab, sawInput):
-            let saw = sawInput || audio.input
+            // A live stream viewer never uses the mic, so mic use elsewhere in Chrome must not turn its leave
+            // signal into "input stopped" (moving on to the next meeting is caught by the switch check).
+            let saw = sawInput || (audio.input && !tab.isLiveStream)
             if Self.hasLeft(audio, sawInput: saw) {
                 state = .leavePending(tab: tab, since: now, sawInput: saw)
             } else {
@@ -141,13 +147,23 @@ struct MeetPresenceDetector {
             }
 
         case let .leavePending(tab, since, sawInput):
-            let saw = sawInput || audio.input
+            let saw = sawInput || (audio.input && !tab.isLiveStream)
             if !Self.hasLeft(audio, sawInput: saw) {
                 state = .inMeeting(tab: tab, sawInput: saw)
             } else if now.timeIntervalSince(since) >= leaveDebounce {
                 lastLeftCode = tab.code
                 resetToIdle()
                 output.events.append(.left(code: tab.code))
+                if audio.isActive {
+                    // Chrome is still playing: the waiting room may have turned into a live stream viewer page,
+                    // which closes the mic but keeps the output (2026-10-26). No new rise will come while it
+                    // plays, so look right away. The left meeting's "you left" screen lingers at the same URL,
+                    // so it is not taken as a rejoin.
+                    riseAt = now
+                    permissionRetryUsed = false
+                    ignoresLeftCode = true
+                    startCheck(retriesDone: 0, output: &output)
+                }
             }
         }
         return output
@@ -172,7 +188,8 @@ struct MeetPresenceDetector {
 
         switch result {
         case let .tabs(tabs):
-            if let tab = chooseTab(tabs) {
+            let candidates = ignoresLeftCode ? tabs.filter { $0.code != lastLeftCode } : tabs
+            if let tab = chooseTab(candidates) {
                 enterMeeting(tab, now: now)
                 output.events.append(.joined(tab))
                 return output
@@ -194,7 +211,8 @@ struct MeetPresenceDetector {
     // MARK: - Helpers
 
     private mutating func enterMeeting(_ tab: MeetTab, now: Date) {
-        state = .inMeeting(tab: tab, sawInput: lastAudio?.input ?? false)
+        state = .inMeeting(tab: tab, sawInput: !tab.isLiveStream && (lastAudio?.input ?? false))
+        ignoresLeftCode = false
         switchCheckDue = now.addingTimeInterval(switchCheckInterval)
     }
 

@@ -11,6 +11,9 @@ struct MeetTab: Equatable, Sendable {
     let isActive: Bool
     /// The active tab of the frontmost Chrome window (used to notice a switch to another meeting).
     var isFrontmost: Bool = false
+
+    /// A live stream viewer page (`stream/<uuid>`). The viewer never opens the mic.
+    var isLiveStream: Bool { code.hasPrefix("stream/") }
 }
 
 enum ChromeTabInspectionFailure: Equatable, Sendable {
@@ -187,8 +190,16 @@ final class ChromeTabInspector: ChromeTabInspecting, @unchecked Sendable {
     /// Meeting code from a Meet URL (query strings such as `?authuser=` are ignored).
     /// Also accepts one path segment before the code: meetings opened from some entry points live at
     /// `https://meet.google.com/meet/abc-defg-hij` (seen 2026-10-21; that meeting went unrecorded).
+    /// A live stream viewer page (`https://meet.google.com/stream/<uuid>`) has no meeting code, so its code is
+    /// `stream/<uuid>` (seen 2026-10-19 and 2026-10-26: the waiting room's meeting URL turns into this page
+    /// when the stream starts, and that meeting went unrecorded).
     static func meetCode(fromURL url: String) -> String? {
         let pattern = #"^https://meet\.google\.com/(?:[A-Za-z_]+/)?([a-z]{3}-[a-z]{4}-[a-z]{3})(?:[/?#]|$)"#
+        let streamPattern = #"^https://meet\.google\.com/(stream/[0-9A-Fa-f-]{36})(?:[/?#]|$)"#
+        return firstGroup(of: pattern, in: url) ?? firstGroup(of: streamPattern, in: url)?.lowercased()
+    }
+
+    private static func firstGroup(of pattern: String, in url: String) -> String? {
         guard let regex = try? NSRegularExpression(pattern: pattern),
               let match = regex.firstMatch(in: url, range: NSRange(url.startIndex..., in: url)),
               let range = Range(match.range(at: 1), in: url) else {
@@ -197,14 +208,17 @@ final class ChromeTabInspector: ChromeTabInspecting, @unchecked Sendable {
         return String(url[range])
     }
 
-    /// Strips the leading `↗ ` (PiP marker) and `Meet - ` prefix from a tab title.
+    /// Prefixes Meet puts before the event name (meeting page, live stream viewer page).
+    private static let titlePrefixes = ["Meet - ", "Meet ライブ ストリーム - ", "Meet Live stream - "]
+
+    /// Strips the leading `↗ ` (PiP marker) and the `Meet - ` / `Meet ライブ ストリーム - ` prefix from a tab title.
     static func cleanTitle(_ raw: String) -> String {
         var title = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if title.hasPrefix("↗") {
             title = String(title.dropFirst()).trimmingCharacters(in: .whitespaces)
         }
-        if title.hasPrefix("Meet - ") {
-            title = String(title.dropFirst("Meet - ".count))
+        if let prefix = titlePrefixes.first(where: { title.hasPrefix($0) }) {
+            title = String(title.dropFirst(prefix.count))
         }
         return title
     }
