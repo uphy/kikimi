@@ -58,7 +58,9 @@ extension AudioDeviceID {
 final class MicrophoneSource: AudioSourceCapturing {
     private let logger = Logger(subsystem: "io.github.uphy.Kikimi", category: "MicrophoneSource")
 
-    private let engine: AVAudioEngine
+    /// Replaced via `makeEngine` only when `start` recovers from an unusable input format.
+    private var engine: AVAudioEngine
+    private let makeEngine: () -> AVAudioEngine
     private let targetFormat: AVAudioFormat
     private let tapBufferSize: AVAudioFrameCount
 
@@ -100,12 +102,14 @@ final class MicrophoneSource: AudioSourceCapturing {
     init(
         deviceUID: String? = nil,
         engine: AVAudioEngine = AVAudioEngine(),
+        makeEngine: @escaping () -> AVAudioEngine = { AVAudioEngine() },
         targetSampleRate: Double = 16_000,
         targetChannels: AVAudioChannelCount = 1,
         tapBufferSize: AVAudioFrameCount = 1024
     ) {
         self.deviceUID = deviceUID
         self.engine = engine
+        self.makeEngine = makeEngine
         self.tapBufferSize = tapBufferSize
         guard let targetFormat = AVAudioFormat(standardFormatWithSampleRate: targetSampleRate, channels: targetChannels) else {
             preconditionFailure("Failed to construct the standard mic output format (\(targetSampleRate)Hz, \(targetChannels)ch)")
@@ -164,21 +168,27 @@ final class MicrophoneSource: AudioSourceCapturing {
             throw MicrophoneSourceError.alreadyRunning
         }
 
-        let inputNode = engine.inputNode
+        var inputNode = engine.inputNode
         // Must happen before reading `inputFormat(forBus:)` below: routing the input node to a
         // different device changes its format, so anything read/built beforehand (converter, tap)
         // would be built against the wrong device's format (`docs/design/10-audio-input-selection.md`
         // section 5.1's ordering constraint).
         configureInputDevice(deviceUID: deviceUID, on: inputNode)
 
-        let inputFormat = inputNode.inputFormat(forBus: 0)
+        // Reload the device before giving up (`MicrophoneInputRecovery`). A selected device that still
+        // exists is left as chosen; only the default route is rebound.
+        let inputFormat = MicrophoneInputRecovery.usableFormat(
+            engine: &engine, inputNode: &inputNode, makeEngine: makeEngine,
+            followsDefault: deviceUID.flatMap(Self.resolveDeviceID(forUID:)) == nil,
+            configure: { [deviceUID] node in self.configureInputDevice(deviceUID: deviceUID, on: node) }
+        )
         // Guards against `installTap` crashing with an Objective-C exception (not a catchable
         // Swift error) when there are zero input devices available -- a state that can arise
         // between the ViewModel's pre-flight check and this `start()` call (e.g. during a
         // multi-minute model download), and that a resolved-but-now-empty device UID can also
         // land in after `configureInputDevice` falls back (section 5.1).
-        guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
-            throw MicrophoneSourceError.engineFailed("input format is invalid (sampleRate=\(inputFormat.sampleRate), channelCount=\(inputFormat.channelCount)); no usable input device")
+        guard MicrophoneInputRecovery.isUsable(inputFormat) else {
+            throw MicrophoneSourceError.engineFailed("input format is invalid (\(MicrophoneInputRecovery.describe(inputFormat))); no usable input device")
         }
 
         guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
