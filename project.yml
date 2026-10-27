@@ -21,7 +21,7 @@ packages:
     from: "5.0.0"
   FluidAudio:
     url: https://github.com/FluidInference/FluidAudio.git
-    exactVersion: "0.15.4"
+    exactVersion: "0.17.7"
   Mustache:
     url: https://github.com/groue/GRMustache.swift
     from: "7.0.0"

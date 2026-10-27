@@ -82,6 +82,31 @@ so none this yeah.`）。外部ベンチの CER 174% と一致し、**`ja → td
 Cohere の 108 トークン上限は 30 秒クリップでは 1 本も当たらなかった（最大 92）。ただし Kikimi の
 実際の窓は最大 120 秒なので長い窓では確実に当たる。
 
+## 一段目（ストリーミング）を FluidAudio の更新前後で比べる
+
+二段目の評価セットとは別に、FluidAudio を上げるときは一段目の Nemotron ストリーミングを比べる。
+ディクテーション履歴の `audio.wav` を、キーを押してから離すまでと同じ経路（`DictationTranscriber`、
+100 ms ずつ投入）で流し直し、結果を 1 行 1 クリップの JSON に書く。
+
+```bash
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer KIKIMI_TEST_HIDDEN=1 \
+  KIKIMI_STREAM_EVAL_DIR=$HOME/.local/state/kikimi/dictation/history \
+  KIKIMI_STREAM_EVAL_OUT=/tmp/stream-eval-<version>.jsonl KIKIMI_STREAM_EVAL_LIMIT=40 \
+  swift test --filter StreamingEvalHarness
+```
+
+基準には各履歴の `entry.json` の `raw_text`（二段目 Qwen3 の結果）を使い、句読点を落とした CER で比べる。
+二段目も誤るので絶対値ではなく、更新前後の差だけを見る。
+
+| FluidAudio | CER（対 二段目） | 文字数（基準 3517） | 処理時間（音声 780 秒） |
+|---|---|---|---|
+| 0.15.4 | 0.2280 | 2974 | 13.1 秒 |
+| 0.17.7 | 0.2289 | 2973 | 16.4 秒（2 回とも同じ） |
+
+2026-10-27、直近 40 本で計測。40 本中 38 本は同じ結果で、良くなったもの・悪くなったものが 1 本ずつ。
+0.15.7 で入った blank rescue（間で区切られた語が丸ごと落ちたら、その区間だけ新しい状態でデコードし直す）は
+既定で有効だが、この 40 本では効く場面がなかった。処理時間の増加はその監視の分と見られる。
+
 ## Qwen3 を測る（別パッケージ）
 
 `qwen3-probe/` は独立した SPM パッケージ。**KikimiTests には置けない**: speech-swift の `yyjson`

@@ -49,7 +49,7 @@ struct AsrEvalCohereHarness {
             atPath: modelDir.appendingPathComponent(ModelNames.CohereTranscribe.encoderCompiledFile).path)
         {
             print("EVAL: downloading \(repo.folderName) (INT8 encoder, ~1.8GB)...")
-            try await DownloadUtils.downloadRepo(repo, to: modelsRoot)
+            try await ModelHub.download(repo, to: modelsRoot)
         }
 
         print("EVAL: loading Cohere from \(modelDir.path)...")
