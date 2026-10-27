@@ -134,7 +134,9 @@ extension RefinementQueue {
             return
         }
 
+        guard !discarded else { return }
         try? await Task.sleep(for: retryDelay)
+        guard !discarded else { return }
         switch await callLLM(request) {
         case .success(let result):
             let effectiveModel = result.respondedModel ?? resolvedModel.model
@@ -218,6 +220,8 @@ extension RefinementQueue {
         forceCutFlag = false
         timerTask?.cancel()
         timerTask = nil
+        // A discarded queue (§3.5) has no audience left: the session is being deleted.
+        guard !discarded else { return }
         eventsContinuation.yield(.disabled(reason: error.errorDescription ?? String(describing: error)))
     }
 
@@ -270,6 +274,8 @@ extension RefinementQueue {
     /// what recovers them, via `appendFailedIds` (`RefinementQueue+Backlog.swift`'s `enqueueBacklog`
     /// treats that set as an exception to the normal `knownIds` gate -- see its doc comment).
     private func appendAndEmit(batch: [TranscriptSegment], segments: [RefinedSegment], warnings: [String]) async {
+        // `cancelAndWait()` ran while this batch's LLM call was in flight: drop the result (§3.5).
+        guard !discarded else { return }
         for warning in warnings {
             logger.warning("Refinement response validation warning: \(warning, privacy: .public)")
         }

@@ -110,7 +110,7 @@ extension MeetingWorkspaceViewModel {
         switch recordingButtonState {
         case .startRecording, .disabledOtherRecording, .paused, .pausedDisabledOtherRecording:
             return true
-        case .starting, .recording, .pausing, .resuming, .ending, .ended:
+        case .starting, .recording, .pausing, .resuming, .ending, .discarding, .ended:
             return false
         }
     }

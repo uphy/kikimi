@@ -136,6 +136,10 @@ actor RefinementQueue {
     /// accepting new segments and the dispatch loop stops taking batches while this is set; the
     /// next `start()` clears it (§7 "次の `start()` で停止フラグを解除して再挑戦する").
     var stopped = false
+    /// Set by `cancelAndWait()` (`docs/design/50-meet-auto-record.md` §3.5): once `true`, no batch
+    /// result is ever appended to `refined.jsonl` again, because the session folder is about to be
+    /// deleted. Unlike `stopped`, `start()` never clears it.
+    var discarded = false
     /// Set by `flush()` or a fired batch-timeout timer: "cut whatever is in `pending` right now as
     /// one batch, regardless of `config.batchSize`" (§4.1's "件数に関わらずバッチ化対象にする"/timeout row).
     var forceCutFlag = false
@@ -294,6 +298,22 @@ actor RefinementQueue {
         await withCheckedContinuation { continuation in
             drainWaiters.append(continuation)
         }
+    }
+
+    /// Discards everything not yet written and waits for the in-flight LLM call (if any) to return,
+    /// without writing its result (`docs/design/50-meet-auto-record.md` §3.5). Used when the session is
+    /// about to be deleted: unsent batches are dropped (no `flush()`), so no further LLM call is made
+    /// and nothing touches the session folder after this returns. Idempotent.
+    func cancelAndWait() async {
+        discarded = true
+        stopped = true
+        pending.removeAll()
+        forceCutFlag = false
+        timerTask?.cancel()
+        timerTask = nil
+        await waitUntilDispatchIdle()
+        // Release `drain()` callers: nothing is pending and nothing is in flight any more.
+        resumeDrainWaitersIfIdle()
     }
 
     /// Forces the next batch's system prompt to reload `context.md`, regardless of

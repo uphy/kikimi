@@ -263,6 +263,8 @@ struct KikimiConfigData: Codable, Equatable, Sendable {
     var watchers: WatchersConfig
     var export: ExportConfig
     var audio: AudioConfig
+    /// `docs/design/50-meet-auto-record.md` section 4.
+    var autoRecord: AutoRecordConfig
     var dictation: DictationConfig
     /// `docs/design/38-session-chat.md` §6: the session chat tab's model/budget/timeout.
     var chat: ChatConfig
@@ -276,6 +278,7 @@ struct KikimiConfigData: Codable, Equatable, Sendable {
     /// no `CodingKeys` at all until `glossaryCategories` -- the first one needing a snake_case mapping.
     enum CodingKeys: String, CodingKey {
         case diarization, refinement, llm, stt, summary, watchers, export, audio, dictation, chat, defaults, profiles, glossary
+        case autoRecord = "auto_record"
         case glossaryCategories = "glossary_categories"
     }
 
@@ -288,6 +291,7 @@ struct KikimiConfigData: Codable, Equatable, Sendable {
         watchers: WatchersConfig = .default,
         export: ExportConfig = .default,
         audio: AudioConfig = .default,
+        autoRecord: AutoRecordConfig = .default,
         dictation: DictationConfig = .default,
         chat: ChatConfig = .default,
         defaults: DefaultsConfig = .default,
@@ -303,6 +307,7 @@ struct KikimiConfigData: Codable, Equatable, Sendable {
         self.watchers = watchers
         self.export = export
         self.audio = audio
+        self.autoRecord = autoRecord
         self.dictation = dictation
         self.chat = chat
         self.defaults = defaults
@@ -327,6 +332,7 @@ struct KikimiConfigData: Codable, Equatable, Sendable {
         watchers = try container.decodeIfPresent(WatchersConfig.self, forKey: .watchers) ?? .default
         export = try container.decodeIfPresent(ExportConfig.self, forKey: .export) ?? .default
         audio = try container.decodeIfPresent(AudioConfig.self, forKey: .audio) ?? .default
+        autoRecord = try container.decodeIfPresent(AutoRecordConfig.self, forKey: .autoRecord) ?? .default
         dictation = try container.decodeIfPresent(DictationConfig.self, forKey: .dictation) ?? .default
         chat = try container.decodeIfPresent(ChatConfig.self, forKey: .chat) ?? .default
         defaults = try container.decodeIfPresent(DefaultsConfig.self, forKey: .defaults) ?? .default

@@ -162,6 +162,20 @@ struct RecordingSegment: Codable, Sendable, Equatable {
     var startMsOffset: Int
 }
 
+// MARK: - AutoRecordMeta
+
+/// Provenance of a session that was started automatically (`docs/design/50-meet-auto-record.md` §3.1).
+/// Written once at Draft creation; never consulted for behavior afterward.
+struct AutoRecordMeta: Codable, Sendable, Equatable {
+    enum Source: String, Codable, Sendable, Equatable {
+        case googleMeet = "google_meet"
+    }
+
+    var source: Source
+    /// Google Meet meeting code, e.g. `abc-defg-hij`.
+    var meetingCode: String
+}
+
 // MARK: - SessionMeta
 
 /// `meta.json`: a session's metadata, created at Draft time and updated throughout its lifecycle.
@@ -201,6 +215,9 @@ struct SessionMeta: Codable, Sendable, Equatable {
     /// at display time). Exclusive with `basedOnSession` (`DraftSeed` is an enum, so a Draft is
     /// seeded from at most one of "based on session" / "profile" / neither).
     var profileId: String?
+    /// Set only for sessions started by the Meet auto-record feature (`docs/design/50-meet-auto-record.md`
+    /// §3.1). `nil` for manual sessions and for `meta.json` files that predate this field.
+    var autoRecord: AutoRecordMeta?
     var segmentCount: Int
     var refinedCount: Int
     var appVersion: String
@@ -219,6 +236,7 @@ struct SessionMeta: Codable, Sendable, Equatable {
         recordings: [RecordingSegment] = [],
         basedOnSession: String?,
         profileId: String? = nil,
+        autoRecord: AutoRecordMeta? = nil,
         segmentCount: Int,
         refinedCount: Int,
         appVersion: String
@@ -236,6 +254,7 @@ struct SessionMeta: Codable, Sendable, Equatable {
         self.recordings = recordings
         self.basedOnSession = basedOnSession
         self.profileId = profileId
+        self.autoRecord = autoRecord
         self.segmentCount = segmentCount
         self.refinedCount = refinedCount
         self.appVersion = appVersion
@@ -276,6 +295,7 @@ struct SessionMeta: Codable, Sendable, Equatable {
         recordings = try container.decodeIfPresent([RecordingSegment].self, forKey: .recordings) ?? []
         basedOnSession = try container.decodeIfPresent(String.self, forKey: .basedOnSession)
         profileId = try container.decodeIfPresent(String.self, forKey: .profileId)
+        autoRecord = try container.decodeIfPresent(AutoRecordMeta.self, forKey: .autoRecord)
         segmentCount = try container.decode(Int.self, forKey: .segmentCount)
         refinedCount = try container.decode(Int.self, forKey: .refinedCount)
         appVersion = try container.decode(String.self, forKey: .appVersion)

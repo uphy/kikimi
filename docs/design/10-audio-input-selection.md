@@ -251,6 +251,12 @@ init(
   ではなく Objective-C 例外でクラッシュし得る）なら `MicrophoneSourceError.engineFailed` を
   throw する。ViewModel の事前チェック（4章③）と `engine.start()` の間には
   モデルダウンロード等で分単位の隙間があり得るため、この防御は必須
+- **throw する前にデバイスを読み込み直す**（`MicrophoneInputRecovery`）: 無効フォーマットのときは、
+  (1) 既定入力に従っている（デバイス未選択、または選択デバイスが見つからない）なら、CoreAudio が今報告する
+  既定入力デバイスを入力ノードに明示的に設定し直して読み直す、(2) まだ無効なら `AVAudioEngine` を作り直して
+  読み直す。ここまでで駄目なときだけ throw する。2026-10-27 に、4 日間起動したままのアプリで入力デバイスが
+  変わったあと、録音開始が `sampleRate=0` で失敗し続けた。同じマイクを別プロセスからは 48 kHz で開けて、
+  アプリの再起動で直った
 
 **SystemAudioSource**: `init` に `includedBundleId: String? = nil` を追加。
 

@@ -193,4 +193,55 @@ struct WorkspaceBannerTests {
         #expect(withMicRemaining.id == withNoSourcesRemaining.id)
         #expect(withMicRemaining != withNoSourcesRemaining)
     }
+
+    // MARK: - severity / actions (`docs/design/50-meet-auto-record.md` §3.4)
+
+    @Test("autoRecord banners are .info; every pre-existing banner stays .warning")
+    func severityPerCase() {
+        #expect(WorkspaceBanner.autoRecordStarted(sessionId: "s").severity == .info)
+        #expect(WorkspaceBanner.autoRecordEndScheduled(deadline: Date()).severity == .info)
+        let warnings: [WorkspaceBanner] = [
+            .systemAudioUnavailable(noActiveSourcesRemain: false),
+            .fileWriteFailed(source: .mic),
+            .transcriptWriteFailed,
+            .sttModelDownloading(source: .mic, progress: 0.5),
+            .sttModelDownloadFailed(source: .mic, message: "boom"),
+            .recordingStartFailed(message: "boom"),
+            .builtInSpeakerOutputDetected,
+            .profileFallback(requestedProfileId: "p"),
+            .discardFailed(message: "boom")
+        ]
+        for banner in warnings {
+            #expect(banner.severity == .warning)
+        }
+    }
+
+    @Test("info banners expose their action buttons; warning banners expose none")
+    func actionsPerCase() {
+        #expect(WorkspaceBanner.autoRecordStarted(sessionId: "s").actions.map(\.id) == [.cancelAutoRecord])
+        #expect(WorkspaceBanner.autoRecordEndScheduled(deadline: Date()).actions.map(\.id) == [.keepMeetingOpen])
+        #expect(WorkspaceBanner.transcriptWriteFailed.actions.isEmpty)
+    }
+
+    @Test("autoRecordEndScheduled id ignores the deadline so a rescheduled banner replaces the old one")
+    func endScheduledIdIgnoresDeadline() {
+        let first = WorkspaceBanner.autoRecordEndScheduled(deadline: Date(timeIntervalSince1970: 1))
+        let second = WorkspaceBanner.autoRecordEndScheduled(deadline: Date(timeIntervalSince1970: 2))
+        #expect(first.id == second.id)
+    }
+
+    @Test("an info banner alone does not count as a menu-bar warning; adding a warning does")
+    func recordingHasWarningPredicate() {
+        let infoOnly: [WorkspaceBanner] = [.autoRecordStarted(sessionId: "s")]
+        #expect(infoOnly.contains { $0.severity == .warning } == false)
+        let mixed = infoOnly + [.transcriptWriteFailed]
+        #expect(mixed.contains { $0.severity == .warning } == true)
+    }
+
+    @Test("RecordingButtonState.discarding blocks window close and carries no elapsed time")
+    func discardingState() {
+        #expect(RecordingButtonState.discarding.blocksWindowClose)
+        #expect(RecordingButtonState.discarding.showsStowControls == false)
+        #expect(RecordingButtonState.discarding.elapsedSecondsForDisplay == nil)
+    }
 }
