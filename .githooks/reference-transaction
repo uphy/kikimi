@@ -1,9 +1,0 @@
-#!/bin/sh
-# agent-branch-guard
-input=$(mktemp) || exit 1
-trap 'rm -f "$input"' EXIT HUP INT TERM
-cat > "$input"
-python3 /Users/yuhi.ishikura.001/.codex/hooks/guard_agent_branch.py --reference-transaction "$@" < "$input" || exit $?
-if [ -x /Users/yuhi.ishikura.001/dev/github.com/uphy/kikimi/.claude/worktrees/fix/llm-auth-error-detail/.githooks/reference-transaction.before-agent-guard ]; then
-  /Users/yuhi.ishikura.001/dev/github.com/uphy/kikimi/.claude/worktrees/fix/llm-auth-error-detail/.githooks/reference-transaction.before-agent-guard "$@" < "$input"
-fi
