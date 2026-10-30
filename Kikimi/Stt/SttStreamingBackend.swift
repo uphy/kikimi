@@ -118,7 +118,7 @@ actor SttSharedModelCoordinator {
     /// simplified two-stage model (section 3.7: ".downloading 開始と .installing 完了の 2 点通知").
     /// `.listing`/`.downloading` are both surfaced as `.downloading`; `.compiling` (CoreML model
     /// compilation, which only happens after all files are on disk) is surfaced as `.installing`.
-    private static func convert(_ progress: DownloadUtils.DownloadProgress) -> SttModelDownloadProgress {
+    private static func convert(_ progress: DownloadProgress) -> SttModelDownloadProgress {
         let stage: SttModelDownloadStage
         switch progress.phase {
         case .listing, .downloading:

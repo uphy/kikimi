@@ -11,7 +11,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     dependencies: [
         .package(url: "https://github.com/jpsim/Yams", from: "5.0.0"),
-        .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.15.4"),
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.17.7"),
         .package(url: "https://github.com/groue/GRMustache.swift", from: "7.0.0"),
         // Global hotkey registration + a SwiftUI shortcut Recorder for the dictation feature
         // (docs/design/25-dictation-mode.md R7). Carbon-based under the hood -- no Input

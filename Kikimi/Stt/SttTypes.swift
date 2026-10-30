@@ -155,7 +155,7 @@ enum SttModelDownloadStage: String, Sendable, Equatable {
 
 /// Progress notification surfaced during `SttEngine.prepare(downloadProgress:)` (section 3.7).
 /// Simplified relative to the previous sherpa-onnx-era type (no `receivedBytes`/`totalBytes`):
-/// FluidAudio's `DownloadUtils.DownloadProgress` reports file-count-based, not byte-based, progress
+/// FluidAudio's `DownloadProgress` reports file-count-based, not byte-based, progress
 /// (`.listing` / `.downloading(completedFiles:totalFiles:)` / `.compiling(modelName:)`), so this
 /// type only carries what every phase can actually populate.
 struct SttModelDownloadProgress: Sendable, Equatable {
