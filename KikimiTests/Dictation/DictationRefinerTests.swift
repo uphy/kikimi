@@ -168,7 +168,7 @@ struct DictationRefinerTests {
         #expect(outcome.text == "次のスプリントで対応します")
         #expect(outcome.usage == nil)
         #expect(outcome.model == nil)
-        #expect(outcome.failure == String(describing: LLMClientError.timedOut(.seconds(3))))
+        #expect(outcome.failure == "claude/claude-haiku-4-5-20251001: " + (LLMClientError.timedOut(.seconds(3)).errorDescription ?? ""))
         #expect(!outcome.succeeded)
     }
 
