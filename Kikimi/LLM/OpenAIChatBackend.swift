@@ -356,7 +356,11 @@ struct OpenAIChatBackend: LLMBackend {
     static func parseResponse(data: Data, httpResponse: HTTPURLResponse, config: OpenAIBackendConfig, requestModel: String) throws -> LLMBackendResponse {
         guard (200...299).contains(httpResponse.statusCode) else {
             if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
-                throw LLMClientError.notAuthenticated
+                throw LLMClientError.endpointNotAuthenticated(
+                    status: httpResponse.statusCode,
+                    url: redactedURL(httpResponse.url),
+                    body: truncatedBody(data)
+                )
             }
             throw LLMClientError.httpFailed(status: httpResponse.statusCode, body: truncatedBody(data))
         }
@@ -398,6 +402,19 @@ struct OpenAIChatBackend: LLMBackend {
         let respondedModel = resolveRespondedModel(rawResponseModel: rawResponseModel, config: config, requestModel: requestModel)
 
         return LLMBackendResponse(structuredJSON: contentData, usage: usage, respondedModel: respondedModel)
+    }
+
+    /// Scheme + host + path only: the query string (Azure's `api-version`, or anything a user put
+    /// into `base_url`) is dropped so an error message never echoes request parameters back.
+    static func redactedURL(_ url: URL?) -> String {
+        guard let url, var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return "(unknown URL)"
+        }
+        components.query = nil
+        components.fragment = nil
+        components.user = nil
+        components.password = nil
+        return components.string ?? "(unknown URL)"
     }
 
     private static func truncatedBody(_ data: Data) -> String {

@@ -136,7 +136,7 @@ llm:
   `prompt_tokens_details.cached_tokens` → cacheReadInputTokens、cacheCreationInputTokens = 0、
   totalCostUSD = 0（OpenAI 側は単価不明のため計上しない）。usage 欠落時はゼロ値
 - HTTP ステータス分類:
-  - 401 / 403 → `notAuthenticated`（既存の fatal 分類に自然に乗る）
+  - 401 / 403 → `endpointNotAuthenticated(status:url:body:)`（fatal 扱い。CLI の `notAuthenticated` と分け、拒否した URL（query 除去）と応答本文を利用者に見せる）
   - その他の非 2xx → 新設 `httpFailed(status:body:)`（body は先頭 1KB に切り詰め）
   - URLSession のトランスポートエラー（接続不能・タイムアウト等）→ タイムアウトは
     `timedOut(request.timeout)`、それ以外は新設 `networkFailed(description:)`
@@ -161,7 +161,7 @@ protocol HTTPTransporting: Sendable {
 
 ```swift
 case missingAPIKey                          // openai プロバイダで API キーが解決できない
-case httpFailed(status: Int, body: String)  // 非2xx（401/403 は notAuthenticated に分類済み）
+case httpFailed(status: Int, body: String)  // 非2xx（401/403 は endpointNotAuthenticated に分類済み）
 case networkFailed(description: String)     // トランスポートエラー
 ```
 
@@ -183,7 +183,7 @@ case networkFailed(description: String)     // トランスポートエラー
   - モデル上書き（llm.openai.model 非空/空）
   - ボディの response_format（strict:false、schema 埋め込み）
   - レスポンスパース: 正常（content → structuredJSON、usage 変換）、content 欠落 →
-    missingStructuredOutput、401/403 → notAuthenticated、500 → httpFailed、usage 欠落 → ゼロ値
+    missingStructuredOutput、401/403 → endpointNotAuthenticated、500 → httpFailed、usage 欠落 → ゼロ値
 - **LLMClient**: backend 差し替えで `structuredJSON` → `T` の convertFromSnakeCase デコードが
   従来どおり動くこと（既存テストの移設含む）。既存の `buildArguments` / `decodeResult` テストは
   `ClaudeCLIBackend` のテストとして移設し、**アサーション内容は変えない**

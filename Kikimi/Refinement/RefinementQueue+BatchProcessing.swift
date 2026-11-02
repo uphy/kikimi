@@ -195,7 +195,7 @@ extension RefinementQueue {
     /// endpoint is permanently unusable.
     private static func isFatal(_ error: LLMClientError) -> Bool {
         switch error {
-        case .cliNotFound, .notAuthenticated, .missingAPIKey, .unknownProvider:
+        case .cliNotFound, .notAuthenticated, .endpointNotAuthenticated, .missingAPIKey, .unknownProvider:
             return true
         case .processFailed, .timedOut, .invalidJSON, .missingStructuredOutput, .decodeFailed, .httpFailed, .networkFailed:
             return false

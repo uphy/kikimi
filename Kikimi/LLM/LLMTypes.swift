@@ -182,8 +182,13 @@ enum LLMClientError: Error, Equatable, Sendable {
     /// キー解決順").
     case missingAPIKey
     /// `openai` provider: a non-2xx HTTP response that isn't 401/403 (those classify as
-    /// `.notAuthenticated` instead; section 4.2). `body` is truncated to 1KB.
+    /// `.endpointNotAuthenticated` instead; section 4.2). `body` is truncated to 1KB.
     case httpFailed(status: Int, body: String)
+    /// `openai` provider: HTTP 401/403. Kept apart from `.notAuthenticated` (which is the `claude`
+    /// CLI's OAuth session) so the user-facing message names the endpoint that rejected the key
+    /// and carries its own explanation, instead of a bare "notAuthenticated" with a `claude login`
+    /// hint that does not apply. `url` has no query string; `body` is truncated to 1KB.
+    case endpointNotAuthenticated(status: Int, url: String, body: String)
     /// `openai` provider: a `URLSession` transport-layer failure other than a timeout (which
     /// classifies as `.timedOut` instead; section 4.2).
     case networkFailed(description: String)
@@ -216,6 +221,9 @@ extension LLMClientError: LocalizedError {
             return "no OpenAI-compatible API key resolved (set llm.openai.api_key or llm.openai.api_key_env)"
         case .httpFailed(let status, let body):
             return "OpenAI-compatible endpoint returned HTTP \(status): \(body)"
+        case .endpointNotAuthenticated(let status, let url, let body):
+            let detail = body.isEmpty ? "" : ": \(body)"
+            return "OpenAI-compatible endpoint rejected the API key (HTTP \(status) from \(url))\(detail)"
         case .networkFailed(let description):
             return "OpenAI-compatible endpoint request failed: \(description)"
         case .unknownProvider(let name):
