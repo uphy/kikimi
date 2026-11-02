@@ -379,7 +379,8 @@ actor DictationHistoryStore {
 - 下段: 日時（相対 + 絶対）・発話長・状態アイコン（`refine_outcome` が `fallback` なら警告色、
   `insert_outcome` が `aborted_and_stashed` なら中止アイコン——「refine 全滅」がリストを見るだけで分かる
   ことが本機能の主目的）
-- コンテキストメニュー: 「Finder で開く」/「パスをコピー」（対象はエントリフォルダ。書き起こしの問題を
+- コンテキストメニュー: 「テキストをコピー」（`final_text`。実際に挿入された文字列を詳細を開かずに
+  貼り直せるように）/ 区切り / 「Finder で開く」/「パスをコピー」（対象はエントリフォルダ。書き起こしの問題を
   コーディングエージェント等の外部ツールに調査してもらう受け渡し導線）/ 区切り / 削除（`deleteEntry`、
   破壊的操作なので最後に置く）
 
@@ -388,7 +389,8 @@ actor DictationHistoryStore {
 - 再生ボタン（`SegmentAudioPlayer.play(segmentId: entry.id, fileURL: audio.wav, localStartMs: 0,
   durationMs: duration_ms)`。`audio.wav` 不在時はボタンを disabled にして「音声なし」注記）
 - `raw_text` と `refined_text` の並記（refine 無効・フォールバック時は raw のみ + 理由バッジ:
-  `refine_error` の文字列をそのまま表示）
+  `refine_error` の文字列をそのまま表示）。**追補**: 各テキストの見出し横にコピーボタンを置き、
+  押すと 1.5 秒チェックマークに変わる（`TranscriptRowContentView` のコピーボタンと同じ見せ方）
 - 挿入先アプリ（`target_bundle_id`）・挿入結果
 - **追補**: マイク（`mic_device_name`）。`nil`（この追補より前の `entry.json`）なら行ごと非表示——
   `target_bundle_id` の「不明」表示とは違い、表示すべき情報が原理的に存在しないケースなので行自体を
