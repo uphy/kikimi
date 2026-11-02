@@ -53,6 +53,14 @@ struct DictationHistoryView: View {
                                 // problem) -- "Finder で開く"/"パスをコピー" both need only the path,
                                 // not any store file I/O, so they read it straight off
                                 // `DictationHistoryStore`'s pure path helper.
+                                // "テキストをコピー" copies `finalText` -- the text that was actually
+                                // inserted (refined on success, raw otherwise), so re-pasting an old
+                                // utterance doesn't require opening its detail pane first.
+                                Button("テキストをコピー") {
+                                    SystemPasteboard().writeString(item.finalText)
+                                }
+                                .disabled(item.finalText.isEmpty)
+                                Divider()
                                 Button("Finder で開く") {
                                     NSWorkspace.shared.activateFileViewerSelecting(
                                         [DictationHistoryStore.entryDirectoryURL(forId: item.id)]
@@ -295,9 +303,12 @@ private struct DictationHistoryDetailView: View {
 
     private func labeledText(title: String, text: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                CopyTextButton(text: text, label: "\(title)をコピー")
+            }
             Text(text)
                 .textSelection(.enabled)
         }
@@ -347,6 +358,52 @@ private struct DictationHistoryDetailView: View {
             DetailRow(label: "出力トークン", value: "\(totals.outputTokens)")
             DetailRow(label: "キャッシュ読込", value: "\(totals.cacheReadInputTokens)")
             DetailRow(label: "キャッシュ書込", value: "\(totals.cacheCreationInputTokens)")
+        }
+    }
+}
+
+// MARK: - CopyTextButton
+
+/// Small inline copy button for one text block in the detail pane. Swaps `doc.on.doc` for a
+/// `checkmark` for 1.5 s after a successful write, the same feedback convention as
+/// `TranscriptRowContentView.copyButton` / `MeetingTabView`'s toolbar copy button.
+private struct CopyTextButton: View {
+    let text: String
+    let label: String
+
+    @State private var showsFeedback = false
+    @State private var feedbackTask: Task<Void, Never>?
+
+    var body: some View {
+        Button {
+            copy()
+        } label: {
+            Image(systemName: showsFeedback ? "checkmark" : "doc.on.doc")
+                .font(.caption)
+                .foregroundStyle(showsFeedback ? Color.accentColor : Color.secondary)
+        }
+        .buttonStyle(.plain)
+        .disabled(text.isEmpty)
+        .help(label)
+        .accessibilityLabel(label)
+        // A different entry selected while the checkmark is up must not inherit it.
+        .onChange(of: text) { _, _ in
+            feedbackTask?.cancel()
+            showsFeedback = false
+        }
+    }
+
+    private func copy() {
+        feedbackTask?.cancel()
+        guard SystemPasteboard().writeString(text) else {
+            showsFeedback = false
+            return
+        }
+        showsFeedback = true
+        feedbackTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled else { return }
+            showsFeedback = false
         }
     }
 }
