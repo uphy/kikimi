@@ -499,18 +499,29 @@ struct OpenAIChatBackendTests {
         }
     }
 
-    @Test("parseResponse throws notAuthenticated on HTTP 401")
-    func parseResponse401ThrowsNotAuthenticated() throws {
-        let response = HTTPURLResponse(url: URL(string: "https://api.openai.com/v1/chat/completions")!, statusCode: 401, httpVersion: nil, headerFields: nil)!
-        #expect(throws: LLMClientError.notAuthenticated) {
-            _ = try OpenAIChatBackend.parseResponse(data: Data(), httpResponse: response, config: makeConfig(), requestModel: "claude-haiku-4-5-20251001")
+    @Test("parseResponse throws endpointNotAuthenticated with the URL (query stripped) and body on HTTP 401")
+    func parseResponse401ThrowsEndpointNotAuthenticated() throws {
+        let url = URL(string: "https://example.openai.azure.com/openai/deployments/x/chat/completions?api-version=2024-10-21")!
+        let response = HTTPURLResponse(url: url, statusCode: 401, httpVersion: nil, headerFields: nil)!
+        let body = #"{"error":"invalid api key"}"#.data(using: .utf8)!
+        let expected = LLMClientError.endpointNotAuthenticated(
+            status: 401,
+            url: "https://example.openai.azure.com/openai/deployments/x/chat/completions",
+            body: #"{"error":"invalid api key"}"#
+        )
+        #expect(throws: expected) {
+            _ = try OpenAIChatBackend.parseResponse(data: body, httpResponse: response, config: makeConfig(), requestModel: "claude-haiku-4-5-20251001")
         }
+        let message = expected.errorDescription ?? ""
+        #expect(message.contains("HTTP 401"))
+        #expect(message.contains("invalid api key"))
+        #expect(!message.contains("api-version"))
     }
 
-    @Test("parseResponse throws notAuthenticated on HTTP 403")
-    func parseResponse403ThrowsNotAuthenticated() throws {
+    @Test("parseResponse throws endpointNotAuthenticated on HTTP 403")
+    func parseResponse403ThrowsEndpointNotAuthenticated() throws {
         let response = HTTPURLResponse(url: URL(string: "https://api.openai.com/v1/chat/completions")!, statusCode: 403, httpVersion: nil, headerFields: nil)!
-        #expect(throws: LLMClientError.notAuthenticated) {
+        #expect(throws: LLMClientError.endpointNotAuthenticated(status: 403, url: "https://api.openai.com/v1/chat/completions", body: "")) {
             _ = try OpenAIChatBackend.parseResponse(data: Data(), httpResponse: response, config: makeConfig(), requestModel: "claude-haiku-4-5-20251001")
         }
     }

@@ -34,9 +34,10 @@ struct DictationRefineOutcome: Sendable {
     /// The model that actually responded (`LLMResult.respondedModel` ?? requested model). `nil` on
     /// failure, since there was no response to report a model from.
     var model: String?
-    /// Human-readable failure description when the call fell back; `nil` on success. Same string as
-    /// the existing warning log (`String(describing: error)`) -- this is the `refine_error` field's
-    /// source (design 29).
+    /// Human-readable failure description when the call fell back; `nil` on success. Built by
+    /// `DictationRefiner.describeFailure` (`provider/model: <LocalizedError description>`) -- this is
+    /// the `refine_error` field's source (design 29), shown verbatim in the dictation history, so it
+    /// names which provider failed and why rather than a bare enum case like "notAuthenticated".
     var failure: String?
 
     var succeeded: Bool { failure == nil }
@@ -128,9 +129,18 @@ struct DictationRefiner: Sendable {
                 failure: nil
             )
         } catch {
-            logger.warning("dictation refinement failed, falling back to raw text: \(String(describing: error), privacy: .public)")
-            return DictationRefineOutcome(text: rawText, usage: nil, model: nil, failure: String(describing: error))
+            let failure = Self.describeFailure(error, resolvedModel: resolvedModel)
+            logger.warning("dictation refinement failed, falling back to raw text: \(failure, privacy: .public)")
+            return DictationRefineOutcome(text: rawText, usage: nil, model: nil, failure: failure)
         }
+    }
+
+    /// `provider/model: <description>`. Uses `LocalizedError.errorDescription` when available so
+    /// e.g. an HTTP 401 carries its endpoint and response body, falling back to
+    /// `String(describing:)` for errors without one.
+    static func describeFailure(_ error: Error, resolvedModel: ResolvedModel) -> String {
+        let description = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+        return "\(resolvedModel.provider)/\(resolvedModel.model): \(description)"
     }
 
     /// `dictation.model` resolution (`docs/design/44-llm-model-config.md` §4/§7, revised after D2
