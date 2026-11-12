@@ -88,6 +88,17 @@ struct DictationSilenceCompactorTests {
         #expect(result.keptRanges == [8_800..<9_500])
     }
 
+    @Test("the default threshold keeps quiet frames that stay below 0.5")
+    func defaultThresholdKeepsQuietSpeech() {
+        #expect(DictationSilenceCompactor.Parameters.default.speechThreshold == 0.35)
+        let samples = [Float](repeating: 1, count: 20 * 4_096)
+        var probabilities = [Float](repeating: 0, count: 20)
+        probabilities[10] = 0.4
+        let result = DictationSilenceCompactor.compact(
+            samples: samples, probabilities: probabilities, frameSampleCount: 4_096)
+        #expect(result?.keptRanges == [(10 * 4_096 - 4_800)..<(11 * 4_096 + 4_800)])
+    }
+
     @Test("empty samples return nil")
     func emptySamples() {
         #expect(DictationSilenceCompactor.compact(

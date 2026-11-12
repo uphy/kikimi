@@ -10,8 +10,10 @@ import os
 /// `nil` when the original samples should be decoded unchanged.
 enum DictationSilenceCompactor {
     struct Parameters: Equatable, Sendable {
-        /// SS3: a frame whose speech probability is at or above this counts as speech.
-        var speechThreshold: Float = 0.5
+        /// SS3: a frame whose speech probability is at or above this counts as speech. 0.35 is
+        /// Silero's usual speech-*end* threshold (0.5 minus its 0.15 hysteresis): leaning low keeps
+        /// quiet words that never reach 0.5, at the cost of cutting a little less silence.
+        var speechThreshold: Float = 0.35
         /// SS3: padding added before and after each speech run, in samples.
         var paddingSamples: Int = 4_800
         /// SS3: padded speech runs separated by less than this are joined into one, in samples.
@@ -22,6 +24,10 @@ enum DictationSilenceCompactor {
         var minSavedSamples: Int = 16_000
 
         static let `default` = Parameters()
+
+        /// Below this many samples no result can save `minSavedSamples` (any speech keeps at least
+        /// one padding's worth), so the VAD pass is skipped outright.
+        var minimumUsefulSampleCount: Int { minSavedSamples + paddingSamples }
     }
 
     struct Result: Equatable, Sendable {
@@ -93,11 +99,16 @@ protocol DictationSpeechDetecting: Sendable {
     /// Size of one probability frame, in samples.
     var frameSampleCount: Int { get }
     /// Loads the model ahead of the first utterance (SS8). Never throws; a failure is logged and
-    /// retried by the next `speechProbabilities` call.
+    /// retried by the next warm.
     func warm() async
     /// One speech probability per `frameSampleCount` samples, starting from a fresh VAD state.
+    /// Never waits for a model load: throws `DictationSpeechDetectorNotReady` (after starting a
+    /// background load if none is running) so key-up falls back to the whole utterance at once.
     func speechProbabilities(samples: [Float]) async throws -> [Float]
 }
+
+/// Thrown by `DictationSpeechDetecting.speechProbabilities` while the model is not loaded yet.
+struct DictationSpeechDetectorNotReady: Error {}
 
 // MARK: - DictationVadSpeechDetector
 
@@ -120,12 +131,19 @@ actor DictationVadSpeechDetector: DictationSpeechDetecting {
     }
 
     func speechProbabilities(samples: [Float]) async throws -> [Float] {
-        let manager = try await loadedManager()
+        guard let manager else {
+            // Key-up must not wait on a load (possibly a download, possibly failing offline every
+            // time): kick one off in the background for the next utterance and bail out now.
+            if loadTask == nil {
+                Task { await self.warm() }
+            }
+            throw DictationSpeechDetectorNotReady()
+        }
         return try await manager.process(samples).map(\.probability)
     }
 
-    /// Single-flight load: a key-up that lands mid-warm joins the same load (SS8). A failed load is
-    /// cleared so the next call retries instead of rethrowing a stale error.
+    /// Single-flight load shared by concurrent warms. A failed load is cleared so the next warm
+    /// retries instead of rethrowing a stale error.
     private func loadedManager() async throws -> VadManager {
         if let manager { return manager }
         let task: Task<VadManager, Error>

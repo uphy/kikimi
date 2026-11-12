@@ -294,7 +294,7 @@ final class DictationController: ObservableObject {
         isBatchWarming = true
         // design 51 SS8: load the VAD alongside the batch model so the first utterance doesn't pay
         // for it. Idempotent (single-flight, cached), so re-warms after a toggle are free.
-        if let speechDetector {
+        if let speechDetector, dictationConfigProvider().skipSilence {
             Task { await speechDetector.warm() }
         }
         let language = Self.resolveSttEngineConfig(dictation: dictationConfigProvider(), stt: sttConfigProvider()).language

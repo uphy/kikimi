@@ -272,7 +272,10 @@ extension DictationController {
             logger.debug("dictation batch decode skipped: \(samples.count, privacy: .public) samples is below the model's minimum")
             return nil
         }
-        let decodeSamples = skipSilence ? await compactSilences(samples) : samples
+        var decodeSamples = skipSilence ? await compactSilences(samples) : samples
+        if decodeSamples.count < DictationBatchTranscriber.minimumSampleCount {
+            decodeSamples = samples
+        }
         let clock = ContinuousClock()
         let start = clock.now
         do {
@@ -289,22 +292,32 @@ extension DictationController {
     /// design 51 SS1/SS6: `samples` with long silences cut out, or `samples` unchanged when there is
     /// no detector, the VAD fails, no speech is found, or the saving is too small to bother.
     private func compactSilences(_ samples: [Float]) async -> [Float] {
-        guard let speechDetector else { return samples }
+        let parameters = DictationSilenceCompactor.Parameters.default
+        guard let speechDetector, samples.count >= parameters.minimumUsefulSampleCount else { return samples }
         let clock = ContinuousClock()
         let start = clock.now
         let probabilities: [Float]
         do {
             probabilities = try await speechDetector.speechProbabilities(samples: samples)
+        } catch is DictationSpeechDetectorNotReady {
+            logger.info("dictation VAD not loaded yet, decoding the whole utterance")
+            return samples
         } catch {
             logger.warning("dictation VAD failed, decoding the whole utterance: \(String(describing: error), privacy: .public)")
             return samples
         }
         let vadMs = Self.milliseconds(clock.now - start)
-        guard let result = DictationSilenceCompactor.compact(
-            samples: samples,
-            probabilities: probabilities,
-            frameSampleCount: speechDetector.frameSampleCount
-        ) else {
+        // Off the main actor: this copies the whole utterance.
+        let frameSampleCount = speechDetector.frameSampleCount
+        let compacted = await Task.detached(priority: .userInitiated) {
+            DictationSilenceCompactor.compact(
+                samples: samples,
+                probabilities: probabilities,
+                frameSampleCount: frameSampleCount,
+                parameters: parameters
+            )
+        }.value
+        guard let result = compacted else {
             logger.info("dictation silence skip: nothing to cut in \(Self.seconds(samples.count), privacy: .public)s (VAD \(vadMs, privacy: .public)ms)")
             return samples
         }

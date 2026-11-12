@@ -76,6 +76,18 @@ private actor FakeTwoPassSttBackend: SttStreamingBackend {
 
 private struct TwoPassTestStubError: Error {}
 
+// MARK: - NotReadySpeechDetector
+
+private struct NotReadySpeechDetector: DictationSpeechDetecting {
+    let frameSampleCount = 4_096
+
+    func warm() async {}
+
+    func speechProbabilities(samples: [Float]) async throws -> [Float] {
+        throw DictationSpeechDetectorNotReady()
+    }
+}
+
 // MARK: - FakeSpeechDetector
 
 /// Silero-free stand-in for `DictationSpeechDetecting` (design 51 §4): returns canned per-frame
@@ -272,6 +284,13 @@ struct DictationControllerTwoPassTests {
     @Test("SS6 (3): a VAD failure decodes the whole utterance")
     func vadFailureDecodesEverything() async throws {
         let detector = FakeSpeechDetector(frameSampleCount: 16_000, result: .failure(TwoPassTestStubError()))
+        let counts = try await batchSampleCount(skipSilence: true, detector: detector)
+        #expect(counts == [320_000])
+    }
+
+    @Test("SS8: a detector whose model is not loaded yet decodes the whole utterance")
+    func notReadyDetectorDecodesEverything() async throws {
+        let detector = NotReadySpeechDetector()
         let counts = try await batchSampleCount(skipSilence: true, detector: detector)
         #expect(counts == [320_000])
     }
