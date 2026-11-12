@@ -26,7 +26,7 @@ extension KeyboardShortcuts.Name {
 /// in favor of sharing the mic.
 @MainActor
 final class DictationController: ObservableObject {
-    static let shared = DictationController()
+    static let shared = DictationController(speechDetector: DictationVadSpeechDetector())
 
     /// `internal` (not `private`): also used by the history-bookkeeping half of this type in
     /// `DictationController+History.swift` (split for SwiftLint's 600-line file-length limit).
@@ -48,6 +48,11 @@ final class DictationController: ObservableObject {
     /// load failure, toggled off -- degrades that utterance to the streaming raw (TP2), never blocks.
     /// `internal`: also read by `DictationController+Gesture.swift`'s `decodeBatchIfEnabled`.
     var batchTranscriber: (any DictationBatchTranscribing)?
+    /// `docs/design/51-dictation-silence-skip.md` SS1/SS8: the VAD that finds the silences cut out
+    /// before the batch re-decode. `nil` (the init default, so layer-1 tests never load Silero)
+    /// disables the cut entirely; only `shared` passes the real detector. `internal`: read by
+    /// `+Gesture.swift`.
+    let speechDetector: (any DictationSpeechDetecting)?
     /// `internal`: set/cleared by `handleHotkeyDown()`/`handleHotkeyUp()` (`+Gesture.swift`).
     var audioInput: DictationAudioInput?
     /// Injected (default `DictationInserter()`) -- tests substitute a spy, see `DictationInserting`.
@@ -188,7 +193,8 @@ final class DictationController: ObservableObject {
         audioInputEnumerator: any AudioInputEnumerating = AudioInputEnumerator(),
         liveHUDPanelFactory: @escaping @MainActor () -> any DictationLiveHUDPresenting = { DictationLiveHUDPanelController() },
         inserterFactory: @escaping @MainActor () -> any DictationInserting = { DictationInserter() },
-        trailingCaptureDelayMs: UInt64 = 280
+        trailingCaptureDelayMs: UInt64 = 280,
+        speechDetector: (any DictationSpeechDetecting)? = nil
     ) {
         self.dictationConfigProvider = dictationConfigProvider
         self.sttConfigProvider = sttConfigProvider
@@ -202,6 +208,7 @@ final class DictationController: ObservableObject {
         self.audioInputEnumerator = audioInputEnumerator
         self.transcriberFactory = transcriberFactory
         self.trailingCaptureDelayMs = trailingCaptureDelayMs
+        self.speechDetector = speechDetector
         self.batchTranscriberFactory = batchTranscriberFactory
         self.refiner = refiner
         self.historyStore = historyStore
@@ -285,6 +292,11 @@ final class DictationController: ObservableObject {
         }
         guard !isBatchWarming, batchTranscriber == nil else { return }
         isBatchWarming = true
+        // design 51 SS8: load the VAD alongside the batch model so the first utterance doesn't pay
+        // for it. Idempotent (single-flight, cached), so re-warms after a toggle are free.
+        if let speechDetector, dictationConfigProvider().skipSilence {
+            Task { await speechDetector.warm() }
+        }
         let language = Self.resolveSttEngineConfig(dictation: dictationConfigProvider(), stt: sttConfigProvider()).language
         // Snapshotted with the language: the warm-up runs asynchronously, and picking the model up
         // later could acquire a different one than the toggle that started this warm-up asked for.

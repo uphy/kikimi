@@ -202,7 +202,8 @@ extension DictationController {
             // design 31 TP2/TP6: re-decode the whole utterance with the batch model (when
             // available) and let it take precedence over the streaming text -- the streaming
             // decoder deterministically drops words after mid-utterance pauses (the design's 経緯).
-            let batchText = await self.decodeBatchIfEnabled(samples: recordedSamples, twoPassDecode: config.twoPassDecode)
+            let batchText = await self.decodeBatchIfEnabled(
+                samples: recordedSamples, twoPassDecode: config.twoPassDecode, skipSilence: config.skipSilence)
 
             guard let selection = DictationRawSelection.select(batchText: batchText, streamingText: streamingRaw) else {
                 self.capturedTarget = nil
@@ -262,7 +263,8 @@ extension DictationController {
     /// The key-up batch decode with design 31 §3.3's three fall-back-to-streaming (`nil`) gates.
     /// `twoPassDecode` is the key-up config re-read (not "is `batchTranscriber` non-nil"), so an
     /// ON->OFF toggle racing this utterance still wins over a lingering warm instance (TP9).
-    private func decodeBatchIfEnabled(samples: [Float], twoPassDecode: Bool) async -> String? {
+    /// `skipSilence` (design 51 SS7) cuts long silences out of `samples` first.
+    private func decodeBatchIfEnabled(samples: [Float], twoPassDecode: Bool, skipSilence: Bool) async -> String? {
         guard twoPassDecode, let batchTranscriber else { return nil }
         // Everyday short presses (and the accumulate-off-at-key-down races of §3.2) are expected,
         // not errors: FluidAudio hard-rejects < 0.3s of audio, so gate before calling it.
@@ -270,11 +272,68 @@ extension DictationController {
             logger.debug("dictation batch decode skipped: \(samples.count, privacy: .public) samples is below the model's minimum")
             return nil
         }
+        var decodeSamples = skipSilence ? await compactSilences(samples) : samples
+        if decodeSamples.count < DictationBatchTranscriber.minimumSampleCount {
+            decodeSamples = samples
+        }
+        let clock = ContinuousClock()
+        let start = clock.now
         do {
-            return try await batchTranscriber.transcribe(samples: samples)
+            let text = try await batchTranscriber.transcribe(samples: decodeSamples)
+            // design 51 SS9: the wait this feature exists to shorten.
+            logger.info("dictation batch decode took \(Self.milliseconds(clock.now - start), privacy: .public)ms for \(Self.seconds(decodeSamples.count), privacy: .public)s of audio")
+            return text
         } catch {
             logger.error("dictation batch decode failed, confirming from the streaming text: \(String(describing: error), privacy: .public)")
             return nil
         }
+    }
+
+    /// design 51 SS1/SS6: `samples` with long silences cut out, or `samples` unchanged when there is
+    /// no detector, the VAD fails, no speech is found, or the saving is too small to bother.
+    private func compactSilences(_ samples: [Float]) async -> [Float] {
+        let parameters = DictationSilenceCompactor.Parameters.default
+        guard let speechDetector, samples.count >= parameters.minimumUsefulSampleCount else { return samples }
+        let clock = ContinuousClock()
+        let start = clock.now
+        let probabilities: [Float]
+        do {
+            probabilities = try await speechDetector.speechProbabilities(samples: samples)
+        } catch is DictationSpeechDetectorNotReady {
+            logger.info("dictation VAD not loaded yet, decoding the whole utterance")
+            return samples
+        } catch {
+            logger.warning("dictation VAD failed, decoding the whole utterance: \(String(describing: error), privacy: .public)")
+            return samples
+        }
+        let vadMs = Self.milliseconds(clock.now - start)
+        // Off the main actor: this copies the whole utterance.
+        let frameSampleCount = speechDetector.frameSampleCount
+        let compacted = await Task.detached(priority: .userInitiated) {
+            DictationSilenceCompactor.compact(
+                samples: samples,
+                probabilities: probabilities,
+                frameSampleCount: frameSampleCount,
+                parameters: parameters
+            )
+        }.value
+        guard let result = compacted else {
+            logger.info("dictation silence skip: nothing to cut in \(Self.seconds(samples.count), privacy: .public)s (VAD \(vadMs, privacy: .public)ms)")
+            return samples
+        }
+        let before = Self.seconds(samples.count)
+        let after = Self.seconds(result.samples.count)
+        let spans = result.keptRanges.count
+        logger.info("dictation silence skip: \(before, privacy: .public)s -> \(after, privacy: .public)s in \(spans, privacy: .public) span(s) (VAD \(vadMs, privacy: .public)ms)")
+        return result.samples
+    }
+
+    private static func seconds(_ sampleCount: Int) -> String {
+        String(format: "%.1f", Double(sampleCount) / 16_000)
+    }
+
+    private static func milliseconds(_ duration: Duration) -> Int {
+        let parts = duration.components
+        return Int(parts.seconds * 1_000 + parts.attoseconds / 1_000_000_000_000_000)
     }
 }

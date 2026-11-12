@@ -45,6 +45,24 @@ struct DictationConfigTests {
         #expect(dictation.stripFillers == false)
     }
 
+    // MARK: - skip_silence (design 51 SS7)
+
+    @Test("a missing skip_silence key defaults to true")
+    func missingSkipSilenceDefaultsToTrue() throws {
+        let dictation = try decodeDictationConfig("enabled: true")
+        #expect(dictation.skipSilence == true)
+    }
+
+    @Test("skip_silence: false decodes as-is")
+    func explicitSkipSilenceFalseDecodes() throws {
+        let yaml = """
+        enabled: true
+        skip_silence: false
+        """
+        let dictation = try decodeDictationConfig(yaml)
+        #expect(dictation.skipSilence == false)
+    }
+
     // MARK: - two_pass_decode (design 31 TP9)
 
     @Test("a missing two_pass_decode key defaults to true (opt-out, not opt-in)")

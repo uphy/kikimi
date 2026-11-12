@@ -70,6 +70,13 @@ struct DictationSettingsTab: View {
                             + "キーを離してから挿入されるまでが 10 秒の発話で 0.1〜0.5 秒ほど延びます。"
                             + "モデルのダウンロードは一般タブから行えます"
                     )
+
+                    // design 51 SS7: only meaningful while the batch re-decode runs.
+                    Toggle("再認識の前に長い無音を飛ばす", isOn: skipSilenceBinding)
+                        .help(
+                            "発話の合間の長い無音を詰めてから再認識し、キーを離してから挿入されるまでを短くします。"
+                                + "ライブ表示と履歴の音声はそのままです"
+                        )
                 }
 
                 if !dictationController.isAccessibilityTrusted {
@@ -221,6 +228,13 @@ struct DictationSettingsTab: View {
         Binding(
             get: { appConfig.data.dictation.batchModel },
             set: { newValue in appConfig.update { $0.dictation.batchModel = newValue } }
+        )
+    }
+
+    private var skipSilenceBinding: Binding<Bool> {
+        Binding(
+            get: { appConfig.data.dictation.skipSilence },
+            set: { newValue in appConfig.update { $0.dictation.skipSilence = newValue } }
         )
     }
 
