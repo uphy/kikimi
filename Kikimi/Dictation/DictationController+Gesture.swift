@@ -214,7 +214,10 @@ extension DictationController {
                 await self.discardActiveHistoryEntry()
                 return
             }
-            let trimmedRaw = selection.rawText
+            // design 49 FS1: drop unambiguous fillers before anything downstream sees the text --
+            // the HUD, the LLM refinement and the insertion all work from the stripped text, while
+            // `selection.rawText` (and so `entry.json`'s `raw_text`) stays as spoken.
+            let trimmedRaw = config.stripFillers ? DictationFillerStripper.strip(selection.rawText) : selection.rawText
             // design 32 HR2: let the user read the confirmed (batch-preferred) raw while the
             // refinement runs. A display no-op when refine is off (the HUD is already hidden).
             self.liveHUDPanel?.updateText(trimmedRaw)

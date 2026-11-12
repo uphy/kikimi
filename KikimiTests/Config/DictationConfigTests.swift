@@ -27,6 +27,24 @@ struct DictationConfigTests {
         #expect(dictation.history.maxEntries == 100)
     }
 
+    // MARK: - strip_fillers (design 49 FS6)
+
+    @Test("a missing strip_fillers key defaults to true")
+    func missingStripFillersDefaultsToTrue() throws {
+        let dictation = try decodeDictationConfig("enabled: true")
+        #expect(dictation.stripFillers == true)
+    }
+
+    @Test("strip_fillers: false decodes as-is")
+    func explicitStripFillersFalseDecodes() throws {
+        let yaml = """
+        enabled: true
+        strip_fillers: false
+        """
+        let dictation = try decodeDictationConfig(yaml)
+        #expect(dictation.stripFillers == false)
+    }
+
     // MARK: - two_pass_decode (design 31 TP9)
 
     @Test("a missing two_pass_decode key defaults to true (opt-out, not opt-in)")

@@ -423,6 +423,7 @@ dictation:
   language: ""              # 空なら stt.language を使う（R3）
 
   # --- D2 以降 ---
+  strip_fillers: true       # 「えっと」と節の頭の「え、」を規則で除く（docs/design/49-dictation-filler-strip.md）。既定 true
   refine: false             # LLM 後処理の有効/無効（D1 は常に false 相当）
   model: ""                 # 空なら watchers.default_model にフォールバック（R9 改定）
   refine_timeout_ms: 3000   # 整形の単発呼び出しタイムアウト。超過で raw 挿入（R9）
