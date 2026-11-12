@@ -173,12 +173,18 @@ final class SpyDictationInserter: DictationInserting {
 @Suite("DictationController history wiring")
 @MainActor
 struct DictationControllerHistoryTests {
-    private func makeConfig(refine: Bool = false, historyEnabled: Bool = true, maxEntries: Int = 100) -> DictationConfig {
+    private func makeConfig(
+        refine: Bool = false,
+        historyEnabled: Bool = true,
+        maxEntries: Int = 100,
+        stripFillers: Bool = true
+    ) -> DictationConfig {
         DictationConfig(
             enabled: true,
             insertMethod: .pasteboard,
             micDeviceUID: "",
             language: "",
+            stripFillers: stripFillers,
             refine: refine,
             model: "claude-haiku-4-5-20251001",
             refineTimeoutMs: 3_000,
@@ -433,6 +439,38 @@ struct DictationControllerHistoryTests {
         #expect(call.handle.id == "entry-4")
         let deletedIds = await store.deletedIds
         #expect(deletedIds.isEmpty, "an aborted-and-stashed insert must finalize, not discard")
+    }
+
+    // MARK: - Filler stripping (design 49)
+
+    @Test("fillers are stripped from final_text while raw_text stays as spoken", arguments: [true, false])
+    func fillerStrippingAffectsFinalTextOnly(stripFillers: Bool) async throws {
+        let store = FakeControllerHistoryStore()
+        let controller = makeController(config: makeConfig(refine: false, stripFillers: stripFillers), historyStore: store)
+        let backend = FakeControllerSttBackend()
+        await backend.setFinishText("なので、えっと分けるのはどうでしょうか")
+        let handle = DictationHistoryStore.EntryHandle(
+            id: "entry-filler",
+            directoryURL: URL(fileURLWithPath: "/dev/null/entry-filler", isDirectory: true),
+            audioFileURL: URL(fileURLWithPath: "/dev/null/entry-filler/audio.wav")
+        )
+        controller.simulateCapturing(
+            transcriber: DictationTranscriber(backend: backend),
+            capturedTarget: mismatchedCapturedTarget(),
+            historyEntryHandle: handle,
+            historyEntryRecordedAt: Date(timeIntervalSince1970: 6_000)
+        )
+
+        controller.handleHotkeyUp()
+
+        try await waitUntil {
+            let calls = await store.finalizeCalls
+            return !calls.isEmpty
+        }
+        let call = try #require(await store.finalizeCalls.first)
+        #expect(call.entry.rawText == "なので、えっと分けるのはどうでしょうか")
+        #expect(call.entry.finalText == (stripFillers ? "なので、分けるのはどうでしょうか" : "なので、えっと分けるのはどうでしょうか"))
+        #expect(call.entry.refineOutcome == .disabled)
     }
 
     // MARK: - Trailing capture grace period (word-drop fix 1)

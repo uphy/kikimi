@@ -212,6 +212,11 @@ struct DictationConfig: Codable, Equatable, Sendable {
     /// silently get slower inserts. Validation matches `SttConfig.batchModel`'s: unknown values
     /// warn and fall back rather than failing the whole section.
     var batchModel: String
+    /// `docs/design/49-dictation-filler-strip.md` FS6: whether `DictationFillerStripper` removes
+    /// unambiguous fillers (`えっと`, a clause-initial `え、`) from the confirmed raw text before
+    /// refinement/insertion. `true` by default -- the rules only fire where no meaningful reading
+    /// exists, so there is nothing for an opt-in to protect.
+    var stripFillers: Bool
     /// D2 scope: LLM post-processing toggle. Always effectively `false` in D1 (no `DictationRefiner`
     /// exists yet), kept here so `config.yaml` round-trips the full section from day one.
     var refine: Bool
@@ -239,6 +244,7 @@ struct DictationConfig: Codable, Equatable, Sendable {
         case language
         case twoPassDecode = "two_pass_decode"
         case batchModel = "batch_model"
+        case stripFillers = "strip_fillers"
         case refine
         case model
         case refineTimeoutMs = "refine_timeout_ms"
@@ -271,6 +277,7 @@ struct DictationConfig: Codable, Equatable, Sendable {
         language: String,
         twoPassDecode: Bool = true,
         batchModel: String = SttConfig.parakeetBatchModel,
+        stripFillers: Bool = true,
         refine: Bool,
         model: String,
         refineTimeoutMs: Int,
@@ -283,6 +290,7 @@ struct DictationConfig: Codable, Equatable, Sendable {
         self.language = language
         self.twoPassDecode = twoPassDecode
         self.batchModel = batchModel
+        self.stripFillers = stripFillers
         self.refine = refine
         self.model = model
         self.refineTimeoutMs = refineTimeoutMs
@@ -332,6 +340,7 @@ struct DictationConfig: Codable, Equatable, Sendable {
             )
             batchModel = Self.default.batchModel
         }
+        stripFillers = try container.decodeIfPresent(Bool.self, forKey: .stripFillers) ?? Self.default.stripFillers
         refine = try container.decodeIfPresent(Bool.self, forKey: .refine) ?? Self.default.refine
         model = try container.decodeIfPresent(String.self, forKey: .model) ?? Self.default.model
 

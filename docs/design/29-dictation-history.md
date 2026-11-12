@@ -107,7 +107,7 @@ raw テキストがそのまま挿入され続けていたにもかかわらず�
 | `target_bundle_id` | string? | keyDown 時の `capturedTarget.bundleId`（挿入先アプリ）。取得できなければ `null` |
 | `raw_text` | string | 確定に使った STT 生出力の trim 後（`trimmedRaw`）。design 27 §5.1 の `raw_text` と同じ定義。**追補（`docs/design/31-dictation-two-pass-decode.md` TP7）**: 供給元は二段デコード導入後はバッチ再デコード（フォールバック時はストリーミング）。どちらが供給したかは `raw_source`（`"batch"` / `"streaming"`、旧エントリはキー不在 = streaming 扱い）に、バッチ確定時のストリーミング側テキストは `streaming_text`（診断用、string?）に記録する |
 | `refined_text` | string? | 整形結果（成功時のみ）。フォールバック時・refine 無効時は `null` |
-| `final_text` | string | 実際に挿入した（しようとした）テキスト。成功時は `refined_text`、それ以外は `raw_text` に一致 |
+| `final_text` | string | 実際に挿入した（しようとした）テキスト。成功時は `refined_text`、それ以外は `raw_text` に一致（**追補・`docs/design/49-dictation-filler-strip.md`**: `dictation.strip_fillers` がオンのとき、成功時以外は `raw_text` からフィラーを除いたテキストになる。`raw_text` は発話どおり） |
 | `refine_outcome` | string | `"success"` / `"fallback"` / `"disabled"` |
 | `refine_error` | string? | `fallback` 時の失敗理由（例: `"missingAPIKey"`, `"timedOut(3.0 seconds)"`）。他は `null` |
 | `insert_outcome` | string | `"inserted"` / `"aborted_and_stashed"`（DH11） |

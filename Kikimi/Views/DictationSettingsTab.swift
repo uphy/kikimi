@@ -76,6 +76,9 @@ struct DictationSettingsTab: View {
                     accessibilityHint
                 }
 
+                Toggle("「えっと」などのフィラーを取り除く", isOn: stripFillersBinding)
+                    .help("「えっと」「えーと」と、文や節の頭の「え、」「ええ、」を挿入前に取り除きます。LLMは使わず、待ち時間は増えません")
+
                 Toggle("LLMで整形する", isOn: refineBinding)
                     .help("フィラー除去・句読点補完をしてから挿入します（約1秒の待ち時間が発生します）")
 
@@ -218,6 +221,13 @@ struct DictationSettingsTab: View {
         Binding(
             get: { appConfig.data.dictation.batchModel },
             set: { newValue in appConfig.update { $0.dictation.batchModel = newValue } }
+        )
+    }
+
+    private var stripFillersBinding: Binding<Bool> {
+        Binding(
+            get: { appConfig.data.dictation.stripFillers },
+            set: { newValue in appConfig.update { $0.dictation.stripFillers = newValue } }
         )
     }
 
