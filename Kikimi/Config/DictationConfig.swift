@@ -217,6 +217,11 @@ struct DictationConfig: Codable, Equatable, Sendable {
     /// refinement/insertion. `true` by default -- the rules only fire where no meaningful reading
     /// exists, so there is nothing for an opt-in to protect.
     var stripFillers: Bool
+    /// `docs/design/51-dictation-silence-skip.md` SS7: whether long silences are cut out of the
+    /// samples handed to the key-up batch re-decode (VAD-based). `true` by default -- it only
+    /// changes how long the user waits after releasing the key; the streaming text, the history
+    /// WAV and `duration_ms` are untouched (SS2).
+    var skipSilence: Bool
     /// D2 scope: LLM post-processing toggle. Always effectively `false` in D1 (no `DictationRefiner`
     /// exists yet), kept here so `config.yaml` round-trips the full section from day one.
     var refine: Bool
@@ -245,6 +250,7 @@ struct DictationConfig: Codable, Equatable, Sendable {
         case twoPassDecode = "two_pass_decode"
         case batchModel = "batch_model"
         case stripFillers = "strip_fillers"
+        case skipSilence = "skip_silence"
         case refine
         case model
         case refineTimeoutMs = "refine_timeout_ms"
@@ -278,6 +284,7 @@ struct DictationConfig: Codable, Equatable, Sendable {
         twoPassDecode: Bool = true,
         batchModel: String = SttConfig.parakeetBatchModel,
         stripFillers: Bool = true,
+        skipSilence: Bool = true,
         refine: Bool,
         model: String,
         refineTimeoutMs: Int,
@@ -291,6 +298,7 @@ struct DictationConfig: Codable, Equatable, Sendable {
         self.twoPassDecode = twoPassDecode
         self.batchModel = batchModel
         self.stripFillers = stripFillers
+        self.skipSilence = skipSilence
         self.refine = refine
         self.model = model
         self.refineTimeoutMs = refineTimeoutMs
@@ -341,6 +349,7 @@ struct DictationConfig: Codable, Equatable, Sendable {
             batchModel = Self.default.batchModel
         }
         stripFillers = try container.decodeIfPresent(Bool.self, forKey: .stripFillers) ?? Self.default.stripFillers
+        skipSilence = try container.decodeIfPresent(Bool.self, forKey: .skipSilence) ?? Self.default.skipSilence
         refine = try container.decodeIfPresent(Bool.self, forKey: .refine) ?? Self.default.refine
         model = try container.decodeIfPresent(String.self, forKey: .model) ?? Self.default.model
 

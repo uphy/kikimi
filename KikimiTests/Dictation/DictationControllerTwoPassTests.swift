@@ -76,6 +76,21 @@ private actor FakeTwoPassSttBackend: SttStreamingBackend {
 
 private struct TwoPassTestStubError: Error {}
 
+// MARK: - FakeSpeechDetector
+
+/// Silero-free stand-in for `DictationSpeechDetecting` (design 51 §4): returns canned per-frame
+/// probabilities, or throws.
+private struct FakeSpeechDetector: DictationSpeechDetecting {
+    let frameSampleCount: Int
+    let result: Result<[Float], TwoPassTestStubError>
+
+    func warm() async {}
+
+    func speechProbabilities(samples: [Float]) async throws -> [Float] {
+        try result.get()
+    }
+}
+
 // MARK: - DictationControllerTwoPassTests
 
 /// `docs/design/31-dictation-two-pass-decode.md` §7's layer-1 "`DictationController` 配線" list:
@@ -87,13 +102,14 @@ struct DictationControllerTwoPassTests {
     /// One second of silence -- comfortably above `DictationBatchTranscriber.minimumSampleCount`.
     private static let oneSecondOfSamples = [Float](repeating: 0, count: 16_000)
 
-    private func makeConfig(twoPassDecode: Bool = true) -> DictationConfig {
+    private func makeConfig(twoPassDecode: Bool = true, skipSilence: Bool = true) -> DictationConfig {
         DictationConfig(
             enabled: true,
             insertMethod: .pasteboard,
             micDeviceUID: "",
             language: "",
             twoPassDecode: twoPassDecode,
+            skipSilence: skipSilence,
             refine: false,
             model: "",
             refineTimeoutMs: 3_000
@@ -105,7 +121,8 @@ struct DictationControllerTwoPassTests {
         historyStore: any DictationHistoryStoring,
         batchTranscriberFactory: @escaping (String, String) async throws -> any DictationBatchTranscribing = { _, _ in
             throw TwoPassTestStubError()
-        }
+        },
+        speechDetector: (any DictationSpeechDetecting)? = nil
     ) -> DictationController {
         DictationController(
             dictationConfigProvider: { config },
@@ -131,7 +148,8 @@ struct DictationControllerTwoPassTests {
             // write against whatever app is frontmost while this test suite runs.
             inserterFactory: { SpyDictationInserter() },
             // No trailing-capture wait in tests (word-drop fix 1's default is 280ms in production).
-            trailingCaptureDelayMs: 0
+            trailingCaptureDelayMs: 0,
+            speechDetector: speechDetector
         )
     }
 
@@ -209,6 +227,59 @@ struct DictationControllerTwoPassTests {
         #expect(entry.finalText == "今日はレグ環境の構築を行います")
         let sampleCounts = await batch.transcribeCallSampleCounts
         #expect(sampleCounts == [16_000])
+    }
+
+    // MARK: - Silence skip (design 51)
+
+    /// 20s of audio in 1s frames: speech only in frames 0 and 19, silence between.
+    private static let twentySeconds = [Float](repeating: 0.1, count: 320_000)
+    private static let speechAtBothEnds: [Float] = [0.9] + [Float](repeating: 0, count: 18) + [0.9]
+
+    private func batchSampleCount(
+        skipSilence: Bool,
+        detector: (any DictationSpeechDetecting)?
+    ) async throws -> [Int] {
+        let store = FakeTwoPassHistoryStore()
+        let controller = makeController(
+            config: makeConfig(skipSilence: skipSilence), historyStore: store, speechDetector: detector)
+        let batch = FakeBatchTranscriber(text: "テスト")
+        try await driveUtterance(
+            controller: controller,
+            store: store,
+            streamingText: "テスト",
+            batchTranscriber: batch,
+            recordedSamples: Self.twentySeconds,
+            entryId: "entry-silence"
+        )
+        return await batch.transcribeCallSampleCounts
+    }
+
+    @Test("SS1: the batch decoder receives the utterance with the long silence cut out")
+    func silenceIsCutBeforeBatchDecode() async throws {
+        let detector = FakeSpeechDetector(frameSampleCount: 16_000, result: .success(Self.speechAtBothEnds))
+        // Two 1s frames padded by 0.3s inward (outer padding clamps at the audio ends) + 0.3s gap.
+        let counts = try await batchSampleCount(skipSilence: true, detector: detector)
+        #expect(counts == [2 * (16_000 + 4_800) + 4_800])
+    }
+
+    @Test("SS7: skip_silence off decodes the whole utterance")
+    func skipSilenceOffDecodesEverything() async throws {
+        let detector = FakeSpeechDetector(frameSampleCount: 16_000, result: .success(Self.speechAtBothEnds))
+        let counts = try await batchSampleCount(skipSilence: false, detector: detector)
+        #expect(counts == [320_000])
+    }
+
+    @Test("SS6 (3): a VAD failure decodes the whole utterance")
+    func vadFailureDecodesEverything() async throws {
+        let detector = FakeSpeechDetector(frameSampleCount: 16_000, result: .failure(TwoPassTestStubError()))
+        let counts = try await batchSampleCount(skipSilence: true, detector: detector)
+        #expect(counts == [320_000])
+    }
+
+    @Test("no detector (the init default) decodes the whole utterance")
+    func noDetectorDecodesEverything() async throws {
+        let counts = try await batchSampleCount(skipSilence: true, detector: nil)
+        #expect(counts == [320_000])
     }
 
     @Test("a batch decode failure falls back to the streaming text with no diagnostic")
